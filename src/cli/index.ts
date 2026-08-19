@@ -1,15 +1,19 @@
 /**
- * Phase-1 stub dispatcher: just enough to run one chain end-to-end so the
- * de-Bun port can be verified against the old Bun+pi golden master. This
- * gets replaced (not extended) once the real command surface — list,
- * sessions, phases, events, ui, init, doctor, etc. — lands.
+ * Phase-2 stub dispatcher: still just enough to run one chain end-to-end for
+ * verification — now building a real ChainContext through the resolved
+ * workspace anchor instead of threading raw strings. Gets replaced (not
+ * extended) once the real command surface — list, sessions, phases, events,
+ * ui, init, doctor, etc. — lands.
  *
- * Usage: sf <chain-name> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>]
+ * Usage: sf <chain-name> "<prompt or path/to/prompt.md>"
+ *          [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
  *   <chain-name> is an adw_*.ts file's basename minus the "adw_" prefix,
  *   e.g. "scout" -> chains/adw_scout.ts, "plan_build_test" -> chains/adw_plan_build_test.ts.
  */
 
+import * as paths from "../core/paths.ts";
 import { parseCli, resolvePrompt } from "../core/utils.ts";
+import type { ChainContext } from "../chains/context.ts";
 
 export async function main(): Promise<void> {
   try {
@@ -20,20 +24,20 @@ export async function main(): Promise<void> {
 
   const [chainArg, ...rest] = process.argv.slice(2);
   if (!chainArg) {
-    console.error("usage: sf <chain-name> \"<prompt>\" [--config <path>] [--adw-id <id>]");
+    console.error('usage: sf <chain-name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]');
     process.exitCode = 1;
     return;
   }
 
-  const { positionals, options } = parseCli(rest, ["config", "adw-id"]);
+  const { positionals, options } = parseCli(rest, ["config", "adw-id", "cwd", "agent", "base"]);
   if (positionals.length < 1) {
-    console.error("usage: sf <chain-name> \"<prompt>\" [--config <path>] [--adw-id <id>]");
+    console.error('usage: sf <chain-name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]');
     process.exitCode = 1;
     return;
   }
 
   const moduleName = `adw_${chainArg}.js`;
-  let chain: { main: (prompt: string, config?: string, adwId?: string | null) => Promise<number> };
+  let chain: { main: (ctx: ChainContext, options?: Record<string, string>) => Promise<number> };
   try {
     chain = await import(`../chains/${moduleName}`);
   } catch {
@@ -42,12 +46,20 @@ export async function main(): Promise<void> {
     return;
   }
 
-  const prompt = resolvePrompt(positionals[0]);
-  const adwId = options["adw-id"] ?? null;
+  const anchor = paths.resolveAnchor(options["cwd"]);
+  const ctx: ChainContext = {
+    prompt: resolvePrompt(positionals[0]),
+    config_path: paths.resolveConfigPath(anchor, options["config"]),
+    adw_id: options["adw-id"] ?? null,
+    cwd: anchor.cwd,
+  };
+
+  const chainOptions: Record<string, string> = {};
+  if (options["agent"] !== undefined) chainOptions["agent"] = options["agent"];
+  if (options["base"] !== undefined) chainOptions["base"] = options["base"];
 
   try {
-    // passing `undefined` for a defaulted parameter correctly triggers its default
-    process.exitCode = await chain.main(prompt, options["config"], adwId);
+    process.exitCode = await chain.main(ctx, chainOptions);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

@@ -7,6 +7,7 @@
  */
 
 import path from "node:path";
+import * as paths from "./paths.ts";
 import { Run } from "./runner.ts";
 import { Tracer } from "./tracer.ts";
 import type { SFConfig } from "./data_types.ts";
@@ -31,10 +32,25 @@ function finalizeWhenKilled(run: Run): void {
   process.on("SIGINT", handler);
 }
 
-export function ensure(cfg: SFConfig, adwId?: string | null): Run {
+/**
+ * `cwd` anchors this run's repo_root and data_dir — it is NOT where the
+ * process happened to start; it is an explicit decision, threaded down from
+ * the CLI/chain context. Defaults to `process.cwd()` only for direct callers
+ * (tests, scratch scripts) that have no anchor of their own to pass.
+ */
+export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string): Run {
   const id = adwId || newId(8);
-  const tracer = new Tracer(cfg.observability.db, path.join(cfg.defaults.data_dir, "sessions", id, "events.jsonl"));
-  const run = new Run(cfg, id, tracer, engineerName());
+  const anchor = paths.resolveAnchor(cwd);
+  const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
+  const tracer = new Tracer(dataPaths.db_path, path.join(dataPaths.sessions_dir, id, "events.jsonl"));
+  const run = new Run({
+    cfg,
+    adwId: id,
+    tracer,
+    engineer: engineerName(),
+    repoRoot: anchor.repo_root,
+    dataDir: dataPaths.data_dir,
+  });
   const scriptPath = process.argv[1] || "adw";
   const adwName = path.basename(scriptPath, path.extname(scriptPath));
   tracer.sessionStart(id, run.engineer, adwName);

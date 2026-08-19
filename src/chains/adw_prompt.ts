@@ -10,16 +10,14 @@
 import * as agents from "../core/agents.ts";
 import * as session from "../core/session.ts";
 import { GenericOutput, makeAgentCall, makePhaseParams } from "../core/data_types.ts";
+import type { ChainContext } from "./context.ts";
 
-export async function main(
-  prompt: string,
-  agent: string = "builder",
-  config: string = "adws/adw_sf_config/sf.config.yaml",
-  adwId: string | null = null,
-): Promise<number> {
-  const cfg = agents.loadConfig(config);
+export async function main(ctx: ChainContext, options: { agent?: string } = {}): Promise<number> {
+  const { prompt, config_path, adw_id, cwd } = ctx;
+  const agent = options.agent ?? "builder";
+  const cfg = agents.loadConfig(config_path);
   agents.validate(cfg, [agent]);
-  const run = session.ensure(cfg, adwId);
+  const run = session.ensure(cfg, adw_id, cwd);
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
     ph.log({ input: prompt });

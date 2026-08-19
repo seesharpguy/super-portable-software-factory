@@ -7,44 +7,75 @@
  * says WHAT it verified instead of only that it passed.
  *
  * Gates check what is mechanically checkable; plan quality is a reviewer's job.
+ *
+ * An envelope's artifact/file paths are the AGENT's claims, and the agent runs
+ * with `run.repo_root` as its cwd — so a relative claim is resolved against
+ * that root, never against this process's own cwd. A claim that resolves
+ * outside the repo entirely is reported as a violation rather than silently
+ * stat'd (or not found) somewhere unexpected.
  */
 
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { GateReport, type EnvelopeBase, type GateFn, type RunContext } from "./data_types.ts";
+import { operatorEnv } from "./utils.ts";
 
 const TAIL_CHARS = 1000; // command output kept as evidence on a failure
+
+/**
+ * Anchor an envelope-declared path to `run.repo_root`. Absolute paths pass
+ * through unchanged (an agent that reports an absolute path meant exactly
+ * that path). Returns `null` when the resolved path escapes the repo — a
+ * gate should report that as a violation, not silently check outside it.
+ */
+function resolveClaim(p: string, run: RunContext): string | null {
+  const resolved = path.isAbsolute(p) ? p : path.resolve(run.repo_root, p);
+  const rel = path.relative(run.repo_root, resolved);
+  if (rel === "..") return null;
+  if (rel.startsWith(`..${path.sep}`)) return null;
+  return resolved;
+}
 
 function size(p: string): string {
   const n = statSync(p).size;
   return n < 1024 ? `${n}B` : `${(n / 1024).toFixed(1)}KB`;
 }
 
-export function artifactsExist(envelope: EnvelopeBase, _run: RunContext): GateReport {
+export function artifactsExist(envelope: EnvelopeBase, run: RunContext): GateReport {
   const report = new GateReport();
   for (const a of envelope.artifacts) {
-    const exists = existsSync(a);
-    report.check(a, exists, exists ? `exists, ${size(a)}` : "declared artifact does not exist");
+    const resolved = resolveClaim(a, run);
+    if (resolved === null) {
+      report.check(a, false, `declared artifact resolves outside the repo (${run.repo_root})`);
+      continue;
+    }
+    const exists = existsSync(resolved);
+    report.check(a, exists, exists ? `exists, ${size(resolved)}` : "declared artifact does not exist");
   }
   return report;
 }
 
-export function filesNonEmpty(envelope: EnvelopeBase, _run: RunContext): GateReport {
+export function filesNonEmpty(envelope: EnvelopeBase, run: RunContext): GateReport {
   const report = new GateReport();
   for (const a of envelope.artifacts) {
-    if (!existsSync(a) || !statSync(a).isFile()) continue; // existence is artifactsExist's job
-    const empty = statSync(a).size === 0;
-    report.check(a, !empty, empty ? "declared artifact is empty" : size(a));
+    const resolved = resolveClaim(a, run);
+    if (resolved === null) continue; // artifactsExist's job to report the escape
+    if (!existsSync(resolved) || !statSync(resolved).isFile()) continue; // existence is artifactsExist's job
+    const empty = statSync(resolved).size === 0;
+    report.check(a, !empty, empty ? "declared artifact is empty" : size(resolved));
   }
   return report;
 }
 
-export function jsonParses(envelope: EnvelopeBase, _run: RunContext): GateReport {
+export function jsonParses(envelope: EnvelopeBase, run: RunContext): GateReport {
   const report = new GateReport();
   for (const a of envelope.artifacts) {
-    if (!a.endsWith(".json") || !existsSync(a)) continue;
+    if (!a.endsWith(".json")) continue;
+    const resolved = resolveClaim(a, run);
+    if (resolved === null || !existsSync(resolved)) continue;
     try {
-      const parsed = JSON.parse(readFileSync(a, "utf-8"));
+      const parsed = JSON.parse(readFileSync(resolved, "utf-8"));
       const kind = Array.isArray(parsed) ? "list" : typeof parsed === "object" && parsed !== null ? "dict" : typeof parsed;
       report.check(a, true, `parses, ${kind}`);
     } catch (error) {
@@ -55,12 +86,17 @@ export function jsonParses(envelope: EnvelopeBase, _run: RunContext): GateReport
 }
 
 /** Every file claimed changed must exist on disk. */
-export function diffMatchesClaims(envelope: EnvelopeBase, _run: RunContext): GateReport {
+export function diffMatchesClaims(envelope: EnvelopeBase, run: RunContext): GateReport {
   const report = new GateReport();
   const changedFiles = ((envelope as any).changed_files as string[] | undefined) ?? [];
   for (const f of changedFiles) {
-    const exists = existsSync(f);
-    report.check(f, exists, exists ? `exists, ${size(f)}` : "claimed changed file does not exist");
+    const resolved = resolveClaim(f, run);
+    if (resolved === null) {
+      report.check(f, false, `claimed changed file resolves outside the repo (${run.repo_root})`);
+      continue;
+    }
+    const exists = existsSync(resolved);
+    report.check(f, exists, exists ? `exists, ${size(resolved)}` : "claimed changed file does not exist");
   }
   return report;
 }
@@ -108,10 +144,10 @@ export function verdictConsistent(envelope: EnvelopeBase, _run: RunContext): Gat
   return report;
 }
 
-/** Gate factory: the given shell command must exit 0. */
+/** Gate factory: the given shell command must exit 0, run from run.repo_root. */
 export function testsPass(command: string): GateFn {
-  const gate: GateFn = (_envelope, _run) => {
-    const result = spawnSync(command, { shell: true, encoding: "utf-8" });
+  const gate: GateFn = (_envelope, run) => {
+    const result = spawnSync(command, { shell: true, encoding: "utf-8", cwd: run.repo_root, env: operatorEnv() });
     const ok = result.status === 0;
     let note = `exit ${result.status}`;
     if (!ok) {

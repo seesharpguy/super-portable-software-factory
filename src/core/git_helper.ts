@@ -1,9 +1,19 @@
-/** Low-level git operations for code phases. All low-level logic lives in core/. */
+/**
+ * Low-level git operations for code phases. All low-level logic lives in core/.
+ *
+ * Two discovery functions (`isRepoAt`, `findRepoRoot`) take an explicit `cwd`
+ * because they are how a repo root gets established in the first place —
+ * nothing has one yet to bind to. Everything else is repo-root-bound: call
+ * `makeGit(repoRoot)` once you have that root, and every operation it returns
+ * runs there, never against `process.cwd()`. This is deliberate — the ADW
+ * process's cwd and the repo it is operating on are two different things,
+ * and conflating them is exactly the anchor bug this factory exists to close.
+ */
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
-function git(args: string[], cwd?: string): string {
+function git(args: string[], cwd: string): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${(result.stderr || "").trim()}`);
@@ -11,116 +21,128 @@ function git(args: string[], cwd?: string): string {
   return result.stdout.trim();
 }
 
-export function currentBranch(): string {
-  return git(["rev-parse", "--abbrev-ref", "HEAD"]);
-}
-
-export function createBranch(name: string): string {
-  git(["checkout", "-b", name]);
-  return name;
-}
-
-export function isRepo(): boolean {
-  const result = spawnSync("git", ["rev-parse", "--git-dir"], { encoding: "utf-8" });
+/** True when `cwd` is inside a git working tree. Never throws — this is a question. */
+export function isRepoAt(cwd: string): boolean {
+  const result = spawnSync("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf-8" });
   return result.status === 0;
 }
 
 /**
- * Absolute root of the codebase — where agents are spawned to work.
- *
- * The git toplevel when there is one, else the process cwd (ADWs run fine in a
- * non-git dir; only a commit phase requires a repo). Always absolute, so it is
- * safe to hand to a subprocess regardless of where the ADW was launched from.
+ * Absolute root of the git repo containing `cwd`, or `cwd` itself if it is
+ * not inside one — ADWs run fine in a non-git dir; only a commit phase
+ * requires a repo. Always absolute, so it is safe to hand to a subprocess
+ * regardless of where the ADW was launched from.
  */
-export function repoRoot(): string {
-  if (isRepo()) {
-    return path.resolve(git(["rev-parse", "--show-toplevel"]));
+export function findRepoRoot(cwd: string): string {
+  if (isRepoAt(cwd)) {
+    return path.resolve(git(["rev-parse", "--show-toplevel"], cwd));
   }
-  return path.resolve(process.cwd());
+  return path.resolve(cwd);
 }
 
-/** Stage the working tree and commit it. Returns the new short sha. */
-export function commitAll(message: string): string {
-  if (!isRepo()) {
-    throw new Error(
-      "not a git repository — a commit phase needs one. Run `git init` in the " +
-        "repo root (and make a first commit) before running an ADW that commits.",
-    );
-  }
-  git(["add", "-A"]);
-  if (!git(["status", "--porcelain"])) {
-    throw new Error("nothing to commit — the preceding phases changed no files");
-  }
-  git(["commit", "-m", message]);
-  return git(["rev-parse", "--short", "HEAD"]);
+export interface GitHandle {
+  currentBranch(): string;
+  createBranch(name: string): string;
+  isRepo(): boolean;
+  /** Stage the working tree and commit it. Returns the new short sha. */
+  commitAll(message: string): string;
+  changedFiles(): string[];
+  /** True when `ref` resolves to a commit. Never throws — this is a question. */
+  refExists(ref: string): boolean;
+  rev(ref?: string): string;
+  shortSha(ref?: string): string;
+  /**
+   * The commit where `ref` and `other` diverged — the honest base of a branch.
+   *
+   * On the base branch itself this returns HEAD, which makes the diff exactly
+   * "what is not committed yet". Off it, the diff is the whole branch plus the
+   * working tree. One command covers both cases, so no caller has to branch on it.
+   */
+  mergeBase(ref: string, other?: string): string;
+  isDirty(): boolean;
+  untrackedFiles(): string[];
+  /** Tracked files that differ between `base` and the working tree. */
+  diffFiles(base: string): string[];
+  diffStat(base: string): string;
+  /** [insertions, deletions] across the diff. Binary files count as neither. */
+  diffCounts(base: string): [number, number];
+  diffText(base: string): string;
 }
 
-export function changedFiles(): string[] {
-  const out = git(["status", "--porcelain"]);
-  return out.split("\n").filter(Boolean).map((line) => line.slice(3));
-}
+/** Every operation this returns is bound to `repoRoot` — never `process.cwd()`. */
+export function makeGit(repoRoot: string): GitHandle {
+  const run = (args: string[]) => git(args, repoRoot);
 
-// ── diff plumbing (composed into a ChangeSet by changes.ts) ──────────────────
+  return {
+    currentBranch: () => run(["rev-parse", "--abbrev-ref", "HEAD"]),
 
-/** True when `ref` resolves to a commit. Never raises — this is a question. */
-export function refExists(ref: string): boolean {
-  const result = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
-    encoding: "utf-8",
-  });
-  return result.status === 0;
-}
+    createBranch: (name) => {
+      run(["checkout", "-b", name]);
+      return name;
+    },
 
-export function rev(ref: string = "HEAD"): string {
-  return git(["rev-parse", ref]);
-}
+    isRepo: () => isRepoAt(repoRoot),
 
-export function shortSha(ref: string = "HEAD"): string {
-  return git(["rev-parse", "--short", ref]);
-}
+    commitAll: (message) => {
+      if (!isRepoAt(repoRoot)) {
+        throw new Error(
+          "not a git repository — a commit phase needs one. Run `git init` in the " +
+            "repo root (and make a first commit) before running an ADW that commits.",
+        );
+      }
+      run(["add", "-A"]);
+      if (!run(["status", "--porcelain"])) {
+        throw new Error("nothing to commit — the preceding phases changed no files");
+      }
+      run(["commit", "-m", message]);
+      return run(["rev-parse", "--short", "HEAD"]);
+    },
 
-/**
- * The commit where `ref` and `other` diverged — the honest base of a branch.
- *
- * On the base branch itself this returns HEAD, which makes the diff exactly
- * "what is not committed yet". Off it, the diff is the whole branch plus the
- * working tree. One command covers both cases, so no ADW has to branch on it.
- */
-export function mergeBase(ref: string, other: string = "HEAD"): string {
-  return git(["merge-base", ref, other]);
-}
+    changedFiles: () => {
+      const out = run(["status", "--porcelain"]);
+      return out.split("\n").filter(Boolean).map((line) => line.slice(3));
+    },
 
-export function isDirty(): boolean {
-  return Boolean(git(["status", "--porcelain"]));
-}
+    refExists: (ref) => {
+      const result = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+      });
+      return result.status === 0;
+    },
 
-export function untrackedFiles(): string[] {
-  const out = git(["ls-files", "--others", "--exclude-standard"]);
-  return out.split("\n").filter(Boolean);
-}
+    rev: (ref = "HEAD") => run(["rev-parse", ref]),
 
-/** Tracked files that differ between `base` and the working tree. */
-export function diffFiles(base: string): string[] {
-  const out = git(["diff", "--name-only", base]);
-  return out.split("\n").filter(Boolean);
-}
+    shortSha: (ref = "HEAD") => run(["rev-parse", "--short", ref]),
 
-export function diffStat(base: string): string {
-  return git(["diff", "--stat", base]);
-}
+    mergeBase: (ref, other = "HEAD") => run(["merge-base", ref, other]),
 
-/** [insertions, deletions] across the diff. Binary files count as neither. */
-export function diffCounts(base: string): [number, number] {
-  let insertions = 0;
-  let deletions = 0;
-  for (const line of git(["diff", "--numstat", base]).split("\n")) {
-    if (!line) continue;
-    const [added, removed] = line.split("\t");
-    if (/^\d+$/.test(added)) insertions += parseInt(added, 10);
-    if (/^\d+$/.test(removed)) deletions += parseInt(removed, 10);
-  }
-  return [insertions, deletions];
-}
+    isDirty: () => Boolean(run(["status", "--porcelain"])),
 
-export function diffText(base: string): string {
-  return git(["diff", base]);
+    untrackedFiles: () => {
+      const out = run(["ls-files", "--others", "--exclude-standard"]);
+      return out.split("\n").filter(Boolean);
+    },
+
+    diffFiles: (base) => {
+      const out = run(["diff", "--name-only", base]);
+      return out.split("\n").filter(Boolean);
+    },
+
+    diffStat: (base) => run(["diff", "--stat", base]),
+
+    diffCounts: (base) => {
+      let insertions = 0;
+      let deletions = 0;
+      for (const line of run(["diff", "--numstat", base]).split("\n")) {
+        if (!line) continue;
+        const [added, removed] = line.split("\t");
+        if (/^\d+$/.test(added)) insertions += parseInt(added, 10);
+        if (/^\d+$/.test(removed)) deletions += parseInt(removed, 10);
+      }
+      return [insertions, deletions];
+    },
+
+    diffText: (base) => run(["diff", base]),
+  };
 }

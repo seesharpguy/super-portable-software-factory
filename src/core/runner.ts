@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as agents from "./agents.ts";
-import * as gitHelper from "./git_helper.ts";
+import { makeGit, type GitHandle } from "./git_helper.ts";
 import { Console } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import { makeEventRecord, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
@@ -56,6 +56,17 @@ class PhaseHandleImpl implements PhaseHandle {
   }
 }
 
+export interface RunInit {
+  cfg: SFConfig;
+  adwId: string;
+  tracer: Tracer;
+  engineer: string;
+  /** Absolute. Resolved once, upstream, by paths.resolveAnchor(). */
+  repoRoot: string;
+  /** Absolute. Resolved once, upstream, by paths.resolveDataPaths(). */
+  dataDir: string;
+}
+
 export class Run {
   cfg: SFConfig;
   adw_id: string;
@@ -65,22 +76,25 @@ export class Run {
   phases: Phase[] = [];
   tokens = 0;
   cost = 0;
-  repo_root: string; // where every agent is spawned to work
+  repo_root: string; // where every agent is spawned to work — always absolute
+  /** Every git operation for this run, bound to repo_root. Never call git_helper directly. */
+  git: GitHandle;
   session_dir: string;
   context_handoff_dir: string;
   agent_map: Record<string, AgentMapEntry>;
   private seq: number; // a joined run continues the sequence
   private agentMapPath: string;
 
-  constructor(cfg: SFConfig, adwId: string, tracer: Tracer, engineer: string) {
-    this.cfg = cfg;
-    this.adw_id = adwId;
-    this.tracer = tracer;
-    this.console = new Console(tracer, adwId);
-    this.engineer = engineer;
-    this.seq = tracer.maxPhaseSeq(adwId);
-    this.repo_root = gitHelper.repoRoot();
-    this.session_dir = ensureDir(path.join(cfg.defaults.data_dir, "sessions", adwId));
+  constructor(init: RunInit) {
+    this.cfg = init.cfg;
+    this.adw_id = init.adwId;
+    this.tracer = init.tracer;
+    this.console = new Console(init.tracer, init.adwId);
+    this.engineer = init.engineer;
+    this.seq = init.tracer.maxPhaseSeq(init.adwId);
+    this.repo_root = init.repoRoot;
+    this.git = makeGit(init.repoRoot);
+    this.session_dir = ensureDir(path.join(init.dataDir, "sessions", init.adwId));
     this.context_handoff_dir = ensureDir(path.join(this.session_dir, "context_handoff"));
     this.agentMapPath = path.join(this.session_dir, "agent_map.json");
     this.agent_map = existsSync(this.agentMapPath) ? JSON.parse(readFileSync(this.agentMapPath, "utf-8")) : {};

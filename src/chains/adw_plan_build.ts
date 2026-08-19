@@ -9,16 +9,17 @@
 
 import * as agents from "../core/agents.ts";
 import * as gates from "../core/gates.ts";
-import * as gitHelper from "../core/git_helper.ts";
 import * as session from "../core/session.ts";
 import { BuildOutput, PlanOutput, makeAgentCall, makePhaseParams } from "../core/data_types.ts";
+import type { ChainContext } from "./context.ts";
 
 const REQUIRED_AGENTS = ["planner", "builder"];
 
-export async function main(prompt: string, config: string = "adws/adw_sf_config/sf.config.yaml", adwId: string | null = null): Promise<number> {
-  const cfg = agents.loadConfig(config);
+export async function main(ctx: ChainContext): Promise<number> {
+  const { prompt, config_path, adw_id, cwd } = ctx;
+  const cfg = agents.loadConfig(config_path);
   agents.validate(cfg, REQUIRED_AGENTS);
-  const run = session.ensure(cfg, adwId);
+  const run = session.ensure(cfg, adw_id, cwd);
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
     ph.log({ input: prompt });
@@ -38,7 +39,7 @@ export async function main(prompt: string, config: string = "adws/adw_sf_config/
     makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Land the builder's changes, using the message it wrote" }),
     async (ph) => {
       const message = build.commit_message || `sf(${run.adw_id}): ${build.summary}`;
-      ph.log({ sha: gitHelper.commitAll(message), message });
+      ph.log({ sha: run.git.commitAll(message), message });
     },
   );
 
