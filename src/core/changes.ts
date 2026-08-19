@@ -16,6 +16,7 @@
 
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import * as v from "valibot";
 import { isRepoAt, type GitHandle } from "./git_helper.ts";
 import { BaseRef, ChangeSet, ChangesOutput, type ChangeCapture, type ChangesOutputT } from "./data_types.ts";
 
@@ -101,7 +102,7 @@ export function capture(run: RunLike, params: ChangeCapture): ChangeSet {
  */
 export function asEnvelope(changes: ChangeSet, notes: string = ""): ChangesOutputT {
   const total = changes.files.length + changes.untracked.length;
-  return ChangesOutput.schema.parse({
+  return v.parse(ChangesOutput.schema, {
     status: "success",
     summary: `${total} file(s) changed since ${changes.base.label} (+${changes.insertions} -${changes.deletions})`,
     artifacts: [changes.diff_path],

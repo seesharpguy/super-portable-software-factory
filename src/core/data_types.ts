@@ -6,10 +6,13 @@
  *
  * Every agent call declares a concrete output type — an envelope built with
  * envelopeType() — that its final JSON response is parsed against. No untyped
- * handoffs. Validation is zod's job here (Python's pydantic equivalent).
+ * handoffs. Validation is Valibot's job here (zod's/Python's pydantic
+ * equivalent) — chosen because Flue's own structured-output wiring is built
+ * on Valibot, so an envelope type doubles as the tool schema handed to it
+ * with no second definition.
  */
 
-import { z } from "zod";
+import * as v from "valibot";
 
 export type PhaseKind = "engineer" | "agent" | "code";
 export type PhaseStatus = "queued" | "running" | "success" | "fail";
@@ -17,12 +20,12 @@ export type PhaseStatus = "queued" | "running" | "success" | "fail";
 // ── Phases ────────────────────────────────────────────────────────────────────
 
 /** Everything run.phase() needs. Passed as one object, never loose params. */
-const PhaseParamsShape = z.object({
-  name: z.string(), // short id, unique within the run: "plan", "build"
-  kind: z.enum(["engineer", "agent", "code"]),
-  owner: z.string(), // engineer's name, "git", or an agent name from config
-  description: z.string(), // REQUIRED: what this phase does and why — see below
-  retries: z.number().int().default(0), // agent phases: gate-failure retries via continue
+const PhaseParamsShape = v.object({
+  name: v.string(), // short id, unique within the run: "plan", "build"
+  kind: v.picklist(["engineer", "agent", "code"]),
+  owner: v.string(), // engineer's name, "git", or an agent name from config
+  description: v.string(), // REQUIRED: what this phase does and why — see below
+  retries: v.optional(v.pipe(v.number(), v.integer()), 0), // agent phases: gate-failure retries via continue
 });
 
 /**
@@ -35,31 +38,35 @@ const PhaseParamsShape = z.object({
  * a blank one is. This is a construction-time error on purpose: it fires
  * before the phase opens, not after a run is already in the trace.
  */
-export const PhaseParamsSchema = PhaseParamsShape.transform((value, ctx) => {
-  const text = value.description.split(/\s+/).filter(Boolean).join(" ");
-  const name = value.name || "?";
-  if (!text) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `phase ${JSON.stringify(name)}: description is required — one sentence on what this ` +
-        `phase does and why. It is what the trace and the UI show.`,
-    });
-    return z.NEVER;
-  }
-  if (text.replace(/\.+$/, "").toLowerCase() === name.replace(/_/g, " ").toLowerCase()) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `phase ${JSON.stringify(name)}: description ${JSON.stringify(text)} only restates the phase name — ` +
-        `say what it does and why instead.`,
-    });
-    return z.NEVER;
-  }
-  return { ...value, description: text };
-});
-export type PhaseParams = z.infer<typeof PhaseParamsSchema>;
+export const PhaseParamsSchema = v.pipe(
+  PhaseParamsShape,
+  v.rawTransform(({ dataset, addIssue, NEVER }) => {
+    const value = dataset.value;
+    const text = value.description.split(/\s+/).filter(Boolean).join(" ");
+    const name = value.name || "?";
+    if (!text) {
+      addIssue({
+        message:
+          `phase ${JSON.stringify(name)}: description is required — one sentence on what this ` +
+          `phase does and why. It is what the trace and the UI show.`,
+      });
+      return NEVER;
+    }
+    if (text.replace(/\.+$/, "").toLowerCase() === name.replace(/_/g, " ").toLowerCase()) {
+      addIssue({
+        message:
+          `phase ${JSON.stringify(name)}: description ${JSON.stringify(text)} only restates the phase name — ` +
+          `say what it does and why instead.`,
+      });
+      return NEVER;
+    }
+    return { ...value, description: text };
+  }),
+);
+export type PhaseParams = v.InferOutput<typeof PhaseParamsSchema>;
 
-export function makePhaseParams(input: z.input<typeof PhaseParamsShape>): PhaseParams {
-  return PhaseParamsSchema.parse(input);
+export function makePhaseParams(input: v.InferInput<typeof PhaseParamsShape>): PhaseParams {
+  return v.parse(PhaseParamsSchema, input);
 }
 
 /** The persisted phase record — PhaseParams plus lifecycle. */
@@ -77,78 +84,78 @@ export interface Phase {
 
 // ── Envelopes (agent output types) ───────────────────────────────────────────
 
-const EnvelopeBaseShape = {
-  status: z.enum(["success", "fail"]),
-  summary: z.string().default(""),
-  artifacts: z.array(z.string()).default([]),
-  notes_for_next_agent: z.string().default(""),
+const EnvelopeBaseEntries = {
+  status: v.picklist(["success", "fail"]),
+  summary: v.optional(v.string(), ""),
+  artifacts: v.optional(v.array(v.string()), () => []),
+  notes_for_next_agent: v.optional(v.string(), ""),
 };
-export const EnvelopeBaseSchema = z.object(EnvelopeBaseShape);
-export type EnvelopeBase = z.infer<typeof EnvelopeBaseSchema>;
+export const EnvelopeBaseSchema = v.object(EnvelopeBaseEntries);
+export type EnvelopeBase = v.InferOutput<typeof EnvelopeBaseSchema>;
 
 export interface EnvelopeType<T> {
   name: string;
-  schema: z.ZodType<T>;
+  schema: v.GenericSchema<unknown, T>;
   fields: string[];
 }
 
-function envelopeType<Shape extends z.ZodRawShape>(name: string, shape: Shape) {
-  const schema = z.object({ ...EnvelopeBaseShape, ...shape });
-  return { name, schema, fields: Object.keys(schema.shape) } as EnvelopeType<z.infer<typeof schema>>;
+function envelopeType<Entries extends v.ObjectEntries>(name: string, entries: Entries) {
+  const schema = v.object({ ...EnvelopeBaseEntries, ...entries });
+  return { name, schema, fields: Object.keys(schema.entries) } as EnvelopeType<v.InferOutput<typeof schema>>;
 }
 
 export const GenericOutput = envelopeType("GenericOutput", {});
-export type GenericOutputT = z.infer<typeof GenericOutput.schema>;
+export type GenericOutputT = v.InferOutput<typeof GenericOutput.schema>;
 
 export const PlanOutput = envelopeType("PlanOutput", {
   // Subject for committing the PLAN — the spec file the planner wrote, not the
   // implementation it describes. Each agent's commit_message covers its own
   // work product, so a chain that commits per step never reuses one agent's
   // words for another agent's diff.
-  commit_message: z.string().default(""),
+  commit_message: v.optional(v.string(), ""),
 });
-export type PlanOutputT = z.infer<typeof PlanOutput.schema>;
+export type PlanOutputT = v.InferOutput<typeof PlanOutput.schema>;
 
 export const BuildOutput = envelopeType("BuildOutput", {
-  changed_files: z.array(z.string()).default([]),
-  commit_message: z.string().default(""), // consumed by the git commit phase
+  changed_files: v.optional(v.array(v.string()), () => []),
+  commit_message: v.optional(v.string(), ""), // consumed by the git commit phase
 });
-export type BuildOutputT = z.infer<typeof BuildOutput.schema>;
+export type BuildOutputT = v.InferOutput<typeof BuildOutput.schema>;
 
-export const ScoutFindingSchema = z.object({
-  file: z.string(),
-  note: z.string().default(""),
+export const ScoutFindingSchema = v.object({
+  file: v.string(),
+  note: v.optional(v.string(), ""),
 });
-export type ScoutFinding = z.infer<typeof ScoutFindingSchema>;
+export type ScoutFinding = v.InferOutput<typeof ScoutFindingSchema>;
 
 export const ScoutOutput = envelopeType("ScoutOutput", {
-  findings: z.array(ScoutFindingSchema).default([]),
+  findings: v.optional(v.array(ScoutFindingSchema), () => []),
 });
-export type ScoutOutputT = z.infer<typeof ScoutOutput.schema>;
+export type ScoutOutputT = v.InferOutput<typeof ScoutOutput.schema>;
 
 /** One thing the request (or plan) asked for, and whether it is there. */
-export const ReviewFindingSchema = z.object({
-  requirement: z.string(), // the ask, in the requester's words
-  met: z.boolean(),
-  evidence: z.string().default(""), // where it lives, or what is missing
+export const ReviewFindingSchema = v.object({
+  requirement: v.string(), // the ask, in the requester's words
+  met: v.boolean(),
+  evidence: v.optional(v.string(), ""), // where it lives, or what is missing
 });
-export type ReviewFinding = z.infer<typeof ReviewFindingSchema>;
+export type ReviewFinding = v.InferOutput<typeof ReviewFindingSchema>;
 
 /** Confirmation that what was built is what was asked for — not a test run. */
 export const ReviewOutput = envelopeType("ReviewOutput", {
-  approved: z.boolean().default(false),
-  findings: z.array(ReviewFindingSchema).default([]),
-  blocking: z.array(z.string()).default([]), // what must change before approval
+  approved: v.optional(v.boolean(), false),
+  findings: v.optional(v.array(ReviewFindingSchema), () => []),
+  blocking: v.optional(v.array(v.string()), () => []), // what must change before approval
 });
-export type ReviewOutputT = z.infer<typeof ReviewOutput.schema>;
+export type ReviewOutputT = v.InferOutput<typeof ReviewOutput.schema>;
 
 /** Where the write-up of a completed change landed. */
 export const DocumentOutput = envelopeType("DocumentOutput", {
-  document_path: z.string().default(""), // the doc in the repo, e.g. app_docs/<adw_id>_<slug>.md
-  documented_files: z.array(z.string()).default([]),
-  commit_message: z.string().default(""),
+  document_path: v.optional(v.string(), ""), // the doc in the repo, e.g. app_docs/<adw_id>_<slug>.md
+  documented_files: v.optional(v.array(v.string()), () => []),
+  commit_message: v.optional(v.string(), ""),
 });
-export type DocumentOutputT = z.infer<typeof DocumentOutput.schema>;
+export type DocumentOutputT = v.InferOutput<typeof DocumentOutput.schema>;
 
 // ── Deterministic quality blocks ─────────────────────────────────────────────
 
@@ -251,14 +258,14 @@ export class ChangeSet {
  * consumes it through the one door every agent handoff uses.
  */
 export const ChangesOutput = envelopeType("ChangesOutput", {
-  base: z.string().default(""), // "<ref> @ <commit> — <reason>"
-  changed_files: z.array(z.string()).default([]),
-  insertions: z.number().default(0),
-  deletions: z.number().default(0),
-  stat: z.string().default(""),
-  diff_path: z.string().default(""), // read this for the full diff
+  base: v.optional(v.string(), ""), // "<ref> @ <commit> — <reason>"
+  changed_files: v.optional(v.array(v.string()), () => []),
+  insertions: v.optional(v.number(), 0),
+  deletions: v.optional(v.number(), 0),
+  stat: v.optional(v.string(), ""),
+  diff_path: v.optional(v.string(), ""), // read this for the full diff
 });
-export type ChangesOutputT = z.infer<typeof ChangesOutput.schema>;
+export type ChangesOutputT = v.InferOutput<typeof ChangesOutput.schema>;
 
 /**
  * A deterministic result, shaped as an envelope so an agent can consume it.
@@ -269,10 +276,10 @@ export type ChangesOutputT = z.infer<typeof ChangesOutput.schema>;
  * the ADW script is the only thing that knows the difference.
  */
 export const VerifyOutput = envelopeType("VerifyOutput", {
-  passed: z.boolean().default(false),
-  failures: z.array(z.string()).default([]),
+  passed: v.optional(v.boolean(), false),
+  failures: v.optional(v.array(v.string()), () => []),
 });
-export type VerifyOutputT = z.infer<typeof VerifyOutput.schema>;
+export type VerifyOutputT = v.InferOutput<typeof VerifyOutput.schema>;
 
 // ── Agent calls ──────────────────────────────────────────────────────────────
 
@@ -337,22 +344,22 @@ export function makeAgentCall<T extends EnvelopeBase>(input: {
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-export const PromptEngineeringSchema = z.object({
-  system: z.string(), // path to system.md
-  user: z.string(), // path to user.md
+export const PromptEngineeringSchema = v.object({
+  system: v.string(), // path to system.md
+  user: v.string(), // path to user.md
 });
-export type PromptEngineering = z.infer<typeof PromptEngineeringSchema>;
+export type PromptEngineering = v.InferOutput<typeof PromptEngineeringSchema>;
 
-export const AgentConfigSchema = z.object({
-  name: z.string(),
-  coding_agent: z.enum(["pi", "claude_code"]).default("pi"),
-  model: z.string().default("google/gemini-3.6-flash"),
-  thinking: z.string().default("medium"), // off | minimal | low | medium | high | xhigh | max
-  color: z.string().default(""), // hex swatch for this agent's lane in the UI
-  purpose: z.string().default(""),
+export const AgentConfigSchema = v.object({
+  name: v.string(),
+  coding_agent: v.optional(v.picklist(["pi", "claude_code"]), "pi"),
+  model: v.optional(v.string(), "google/gemini-3.6-flash"),
+  thinking: v.optional(v.string(), "medium"), // off | minimal | low | medium | high | xhigh | max
+  color: v.optional(v.string(), ""), // hex swatch for this agent's lane in the UI
+  purpose: v.optional(v.string(), ""),
   prompt_engineering: PromptEngineeringSchema,
-  harness_engineering: z.array(z.string()).default([]),
-  tools: z.array(z.string()).nullable().optional(), // allowlist; undefined/null = all tools usable
+  harness_engineering: v.optional(v.array(v.string()), () => []),
+  tools: v.optional(v.nullable(v.array(v.string()))), // allowlist; undefined/null = all tools usable
   // What this agent may MODIFY in the repo, enforced in code after every call
   // (see core/permissions.ts). `tools` cannot express this: `bash` runs
   // anything and `write` reaches any path, so an agent's capability list is a
@@ -361,41 +368,37 @@ export const AgentConfigSchema = z.object({
   //   []        -> read-only: may modify nothing tracked
   //   [...]     -> only these. A trailing "/" means a directory prefix; a "*"
   //                makes it a glob; anything else is an exact path.
-  writes: z.array(z.string()).nullable().optional(),
+  writes: v.optional(v.nullable(v.array(v.string()))),
 });
-export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
-export const ConfigDefaultsSchema = z.object({
-  coding_agent: z.enum(["pi", "claude_code"]).default("pi"),
-  model: z.string().default("google/gemini-3.6-flash"),
-  thinking: z.string().default("medium"),
-  color: z.string().default(""),
-  harness_engineering: z.array(z.string()).default([]),
-  tools: z.array(z.string()).nullable().optional(), // roster-wide allowlist; unset = all tools usable
+export const ConfigDefaultsSchema = v.object({
+  coding_agent: v.optional(v.picklist(["pi", "claude_code"]), "pi"),
+  model: v.optional(v.string(), "google/gemini-3.6-flash"),
+  thinking: v.optional(v.string(), "medium"),
+  color: v.optional(v.string(), ""),
+  harness_engineering: v.optional(v.array(v.string()), () => []),
+  tools: v.optional(v.nullable(v.array(v.string()))), // roster-wide allowlist; unset = all tools usable
   // Off-limits to every agent that has not named them in its own `writes`.
   // The factory's own code is the default: an agent must not be able to edit
   // the machinery that decides whether its work passed.
-  protected_files: z.array(z.string()).default([
-    "adws/adw_modules/",
-    "adws/adw_sf_config/",
-    "adws/adw_*.ts",
-  ]),
-  data_dir: z.string().default("adws/adw_data"),
+  protected_files: v.optional(v.array(v.string()), () => ["adws/adw_modules/", "adws/adw_sf_config/", "adws/adw_*.ts"]),
+  data_dir: v.optional(v.string(), "adws/adw_data"),
 });
-export type ConfigDefaults = z.infer<typeof ConfigDefaultsSchema>;
+export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
-export const ObservabilityConfigSchema = z.object({
-  db: z.string().default("adws/adw_data/sf.db"),
-  poll_ms: z.number().default(500),
+export const ObservabilityConfigSchema = v.object({
+  db: v.optional(v.string(), "adws/adw_data/sf.db"),
+  poll_ms: v.optional(v.number(), 500),
 });
-export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
+export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
 
-export const SFConfigSchema = z.object({
-  defaults: ConfigDefaultsSchema.default({}),
-  observability: ObservabilityConfigSchema.default({}),
-  agents: z.array(AgentConfigSchema).default([]),
+export const SFConfigSchema = v.object({
+  defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
+  observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
+  agents: v.optional(v.array(AgentConfigSchema), () => []),
 });
-export type SFConfig = z.infer<typeof SFConfigSchema>;
+export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
 // ── Tracing ──────────────────────────────────────────────────────────────────
 
@@ -430,6 +433,8 @@ export function makeEventRecord(input: Partial<EventRecord> & { adw_id: string; 
 }
 
 // ── Pi coding agent interface ────────────────────────────────────────────────
+// (Renamed to Flue's vocabulary when agent_flue.ts replaces agent_pi.ts —
+// deliberately untouched in this pass, which is the zod->Valibot swap only.)
 
 /** Everything one non-interactive pi run needs. */
 export interface PiRequest {

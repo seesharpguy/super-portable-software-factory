@@ -11,6 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
+import * as v from "valibot";
 import * as agentPi from "./agent_pi.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
@@ -32,9 +33,31 @@ const JSON_FIX_ATTEMPTS = 2; // continue-with-correction attempts for malformed 
 
 export class GateFailure extends Error {}
 
+/**
+ * A ValiError's own `.message` is only its FIRST issue — fine for a quick
+ * console line, not for something a human has to act on or a model has to
+ * repair. `v.flatten()` gives every issue, keyed by field path; this renders
+ * that as one line per field. Any other error (e.g. JSON.parse's
+ * SyntaxError) falls back to its plain message, unchanged.
+ */
+function describeParseError(error: unknown): string {
+  if (!(error instanceof v.ValiError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const flat = v.flatten(error.issues);
+  const lines: string[] = [];
+  if (flat.root) lines.push(...flat.root);
+  if (flat.nested) {
+    for (const [field, messages] of Object.entries(flat.nested)) {
+      for (const message of messages ?? []) lines.push(`${field}: ${message}`);
+    }
+  }
+  return lines.length > 0 ? lines.join("; ") : error.message;
+}
+
 // ── config ───────────────────────────────────────────────────────────────────
 
-export function loadConfig(configPath: string = "adws/adw_sf_config/sf.config.yaml"): SFConfig {
+export function loadConfig(configPath: string): SFConfig {
   const raw = (parseYaml(readFileSync(configPath, "utf-8")) as Record<string, any>) || {};
   const defaults = raw.defaults || {};
   for (const agent of raw.agents || []) {
@@ -43,7 +66,11 @@ export function loadConfig(configPath: string = "adws/adw_sf_config/sf.config.ya
     }
     if (!("harness_engineering" in agent)) agent.harness_engineering = defaults.harness_engineering || [];
   }
-  return SFConfigSchema.parse(raw);
+  try {
+    return v.parse(SFConfigSchema, raw);
+  } catch (error) {
+    throw new Error(`invalid config at ${configPath}: ${describeParseError(error)}`);
+  }
 }
 
 export function resolve(cfg: SFConfig, name: string): AgentConfig {
@@ -375,18 +402,19 @@ async function parseWithRetries(
   for (let attempt = 1; attempt <= JSON_FIX_ATTEMPTS + 1; attempt++) {
     try {
       const payload = extractJson(current.text);
-      const envelope = call.output_type.schema.parse(payload) as EnvelopeBase;
+      const envelope = v.parse(call.output_type.schema, payload) as EnvelopeBase;
       return { envelope, attempt };
     } catch (error) {
+      const message = describeParseError(error);
       persistEnvelope(run, phase, phase.params.owner, call, null, attempt, false, current.text);
       if (attempt > JSON_FIX_ATTEMPTS) {
-        throw new Error(`${phase.params.owner} never produced valid ${call.output_type.name} JSON: ${(error as Error).message}`);
+        throw new Error(`${phase.params.owner} never produced valid ${call.output_type.name} JSON: ${message}`);
       }
-      run.console.retry(phase.params.owner, attempt, JSON_FIX_ATTEMPTS, `invalid ${call.output_type.name} JSON: ${(error as Error).message}`);
+      run.console.retry(phase.params.owner, attempt, JSON_FIX_ATTEMPTS, `invalid ${call.output_type.name} JSON: ${message}`);
       const fields = call.output_type.fields.join(", ");
       current = await send(
         `Your response was not valid JSON for the required structure ` +
-          `(${(error as Error).message}). Respond again with ONLY a JSON object with these ` +
+          `(${message}). Respond again with ONLY a JSON object with these ` +
           `fields: ${fields}. No prose, no code fences.`,
       );
     }

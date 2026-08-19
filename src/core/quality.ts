@@ -32,6 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import * as v from "valibot";
 import type {
   EventRecord,
   Phase,
@@ -242,7 +243,7 @@ export function runTests(run: RunLike): QualityResult {
  * script is the only thing that knows the difference.
  */
 export function asEnvelope(result: QualityResult, what: string): VerifyOutputT {
-  return VerifyOutput.schema.parse({
+  return v.parse(VerifyOutput.schema, {
     status: result.passed ? "success" : "fail",
     summary: result.passed
       ? `${what}: all ${result.checks.length} check(s) passed`
