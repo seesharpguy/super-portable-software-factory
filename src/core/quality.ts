@@ -200,6 +200,10 @@ export function typecheck(run: RunLike): QualityCheckResult {
 }
 
 export function build(run: RunLike): QualityCheckResult {
+  // @ts-expect-error — pre-existing: computed for the placeholder comment below
+  // but never passed through. `build()` is deleted entirely in the config-driven
+  // quality.ts rewrite (chains lose their hardcoded quality blocks), so this is
+  // left as-is rather than fixed in a file about to be replaced wholesale.
   const outputDir = path.join(checkDir(run, "build"), "bundle");
   return runCheck(
     {

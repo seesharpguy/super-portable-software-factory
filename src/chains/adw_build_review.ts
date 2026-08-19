@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * ADW Build Review — implement, then confirm it is what was asked for.
  *
@@ -17,16 +16,15 @@
  * the bounded revise loop has had its chances.
  */
 
-import * as agents from "./adw_modules/agents.ts";
-import * as gates from "./adw_modules/gates.ts";
-import * as session from "./adw_modules/session.ts";
-import { BuildOutput, ReviewOutput, makeAgentCall, makePhaseParams, type BuildOutputT, type ReviewOutputT } from "./adw_modules/data_types.ts";
-import { parseCli, resolvePrompt, runMain } from "./adw_modules/utils.ts";
+import * as agents from "../core/agents.ts";
+import * as gates from "../core/gates.ts";
+import * as session from "../core/session.ts";
+import { BuildOutput, ReviewOutput, makeAgentCall, makePhaseParams, type BuildOutputT, type ReviewOutputT } from "../core/data_types.ts";
 
 const REQUIRED_AGENTS = ["builder", "reviewer"];
 const MAX_REVISION_LOOPS = 3;
 
-async function main(prompt: string, config: string = "adws/adw_sf_config/sf.config.yaml", adwId: string | null = null): Promise<number> {
+export async function main(prompt: string, config: string = "adws/adw_sf_config/sf.config.yaml", adwId: string | null = null): Promise<number> {
   const cfg = agents.loadConfig(config);
   agents.validate(cfg, REQUIRED_AGENTS);
   const run = session.ensure(cfg, adwId);
@@ -71,13 +69,4 @@ async function main(prompt: string, config: string = "adws/adw_sf_config/sf.conf
   }
 
   return run.finish(review !== null && review.approved, `the reviewer never approved after ${MAX_REVISION_LOOPS} revision(s)`);
-}
-
-if (import.meta.main) {
-  const { positionals, options } = parseCli(process.argv.slice(2), ["config", "adw-id"]);
-  if (positionals.length < 1) {
-    console.error("usage: adw_build_review.ts <prompt or path/to/prompt.md> [--config <path>] [--adw-id <id>]");
-    process.exit(1);
-  }
-  runMain(() => main(resolvePrompt(positionals[0]), options["config"] ?? "adws/adw_sf_config/sf.config.yaml", options["adw-id"] ?? null));
 }

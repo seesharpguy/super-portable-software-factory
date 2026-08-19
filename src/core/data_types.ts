@@ -354,7 +354,7 @@ export const AgentConfigSchema = z.object({
   harness_engineering: z.array(z.string()).default([]),
   tools: z.array(z.string()).nullable().optional(), // allowlist; undefined/null = all tools usable
   // What this agent may MODIFY in the repo, enforced in code after every call
-  // (see adw_modules/permissions.ts). `tools` cannot express this: `bash` runs
+  // (see core/permissions.ts). `tools` cannot express this: `bash` runs
   // anything and `write` reaches any path, so an agent's capability list is a
   // statement of intent that nothing checks.
   //   undefined -> unrestricted, except the roster-wide `protected_files` paths

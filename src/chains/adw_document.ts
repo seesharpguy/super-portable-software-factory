@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * ADW Document — write up the work that was just done, from the diff.
  *
@@ -13,23 +12,22 @@
  * built, and the phase says so instead of paying an agent to discover it.
  *
  * `git diff` against `--base` (main by default) is what "the latest changes"
- * means here; see adw_modules/changes.ts for how the base commit is resolved on a
+ * means here; see core/changes.ts for how the base commit is resolved on a
  * branch, on main, and on a clean tree right after a chain committed.
  */
 
-import * as agents from "./adw_modules/agents.ts";
-import * as changes from "./adw_modules/changes.ts";
-import * as gates from "./adw_modules/gates.ts";
-import * as session from "./adw_modules/session.ts";
-import { DocumentOutput, makeAgentCall, makeChangeCapture, makePhaseParams } from "./adw_modules/data_types.ts";
-import { parseCli, resolvePrompt, runMain } from "./adw_modules/utils.ts";
+import * as agents from "../core/agents.ts";
+import * as changes from "../core/changes.ts";
+import * as gates from "../core/gates.ts";
+import * as session from "../core/session.ts";
+import { DocumentOutput, makeAgentCall, makeChangeCapture, makePhaseParams } from "../core/data_types.ts";
 
 const REQUIRED_AGENTS = ["documenter"];
 
 const DOCUMENT_NOTES =
   "Read diff_path in full before writing. Document only what the diff shows, then copy the write-up into app_docs/ as your task describes.";
 
-async function main(
+export async function main(
   prompt: string,
   base: string = "main",
   config: string = "adws/adw_sf_config/sf.config.yaml",
@@ -79,20 +77,4 @@ async function main(
   );
 
   return run.finish();
-}
-
-if (import.meta.main) {
-  const { positionals, options } = parseCli(process.argv.slice(2), ["base", "config", "adw-id"]);
-  if (positionals.length < 1) {
-    console.error("usage: adw_document.ts <prompt or path/to/prompt.md> [--base <ref>] [--config <path>] [--adw-id <id>]");
-    process.exit(1);
-  }
-  runMain(() =>
-    main(
-      resolvePrompt(positionals[0]),
-      options["base"] ?? "main",
-      options["config"] ?? "adws/adw_sf_config/sf.config.yaml",
-      options["adw-id"] ?? null,
-    ),
-  );
 }

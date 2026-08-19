@@ -6,7 +6,7 @@
  * WAL mode so the UI can read while ADW processes write.
  */
 
-import { Database } from "bun:sqlite";
+import { Database } from "./sqlite.ts";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { AgentConfig, EventRecord, GateReport, Phase } from "./data_types.ts";

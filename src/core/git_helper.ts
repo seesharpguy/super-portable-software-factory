@@ -1,4 +1,4 @@
-/** Low-level git operations for code phases. All low-level logic lives in adw_modules. */
+/** Low-level git operations for code phases. All low-level logic lives in core/. */
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";

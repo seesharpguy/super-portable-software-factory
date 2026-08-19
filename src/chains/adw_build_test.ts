@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * ADW Build Test — implement, then verify; failures flow back into the builder.
  *
@@ -7,7 +6,7 @@
  *
  * Phases: engineer(request) -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded]
  *
- * Testing is CODE. The suite's command is written down in adw_modules/quality.ts,
+ * Testing is CODE. The suite's command is written down in core/quality.ts,
  * so running it needs no judgement — only repairing it does. Failures reach the
  * builder as an envelope through `quality.asEnvelope`, which is the same door an
  * agent's report came through, so the repair loop is unchanged.
@@ -17,13 +16,12 @@
  * has had its chances.
  */
 
-import * as agents from "./adw_modules/agents.ts";
-import * as gates from "./adw_modules/gates.ts";
-import * as quality from "./adw_modules/quality.ts";
-import * as session from "./adw_modules/session.ts";
-import { BuildOutput, makeAgentCall, makePhaseParams, type BuildOutputT, type QualityResult } from "./adw_modules/data_types.ts";
-import { parseCli, resolvePrompt, runMain } from "./adw_modules/utils.ts";
-import type { PhaseHandle } from "./adw_modules/runner.ts";
+import * as agents from "../core/agents.ts";
+import * as gates from "../core/gates.ts";
+import * as quality from "../core/quality.ts";
+import * as session from "../core/session.ts";
+import { BuildOutput, makeAgentCall, makePhaseParams, type QualityResult } from "../core/data_types.ts";
+import type { PhaseHandle } from "../core/runner.ts";
 
 const REQUIRED_AGENTS = ["builder"];
 const MAX_FIX_LOOPS = 3;
@@ -33,7 +31,7 @@ function record(ph: PhaseHandle, result: QualityResult): void {
   ph.log({ passed: result.passed, checks: `${passed}/${result.checks.length}`, artifacts: result.artifacts.join(", ") });
 }
 
-async function main(prompt: string, config: string = "adws/adw_sf_config/sf.config.yaml", adwId: string | null = null): Promise<number> {
+export async function main(prompt: string, config: string = "adws/adw_sf_config/sf.config.yaml", adwId: string | null = null): Promise<number> {
   const cfg = agents.loadConfig(config);
   agents.validate(cfg, REQUIRED_AGENTS);
   const run = session.ensure(cfg, adwId);
@@ -42,7 +40,7 @@ async function main(prompt: string, config: string = "adws/adw_sf_config/sf.conf
     ph.log({ input: prompt });
   });
 
-  let previous: BuildOutputT = await run.phase(
+  await run.phase(
     makePhaseParams({ name: "build", kind: "agent", owner: "builder", description: "Implement the request" }),
     (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt, gates: [gates.diffMatchesClaims] })),
   );
@@ -65,7 +63,7 @@ async function main(prompt: string, config: string = "adws/adw_sf_config/sf.conf
 
     if (test.passed) break;
 
-    previous = await run.phase(
+    await run.phase(
       makePhaseParams({
         name: `fix_${i}`,
         kind: "agent",
@@ -86,13 +84,4 @@ async function main(prompt: string, config: string = "adws/adw_sf_config/sf.conf
   }
 
   return run.finish(test !== null && test.passed, `the suite still failed after ${MAX_FIX_LOOPS} fix attempt(s)`);
-}
-
-if (import.meta.main) {
-  const { positionals, options } = parseCli(process.argv.slice(2), ["config", "adw-id"]);
-  if (positionals.length < 1) {
-    console.error("usage: adw_build_test.ts <prompt or path/to/prompt.md> [--config <path>] [--adw-id <id>]");
-    process.exit(1);
-  }
-  runMain(() => main(resolvePrompt(positionals[0]), options["config"] ?? "adws/adw_sf_config/sf.config.yaml", options["adw-id"] ?? null));
 }

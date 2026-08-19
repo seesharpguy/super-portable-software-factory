@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * ADW Prompt — the smallest ADW: one agent, one prompt, traced end-to-end.
  *
@@ -8,12 +7,11 @@
  * Phases: engineer(request) -> <agent>
  */
 
-import * as agents from "./adw_modules/agents.ts";
-import * as session from "./adw_modules/session.ts";
-import { GenericOutput, makeAgentCall, makePhaseParams } from "./adw_modules/data_types.ts";
-import { parseCli, resolvePrompt, runMain } from "./adw_modules/utils.ts";
+import * as agents from "../core/agents.ts";
+import * as session from "../core/session.ts";
+import { GenericOutput, makeAgentCall, makePhaseParams } from "../core/data_types.ts";
 
-async function main(
+export async function main(
   prompt: string,
   agent: string = "builder",
   config: string = "adws/adw_sf_config/sf.config.yaml",
@@ -35,20 +33,4 @@ async function main(
   );
 
   return run.finish();
-}
-
-if (import.meta.main) {
-  const { positionals, options } = parseCli(process.argv.slice(2), ["agent", "config", "adw-id"]);
-  if (positionals.length < 1) {
-    console.error("usage: adw_prompt.ts <prompt or path/to/prompt.md> [--agent <name>] [--config <path>] [--adw-id <id>]");
-    process.exit(1);
-  }
-  runMain(() =>
-    main(
-      resolvePrompt(positionals[0]),
-      options["agent"] ?? "builder",
-      options["config"] ?? "adws/adw_sf_config/sf.config.yaml",
-      options["adw-id"] ?? null,
-    ),
-  );
 }
