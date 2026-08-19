@@ -50,7 +50,7 @@ export async function main(): Promise<void> {
   const anchor = paths.resolveAnchor(options["cwd"]);
   const ctx: ChainContext = {
     prompt: resolvePrompt(positionals[0]),
-    config_path: paths.resolveConfigPath(anchor, options["config"]),
+    config_paths: paths.resolveConfigPaths(anchor, options["config"]).paths,
     adw_id: options["adw-id"] ?? null,
     cwd: anchor.cwd,
   };

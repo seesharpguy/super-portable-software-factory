@@ -8,12 +8,13 @@
  * disposes.
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ConversationStreamChunk } from "@flue/runtime";
 import * as v from "valibot";
 import * as agentFlue from "./agent_flue.ts";
+import * as paths from "./paths.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
 import {
@@ -58,8 +59,44 @@ function describeParseError(error: unknown): string {
 
 // ── config ───────────────────────────────────────────────────────────────────
 
-export function loadConfig(configPath: string): SFConfig {
-  const raw = (parseYaml(readFileSync(configPath, "utf-8")) as Record<string, any>) || {};
+/** Same-name agents patch (shallow field overwrite); new names append. */
+function mergeAgentLists(base: any[], override: any[]): any[] {
+  const merged = base.map((agent) => ({ ...agent }));
+  for (const overrideAgent of override) {
+    const i = merged.findIndex((a) => a.name === overrideAgent.name);
+    if (i === -1) merged.push({ ...overrideAgent });
+    else merged[i] = { ...merged[i], ...overrideAgent };
+  }
+  return merged;
+}
+
+/** `defaults`/`observability`/`quality` merge key-by-key; `agents` merges by name. */
+function mergeRawConfig(base: Record<string, any>, override: Record<string, any>): Record<string, any> {
+  return {
+    defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
+    observability: { ...(base.observability || {}), ...(override.observability || {}) },
+    quality: { ...(base.quality || {}), ...(override.quality || {}) },
+    agents: mergeAgentLists(base.agents || [], override.agents || []),
+  };
+}
+
+/**
+ * Load and merge every existing path in `configPaths`, in order — later
+ * paths override earlier ones. Built-in defaults first, an optional `.sf/`
+ * override second is the normal case; a single explicit `--config` path
+ * (the caller passes just that one path, no built-in) is used standalone.
+ * A path that doesn't exist is silently skipped, EXCEPT that if none of them
+ * exist the result is an all-defaults config — every field has a schema
+ * default, so this degrades to "zero agents defined" rather than a crash,
+ * and agents.validate() reports that plainly.
+ */
+export function loadConfig(configPaths: string[]): SFConfig {
+  let raw: Record<string, any> = {};
+  for (const configPath of configPaths) {
+    if (!existsSync(configPath)) continue;
+    const parsed = (parseYaml(readFileSync(configPath, "utf-8")) as Record<string, any>) || {};
+    raw = mergeRawConfig(raw, parsed);
+  }
   const defaults = raw.defaults || {};
   for (const agent of raw.agents || []) {
     for (const key of ["coding_agent", "model", "thinking", "color", "tools", "writes"]) {
@@ -70,7 +107,7 @@ export function loadConfig(configPath: string): SFConfig {
   try {
     return v.parse(SFConfigSchema, raw);
   } catch (error) {
-    throw new Error(`invalid config at ${configPath}: ${describeParseError(error)}`);
+    throw new Error(`invalid config (${configPaths.join(", ")}): ${describeParseError(error)}`);
   }
 }
 
@@ -83,8 +120,22 @@ export function resolve(cfg: SFConfig, name: string): AgentConfig {
 }
 
 /** Fail fast: every required name must resolve to a usable agent. */
-export function validate(cfg: SFConfig, required: string[]): void {
+export function validate(cfg: SFConfig, required: string[], requiredSuites: string[] = [], cwd?: string): void {
+  const anchor = paths.resolveAnchor(cwd);
   const problems: string[] = [];
+  for (const suiteName of requiredSuites) {
+    const names = cfg.quality.suites[suiteName];
+    if (!names || names.length === 0) {
+      problems.push(
+        `quality.suites.${JSON.stringify(suiteName)} is not configured — add it to sf.config.yaml before running a chain that needs it`,
+      );
+      continue;
+    }
+    const missing = names.filter((n) => !cfg.quality.checks.some((c) => c.name === n));
+    if (missing.length > 0) {
+      problems.push(`quality.suites.${suiteName} names check(s) not in quality.checks: ${missing.join(", ")}`);
+    }
+  }
   for (const name of required) {
     let agent: AgentConfig;
     try {
@@ -100,8 +151,10 @@ export function validate(cfg: SFConfig, required: string[]): void {
       ["system", agent.prompt_engineering.system],
       ["user", agent.prompt_engineering.user],
     ] as const) {
-      if (!existsSync(ref) || !statSync(ref).isFile()) {
-        problems.push(`agent ${JSON.stringify(name)}: ${label} prompt not found: ${ref}`);
+      try {
+        paths.resolvePromptRef(anchor, ref);
+      } catch (error) {
+        problems.push(`agent ${JSON.stringify(name)}: ${label} ${(error as Error).message}`);
       }
     }
     try {
@@ -136,6 +189,7 @@ interface RunForAgents {
   cfg: SFConfig;
   adw_id: string;
   repo_root: string;
+  sf_dir: string | null;
   data_dir: string;
   session_dir: string;
   context_handoff_dir: string;
@@ -170,8 +224,8 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     previous_envelope: call.previous ? JSON.stringify(call.previous, null, 2) : "(none)",
     context_handoff_dir: run.context_handoff_dir,
   };
-  const systemText = prompts.render(agent.prompt_engineering.system, variables);
-  const userText = prompts.render(agent.prompt_engineering.user, variables);
+  const systemText = prompts.render(paths.resolvePromptRef(run, agent.prompt_engineering.system), variables);
+  const userText = prompts.render(paths.resolvePromptRef(run, agent.prompt_engineering.user), variables);
   prompts.save(path.join(agentDir, "prompts"), "system.md", systemText);
   prompts.save(path.join(agentDir, "prompts"), "user.md", userText);
 

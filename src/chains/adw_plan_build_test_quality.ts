@@ -22,6 +22,7 @@ import type { PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
 
 const REQUIRED_AGENTS = ["planner", "builder"];
+const REQUIRED_SUITES: string[] = ["all"];
 const MAX_FIX_LOOPS = 3;
 
 function record(ph: PhaseHandle, result: QualityResult): void {
@@ -30,9 +31,9 @@ function record(ph: PhaseHandle, result: QualityResult): void {
 }
 
 export async function main(ctx: ChainContext): Promise<number> {
-  const { prompt, config_path, adw_id, cwd } = ctx;
-  const cfg = agents.loadConfig(config_path);
-  agents.validate(cfg, REQUIRED_AGENTS);
+  const { prompt, config_paths, adw_id, cwd } = ctx;
+  const cfg = agents.loadConfig(config_paths);
+  agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_SUITES, cwd);
   const run = session.ensure(cfg, adw_id, cwd);
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {

@@ -162,17 +162,35 @@ export type DocumentOutputT = v.InferOutput<typeof DocumentOutput.schema>;
 
 // ── Deterministic quality blocks ─────────────────────────────────────────────
 
-export type QualityArea = "frontend" | "backend";
-export type QualityOperation = "lint" | "typecheck" | "build";
+export const QualityAreaSchema = v.picklist(["frontend", "backend"]);
+export type QualityArea = v.InferOutput<typeof QualityAreaSchema>;
 
-/** One deterministic quality command. */
-export interface QualityCheckSpec {
-  name: string;
-  area: QualityArea;
-  operation: QualityOperation;
-  argv: string[];
-  timeout_seconds: number;
-}
+export const QualityOperationSchema = v.picklist(["lint", "typecheck", "build"]);
+export type QualityOperation = v.InferOutput<typeof QualityOperationSchema>;
+
+/** One deterministic quality command, as configured in sf.config.yaml's `quality.checks`. */
+export const QualityCheckSpecSchema = v.object({
+  name: v.string(),
+  area: v.optional(QualityAreaSchema, "backend"),
+  operation: QualityOperationSchema,
+  argv: v.pipe(v.array(v.string()), v.minLength(1, "argv must name at least the binary to run")),
+  timeout_seconds: v.optional(v.number(), 120),
+});
+export type QualityCheckSpec = v.InferOutput<typeof QualityCheckSpecSchema>;
+
+/**
+ * `quality.checks` names the deterministic commands; `quality.suites` groups
+ * them into what a chain actually runs (`test`, `all`, ...). An unconfigured
+ * suite is a hard error at validate() time — see agents.validate() — not a
+ * silent placeholder that reports green. There is deliberately no packaged
+ * default suite: "no quality commands configured yet" must fail loudly on
+ * the first quality-gated chain, not quietly pass one.
+ */
+export const QualityConfigSchema = v.object({
+  checks: v.optional(v.array(QualityCheckSpecSchema), () => []),
+  suites: v.optional(v.record(v.string(), v.array(v.string())), () => ({})),
+});
+export type QualityConfig = v.InferOutput<typeof QualityConfigSchema>;
 
 /** Captured evidence from one quality command. */
 export interface QualityCheckResult {
@@ -388,13 +406,14 @@ export const ConfigDefaultsSchema = v.object({
   // Off-limits to every agent that has not named them in its own `writes`.
   // The factory's own code is the default: an agent must not be able to edit
   // the machinery that decides whether its work passed.
-  protected_files: v.optional(v.array(v.string()), () => ["adws/adw_modules/", "adws/adw_sf_config/", "adws/adw_*.ts"]),
-  data_dir: v.optional(v.string(), "adws/adw_data"),
+  // .sf/ is the whole per-repo footprint now — no adws/ tree to protect.
+  protected_files: v.optional(v.array(v.string()), () => [".sf/", "sf.config.yaml"]),
+  data_dir: v.optional(v.string(), ".sf/data"),
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
 export const ObservabilityConfigSchema = v.object({
-  db: v.optional(v.string(), "adws/adw_data/sf.db"),
+  db: v.optional(v.string(), ".sf/data/sf.db"),
   poll_ms: v.optional(v.number(), 500),
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
@@ -403,6 +422,7 @@ export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
   agents: v.optional(v.array(AgentConfigSchema), () => []),
+  quality: v.optional(QualityConfigSchema, () => v.parse(QualityConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 

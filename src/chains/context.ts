@@ -6,8 +6,13 @@
  */
 export interface ChainContext {
   prompt: string;
-  /** Absolute. */
-  config_path: string;
+  /**
+   * Absolute paths, in load order (agents.loadConfig merges them: later
+   * overrides earlier). The built-in packaged default, then an optional
+   * discovered `.sf/sf.config.yaml` — or just the one explicit `--config`
+   * path, standalone, with no built-in underneath it.
+   */
+  config_paths: string[];
   adw_id: string | null;
   /** Absolute. The anchor session.ensure() resolves repo_root and data_dir from. */
   cwd: string;

@@ -13,10 +13,10 @@ import { GenericOutput, makeAgentCall, makePhaseParams } from "../core/data_type
 import type { ChainContext } from "./context.ts";
 
 export async function main(ctx: ChainContext, options: { agent?: string } = {}): Promise<number> {
-  const { prompt, config_path, adw_id, cwd } = ctx;
+  const { prompt, config_paths, adw_id, cwd } = ctx;
   const agent = options.agent ?? "builder";
-  const cfg = agents.loadConfig(config_path);
-  agents.validate(cfg, [agent]);
+  const cfg = agents.loadConfig(config_paths);
+  agents.validate(cfg, [agent], [], cwd);
   const run = session.ensure(cfg, adw_id, cwd);
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {

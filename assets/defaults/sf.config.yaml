@@ -20,21 +20,31 @@ defaults:
   # Off-limits to every agent that does not name them in its own `writes`.
   # `tools` alone cannot protect these: bash runs `git checkout`, and write
   # reaches any path. An agent must not be able to edit the machinery that
-  # decides whether its own work passed. Enforced in adw_modules/permissions.ts.
+  # decides whether its own work passed. Enforced in core/permissions.ts.
   #
   # `writes:` per agent says what it may change IN THE REPO. It never restricts
   # the session runtime under data_dir — context_handoff/, envelopes, prompts,
   # raw output. Every agent can always write its own report; `writes: []` means
   # read-only with respect to the repo, not mute.
   protected_files:
-    - adws/adw_modules/
-    - adws/adw_sf_config/
-    - adws/adw_*.ts
-  data_dir: adws/adw_data          # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
+    - .sf/
+    - sf.config.yaml
+  data_dir: .sf/data               # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
 
 observability:
-  db: adws/adw_data/sf.db          # tracer writes here directly; the UI polls it
+  db: .sf/data/sf.db               # tracer writes here directly; the UI polls it
   poll_ms: 500                     # visualizer live-poll cadence
+
+# No default quality checks or suites are shipped — an unconfigured chain
+# that needs one fails loudly at agents.validate() time (before anything
+# spawns) rather than reporting a placeholder green. Add your own, e.g.:
+#   quality:
+#     checks:
+#       - {name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 600}
+#       - {name: lint, operation: lint, argv: ["npx", "eslint", "."], timeout_seconds: 120}
+#     suites:
+#       test: [test]
+#       all: [test, lint]
 
 agents:
   - name: planner
@@ -43,8 +53,8 @@ agents:
     color: "#a78bfa"                 # optional hex — the agent's lane color in the visualizer
     purpose: Turn a request into a plan the builder can implement without asking questions.
     prompt_engineering:
-      system: adws/adw_data/prompt_engineering/planner/system.md
-      user: adws/adw_data/prompt_engineering/planner/user.md
+      system: planner/system.md
+      user: planner/user.md
     writes:                        # the plan is the only thing it may leave in the repo
       - specs/
     tools:                         # full recon + write for plan.md; no edit — the planner never touches repo files
@@ -59,8 +69,8 @@ agents:
     color: "#22d3ee"
     purpose: Implement the plan exactly; report every changed file in the envelope.
     prompt_engineering:
-      system: adws/adw_data/prompt_engineering/builder/system.md
-      user: adws/adw_data/prompt_engineering/builder/user.md
+      system: builder/system.md
+      user: builder/user.md
     # No `writes` key: unrestricted, and the only agent that is. It still cannot
     # touch defaults.protected_files — the builder does not get to edit its own grader.
     tools:                         # the only agent that mutates the repo — everything on
@@ -76,8 +86,8 @@ agents:
     color: "#fbbf24"
     purpose: Find and report where things live; change nothing.
     prompt_engineering:
-      system: adws/adw_data/prompt_engineering/scout/system.md
-      user: adws/adw_data/prompt_engineering/scout/user.md
+      system: scout/system.md
+      user: scout/user.md
     writes: []                     # read-only, and now actually read-only: its findings
                                    # go to context_handoff/, which is runtime, not the repo
     tools:                         # search-heavy recon; write only so scout_findings.md lands without a bash heredoc
@@ -89,7 +99,7 @@ agents:
       - write
 
   # No tester agent: running the suite is a known command, so it is a kind="code"
-  # phase over adw_modules/quality.ts. See SKILL.md hard rule 8.
+  # phase over core/quality.ts. See SKILL.md hard rule 8.
 
   - name: reviewer
     model: openai/gpt-5.6-terra
@@ -97,8 +107,8 @@ agents:
     color: "#fb7185"
     purpose: Confirm that what was built is what was asked for; change nothing.
     prompt_engineering:
-      system: adws/adw_data/prompt_engineering/reviewer/system.md
-      user: adws/adw_data/prompt_engineering/reviewer/user.md
+      system: reviewer/system.md
+      user: reviewer/user.md
     writes: []                     # a reviewer that cannot fix cannot quietly fix — the
                                    # claim the tool list only implied, now enforced
     tools:                         # full read surface; write only for review.md, no edit
@@ -114,8 +124,8 @@ agents:
     color: "#e879f9"
     purpose: Write up the change that was just made, from the diff; document only.
     prompt_engineering:
-      system: adws/adw_data/prompt_engineering/documenter/system.md
-      user: adws/adw_data/prompt_engineering/documenter/user.md
+      system: documenter/system.md
+      user: documenter/user.md
     writes:                        # documentation only — "document only" is a rule now,
       - app_docs/                  # not a line in a prompt the model may drift from.
       - docs/                      # Markdown anywhere, because docs live next to the

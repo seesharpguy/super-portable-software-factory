@@ -24,15 +24,16 @@ import { DocumentOutput, makeAgentCall, makeChangeCapture, makePhaseParams } fro
 import type { ChainContext } from "./context.ts";
 
 const REQUIRED_AGENTS = ["documenter"];
+const REQUIRED_SUITES: string[] = [];
 
 const DOCUMENT_NOTES =
   "Read diff_path in full before writing. Document only what the diff shows, then copy the write-up into app_docs/ as your task describes.";
 
 export async function main(ctx: ChainContext, options: { base?: string } = {}): Promise<number> {
-  const { prompt, config_path, adw_id, cwd } = ctx;
+  const { prompt, config_paths, adw_id, cwd } = ctx;
   const base = options.base ?? "main";
-  const cfg = agents.loadConfig(config_path);
-  agents.validate(cfg, REQUIRED_AGENTS);
+  const cfg = agents.loadConfig(config_paths);
+  agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_SUITES, cwd);
   const run = session.ensure(cfg, adw_id, cwd);
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
