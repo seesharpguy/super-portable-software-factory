@@ -10,6 +10,8 @@ import { dispatchChain, usageFor } from "./commands/run.ts";
 import { listCommand } from "./commands/list.ts";
 import { initCommand } from "./commands/init.ts";
 import { installSkillCommand } from "./commands/install-skill.ts";
+import { migrateCommand } from "./commands/migrate.ts";
+import { ejectCommand } from "./commands/eject.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { sessionsCommand } from "./commands/sessions.ts";
 import { phasesCommand } from "./commands/phases.ts";
@@ -24,6 +26,8 @@ const HELP = `sf — repeatable agents-plus-code workflows (ADWs)
   sf <chain> "<prompt>" [options]          run a chain (sf run <chain> ... works identically)
   sf init [--force]                        seed .sf/sf.config.yaml in the current repo
   sf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
+  sf migrate [--apply] [--force]           move an old stamped adws/ tree onto .sf/ (dry run by default)
+  sf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
   sf doctor [--json]                       check everything that fails silently otherwise
   sf ui [--port N] [--no-open] [--db path] open the trace visualizer
   sf sessions [--limit N] [--json]         recent runs
@@ -75,6 +79,12 @@ export async function main(): Promise<void> {
         return;
       case "install-skill":
         process.exitCode = installSkillCommand(rest);
+        return;
+      case "migrate":
+        process.exitCode = migrateCommand(rest);
+        return;
+      case "eject":
+        process.exitCode = ejectCommand(rest);
         return;
       case "doctor":
         process.exitCode = doctorCommand(rest);
