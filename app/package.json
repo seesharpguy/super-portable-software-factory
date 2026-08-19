@@ -3,23 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only observability UI for the Software Factory (TypeScript/Bun edition) — polls sf.db in a target repo.",
+  "description": "Read-only observability UI for the Software Factory — polled by the browser, served by the main package's sf ui command.",
   "scripts": {
     "dev": "vite",
-    "server": "bun run server/index.ts",
-    "dev:all": "bun run server/index.ts & vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "bun run server/index.ts",
     "typecheck": "vue-tsc --noEmit",
     "lint": "oxlint ."
   },
   "dependencies": {
-    "@fontsource/play": "^5.3.0",
     "lucide-vue-next": "^1.0.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {
-    "@types/bun": "^1.1.14",
+    "@types/node": "^22.10.0",
     "@vitejs/plugin-vue": "^6",
     "oxlint": "^1",
     "typescript": "^5.7.2",

@@ -1,6 +1,5 @@
 import { createApp } from 'vue'
-import '@fontsource/play/400.css'
-import '@fontsource/play/700.css'
+import './fonts.css'
 import App from './App.vue'
 import './style.css'
 

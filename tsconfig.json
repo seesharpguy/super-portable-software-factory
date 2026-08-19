@@ -18,9 +18,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"],
-  // src/ui/server is still the pre-port Bun.serve/bun:sqlite code, pending
-  // the Hono rewrite — excluded here rather than left perpetually red.
-  "exclude": ["src/ui/server/**"]
+  "include": ["src/**/*.ts"]
 }
 

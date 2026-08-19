@@ -1,16 +1,23 @@
 /**
  * Model → provider icon, by contains-check on the model name.
  *
- * Icons live in public/models/ (served from the site root). First matching
- * needle wins; unknown models render no icon.
+ * Icons are module imports (48x48, resized from the original 490-512px
+ * sources — they only ever render at 16-24px) so Vite inlines them as data
+ * URIs via assetsInlineLimit instead of five separate HTTP requests. First
+ * matching needle wins; unknown models render no icon.
  */
+import claudeIcon from '../assets/models/claude.png'
+import geminiIcon from '../assets/models/gemini.png'
+import kimiIcon from '../assets/models/kimi.png'
+import openaiIcon from '../assets/models/openai.png'
+import zaiIcon from '../assets/models/zai.png'
 
 const MODEL_ICONS: [needles: string[], icon: string][] = [
-  [['claude', 'opus', 'sonnet', 'haiku'], '/models/claude.png'],
-  [['gemini'], '/models/gemini.png'],
-  [['kimi', 'moonshot'], '/models/kimi.png'],
-  [['gpt', 'openai', 'codex', 'o3', 'o4'], '/models/openai.png'],
-  [['glm', 'zai', 'z.ai'], '/models/zai.png'],
+  [['claude', 'opus', 'sonnet', 'haiku'], claudeIcon],
+  [['gemini'], geminiIcon],
+  [['kimi', 'moonshot'], kimiIcon],
+  [['gpt', 'openai', 'codex', 'o3', 'o4'], openaiIcon],
+  [['glm', 'zai', 'z.ai'], zaiIcon],
 ]
 
 export function modelIcon(model: string | null | undefined): string | null {

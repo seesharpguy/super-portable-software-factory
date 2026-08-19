@@ -11,9 +11,9 @@
  * the only write this process can make, it touches exactly one column, and it
  * never runs unless a human clicks the button.
  */
-import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { Database } from "../../core/sqlite.ts";
 import type {
   AgentSession,
   AgentStartPayload,
@@ -28,25 +28,8 @@ import type {
   SessionUsage,
 } from "../shared/types.ts";
 
-const DEFAULT_DB_RELATIVE = "adws/adw_data/sf.db";
 const MAX_LIMIT = 1000;
 const DEFAULT_LIMIT = 500;
-
-/**
- * Resolve the db path: --db arg wins, then SF_DB, then <cwd>/adws/adw_data/sf.db.
- * The db lives in the TARGET repo, so cwd is the repo the visualizer is pointed at.
- */
-export function resolveDbPath(argv: string[] = Bun.argv): string {
-  const flagIndex = argv.indexOf("--db");
-  const inline = argv.find((a) => a.startsWith("--db="));
-  const raw =
-    (flagIndex !== -1 ? argv[flagIndex + 1] : undefined) ??
-    inline?.slice("--db=".length) ??
-    process.env.SF_DB ??
-    DEFAULT_DB_RELATIVE;
-
-  return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
-}
 
 export class SfDb {
   readonly path: string;
@@ -64,12 +47,12 @@ export class SfDb {
   /** Cache for optionalColumn(), keyed "table.column". Only ever false → true. */
   private readonly columnCache = new Map<string, boolean>();
 
+  /** `path` is always absolute — resolved upstream by the ui command via paths.resolveAnchor/resolveDataPaths. */
   constructor(path: string) {
     if (!existsSync(path)) {
       throw new Error(
         `sf.db not found at ${path}\n` +
-          `Point the visualizer at a target repo: --db <path> or SF_DB=<path>, ` +
-          `or run it from a repo root containing ${DEFAULT_DB_RELATIVE}`,
+          `Point sf ui at a target repo: --db <path>, SF_DB=<path>, --cwd <repo>, or run it from inside one.`,
       );
     }
     this.path = path;

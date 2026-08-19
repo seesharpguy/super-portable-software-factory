@@ -86,6 +86,8 @@ lerna-debug.log*
 # Build output
 dist/
 dist-ssr/
+# app/'s vite build output — a sibling of dist/, built once at publish time
+/web/
 *.local
 
 # Vite cache

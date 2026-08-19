@@ -1,0 +1,24 @@
+/**
+ * Play, latin subset only, woff2 only. Every browser this UI targets (any
+ * browser from the last decade) supports woff2 — a woff fallback exists in
+ * @fontsource/play but adds nothing here beyond a legacy IE9-era safety net,
+ * and it can be larger than the woff2 file for this particular font subset.
+ * Replaces @fontsource/play's 400.css + 700.css, which pull the full
+ * cyrillic/cyrillic-ext/greek/latin/latin-ext/vietnamese matrix in both
+ * formats — 280 KB for six weights this app never even renders in.
+ */
+@font-face {
+  font-family: "Play";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/play-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Play";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./assets/fonts/play-latin-700-normal.woff2") format("woff2");
+}
