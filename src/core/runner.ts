@@ -79,6 +79,8 @@ export class Run {
   repo_root: string; // where every agent is spawned to work — always absolute
   /** Every git operation for this run, bound to repo_root. Never call git_helper directly. */
   git: GitHandle;
+  /** Absolute. Sibling of it: flue.db (Flue's own conversation store), sessions/. */
+  data_dir: string;
   session_dir: string;
   context_handoff_dir: string;
   agent_map: Record<string, AgentMapEntry>;
@@ -94,6 +96,7 @@ export class Run {
     this.seq = init.tracer.maxPhaseSeq(init.adwId);
     this.repo_root = init.repoRoot;
     this.git = makeGit(init.repoRoot);
+    this.data_dir = init.dataDir;
     this.session_dir = ensureDir(path.join(init.dataDir, "sessions", init.adwId));
     this.context_handoff_dir = ensureDir(path.join(this.session_dir, "context_handoff"));
     this.agentMapPath = path.join(this.session_dir, "agent_map.json");

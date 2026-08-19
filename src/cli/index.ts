@@ -11,6 +11,7 @@
  *   e.g. "scout" -> chains/adw_scout.ts, "plan_build_test" -> chains/adw_plan_build_test.ts.
  */
 
+import * as agentFlue from "../core/agent_flue.ts";
 import * as paths from "../core/paths.ts";
 import { parseCli, resolvePrompt } from "../core/utils.ts";
 import type { ChainContext } from "../chains/context.ts";
@@ -63,5 +64,9 @@ export async function main(): Promise<void> {
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
+  } finally {
+    // A no-op if this chain never touched an agent (e.g. adw_quality) — the
+    // Flue runtime is only ever started lazily, on the first real call.
+    await agentFlue.shutdown();
   }
 }

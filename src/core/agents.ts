@@ -11,8 +11,9 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { ConversationStreamChunk } from "@flue/runtime";
 import * as v from "valibot";
-import * as agentPi from "./agent_pi.ts";
+import * as agentFlue from "./agent_flue.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
 import {
@@ -23,8 +24,8 @@ import {
   type AgentCall,
   type AgentConfig,
   type EnvelopeBase,
+  type FlueRequest,
   type Phase,
-  type PiRequest,
   type SFConfig,
 } from "./data_types.ts";
 import { newId } from "./utils.ts";
@@ -92,8 +93,8 @@ export function validate(cfg: SFConfig, required: string[]): void {
       problems.push((error as Error).message);
       continue;
     }
-    if (agent.coding_agent !== "pi") {
-      problems.push(`agent ${JSON.stringify(name)}: coding_agent ${JSON.stringify(agent.coding_agent)} is not implemented in v1 (pi only)`);
+    if (agent.coding_agent !== "flue") {
+      problems.push(`agent ${JSON.stringify(name)}: coding_agent ${JSON.stringify(agent.coding_agent)} is not implemented (flue only)`);
     }
     for (const [label, ref] of [
       ["system", agent.prompt_engineering.system],
@@ -104,9 +105,24 @@ export function validate(cfg: SFConfig, required: string[]): void {
       }
     }
     try {
-      agentPi.resolveModel(agent.model);
+      agentFlue.resolveModel(agent.model);
     } catch (error) {
       problems.push(`agent ${JSON.stringify(name)}: ${(error as Error).message}`);
+    }
+    // harness_engineering (pi -e extensions) has no Flue analogue — a
+    // subagent/skill built the same way is now useSubagent()/defineSkill()
+    // inside a custom tool, not a config path. Fail loudly rather than
+    // silently loading nothing.
+    if (agent.harness_engineering.length > 0) {
+      problems.push(
+        `agent ${JSON.stringify(name)}: harness_engineering is not supported under Flue (${JSON.stringify(agent.harness_engineering)}) — ` +
+          `use useSubagent()/defineSkill() in a custom tool instead`,
+      );
+    }
+    for (const toolName of agent.tools ?? []) {
+      if (!agentFlue.isKnownToolName(toolName)) {
+        problems.push(`agent ${JSON.stringify(name)}: unknown tool ${JSON.stringify(toolName)} — known: read, write, edit, bash, grep, glob, find (alias for glob), ls (dropped, covered by bash/glob)`);
+      }
     }
   }
   if (problems.length > 0) {
@@ -120,6 +136,7 @@ interface RunForAgents {
   cfg: SFConfig;
   adw_id: string;
   repo_root: string;
+  data_dir: string;
   session_dir: string;
   context_handoff_dir: string;
   agent_map: Record<string, { session_id: string; model: string; coding_agent: string }>;
@@ -179,27 +196,26 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   );
   run.console.agentStarted(agent.name, agent.model, sessionId);
 
-  // Parse retries and gate corrections re-enter the SAME pi session, so the
-  // last send is the one whose context occupancy is current — while spend is
-  // the opposite: every send costs, so usage accumulates across all of them.
-  let latest: agentPiResultLike | null = null;
+  // Parse retries and gate corrections re-enter the SAME Flue conversation,
+  // so the last send is the one whose context occupancy is current — while
+  // spend is the opposite: every send costs, so usage accumulates across all.
+  let latest: FlueResultLike | null = null;
   const spent = new UsageBreakdown();
 
-  async function send(promptText: string): Promise<agentPiResultLike> {
-    const request: PiRequest = {
+  async function send(promptText: string): Promise<FlueResultLike> {
+    const request: FlueRequest = {
       prompt: promptText,
       system_prompt: systemText,
       model: agent.model,
       thinking: agent.thinking,
       session_id: sessionId,
-      // absolute: these are read by the pi subprocess, which runs in repo_root
-      session_dir: path.resolve(agentDir, "pi_sessions"),
-      raw_output_path: path.resolve(agentDir, "raw_output.jsonl"),
       tools: agent.tools ?? undefined,
-      extensions: agent.harness_engineering,
+      output_schema: call.output_type.schema,
+      output_type_name: call.output_type.name,
       cwd: run.repo_root,
+      flue_db_path: path.join(run.data_dir, "flue.db"),
     };
-    const result = await agentPi.run(
+    const result = await agentFlue.run(
       request,
       eventForwarder(run, phase, agent.name),
       (pid) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`),
@@ -328,7 +344,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
 
 // ── internals ────────────────────────────────────────────────────────────────
 
-type agentPiResultLike = Awaited<ReturnType<typeof agentPi.run>>;
+type FlueResultLike = Awaited<ReturnType<typeof agentFlue.run>>;
 
 /** Accept a GateReport, or a legacy gate that returned a violations list. */
 function asReport(result: GateReport | string[]): GateReport {
@@ -346,12 +362,12 @@ function agentSessionId(run: RunForAgents, agent: AgentConfig): string {
 
 /** One tool_call event per real tool call, with its exact args and result. */
 function eventForwarder(run: RunForAgents, phase: Phase, agentName: string) {
-  const tracker = new agentPi.ToolCallTracker();
-  return (event: Record<string, any>) => {
-    const record = tracker.observe(event);
+  const tracker = new agentFlue.ToolCallTracker();
+  return (chunk: ConversationStreamChunk) => {
+    const record = tracker.observe(chunk);
     if (record === null) return;
     // The call's span rides the columns; duration_ms stays in the payload as
-    // pi's own authoritative number.
+    // Flue's own authoritative number.
     const { label, started_at, ended_at, ...rest } = record;
     run.tracer.event(
       makeEventRecord({
@@ -395,13 +411,15 @@ async function parseWithRetries(
   run: RunForAgents,
   phase: Phase,
   call: AgentCall,
-  result: agentPiResultLike,
-  send: (text: string) => Promise<agentPiResultLike>,
+  result: FlueResultLike,
+  send: (text: string) => Promise<FlueResultLike>,
 ): Promise<{ envelope: EnvelopeBase; attempt: number }> {
   let current = result;
   for (let attempt = 1; attempt <= JSON_FIX_ATTEMPTS + 1; attempt++) {
     try {
-      const payload = extractJson(current.text);
+      // The model may never call sf_report at all (plain text + stop) — fall
+      // back to extracting JSON from the text in that case, same as before.
+      const payload = current.report ?? extractJson(current.text);
       const envelope = v.parse(call.output_type.schema, payload) as EnvelopeBase;
       return { envelope, attempt };
     } catch (error) {

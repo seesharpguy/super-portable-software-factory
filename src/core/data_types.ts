@@ -95,7 +95,10 @@ export type EnvelopeBase = v.InferOutput<typeof EnvelopeBaseSchema>;
 
 export interface EnvelopeType<T> {
   name: string;
-  schema: v.GenericSchema<unknown, T>;
+  // Every envelope schema is built with v.object(...), so its real input
+  // type is object-shaped — this is also exactly the ToolInputSchema shape
+  // Flue's useTool()/sf_report wiring requires (agent_flue.ts).
+  schema: v.GenericSchema<Record<string, unknown>, T>;
   fields: string[];
 }
 
@@ -350,11 +353,14 @@ export const PromptEngineeringSchema = v.object({
 });
 export type PromptEngineering = v.InferOutput<typeof PromptEngineeringSchema>;
 
+export const ThinkingLevelSchema = v.picklist(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export type ThinkingLevel = v.InferOutput<typeof ThinkingLevelSchema>;
+
 export const AgentConfigSchema = v.object({
   name: v.string(),
-  coding_agent: v.optional(v.picklist(["pi", "claude_code"]), "pi"),
+  coding_agent: v.optional(v.picklist(["flue"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
-  thinking: v.optional(v.string(), "medium"), // off | minimal | low | medium | high | xhigh | max
+  thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""), // hex swatch for this agent's lane in the UI
   purpose: v.optional(v.string(), ""),
   prompt_engineering: PromptEngineeringSchema,
@@ -373,9 +379,9 @@ export const AgentConfigSchema = v.object({
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
 export const ConfigDefaultsSchema = v.object({
-  coding_agent: v.optional(v.picklist(["pi", "claude_code"]), "pi"),
+  coding_agent: v.optional(v.picklist(["flue"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
-  thinking: v.optional(v.string(), "medium"),
+  thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""),
   harness_engineering: v.optional(v.array(v.string()), () => []),
   tools: v.optional(v.nullable(v.array(v.string()))), // roster-wide allowlist; unset = all tools usable
@@ -432,22 +438,29 @@ export function makeEventRecord(input: Partial<EventRecord> & { adw_id: string; 
   };
 }
 
-// ── Pi coding agent interface ────────────────────────────────────────────────
-// (Renamed to Flue's vocabulary when agent_flue.ts replaces agent_pi.ts —
-// deliberately untouched in this pass, which is the zod->Valibot swap only.)
+// ── Flue coding agent interface ──────────────────────────────────────────────
 
-/** Everything one non-interactive pi run needs. */
-export interface PiRequest {
+/**
+ * Everything one Flue dispatch+read turn needs.
+ *
+ * No `session_dir`/`raw_output_path` (Flue's own persistence is the durable
+ * record; there is no child process whose JSONL stdout needs a home) and no
+ * `extensions` (harness_engineering has no Flue analogue — see
+ * agents.validate()). `output_schema`/`output_type_name` drive the injected
+ * `sf_report` tool, which is how a Valibot envelope type becomes the tool
+ * schema Flue validates the model's structured output against.
+ */
+export interface FlueRequest {
   prompt: string;
   system_prompt: string;
-  model: string; // registry pattern, resolved to provider + id
-  thinking: string;
-  session_id: string; // pi --session-id: creates or continues
-  session_dir: string;
-  raw_output_path: string; // JSONL stream lands here
+  model: string; // provider/model-id
+  thinking: ThinkingLevel;
+  session_id: string; // Flue conversation id: init(agent, {id}) creates or continues
   tools?: string[] | null;
-  extensions: string[];
+  output_schema: v.GenericSchema<Record<string, unknown>, unknown>;
+  output_type_name: string;
   cwd: string; // set from run.repo_root — the codebase root agents work in
+  flue_db_path: string; // only consulted on the runtime's first-ever call
 }
 
 /**
@@ -507,9 +520,16 @@ export class UsageBreakdown {
   }
 }
 
-export interface PiResult {
+export interface FlueResult {
   text: string;
-  returncode: number;
+  /**
+   * The validated argument the model's `sf_report` call carried, captured
+   * via useDataWriter — present whenever the model called that tool at all,
+   * regardless of whether it also produced JSON in `text`. `null` means the
+   * model never called it, so the caller falls back to extracting JSON from
+   * `text` directly.
+   */
+  report: unknown | null;
   session_id: string;
   tokens: number;
   cost: number;
@@ -518,13 +538,13 @@ export interface PiResult {
   // turn; this is how full the window is right now, which is what the
   // visualizer's context bar measures against `context_window`.
   context_tokens: number;
-  context_window: number; // 0 when the registry declares no ceiling
+  context_window: number; // 0 — Flue has no model-registry lookup for this (see agent_flue.ts)
 }
 
-export function makePiResult(input: Partial<PiResult> & { session_id: string }): PiResult {
+export function makeFlueResult(input: Partial<FlueResult> & { session_id: string }): FlueResult {
   return {
     text: "",
-    returncode: 0,
+    report: null,
     tokens: 0,
     cost: 0,
     usage: new UsageBreakdown(),

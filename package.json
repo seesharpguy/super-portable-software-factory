@@ -34,6 +34,7 @@
     "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
+    "@flue/runtime": "2.0.3",
     "@valibot/to-json-schema": "^1.7.1",
     "valibot": "^1.4.2",
     "yaml": "^2.5.1"
