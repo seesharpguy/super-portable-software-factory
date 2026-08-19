@@ -68,17 +68,28 @@ export function engineerName(): string {
 }
 
 /**
- * Minimal `--flag value` CLI parsing — the ADW scripts only ever need a single
- * positional (the prompt) plus a handful of named options, so a full argparse
- * port would be more machinery than the job needs.
+ * Minimal `--flag value` / `--bare-flag` CLI parsing — the CLI only ever
+ * needs a handful of positionals plus a handful of named options and bare
+ * boolean flags, so a full argparse port would be more machinery than the
+ * job needs. `flagNames` are boolean — present means true, never consumes
+ * the next argv value; anything else in `optionNames` always takes a value.
  */
-export function parseCli(argv: string[], optionNames: string[]): { positionals: string[]; options: Record<string, string> } {
+export function parseCli(
+  argv: string[],
+  optionNames: string[],
+  flagNames: string[] = [],
+): { positionals: string[]; options: Record<string, string>; flags: Record<string, boolean> } {
   const positionals: string[] = [];
   const options: Record<string, string> = {};
+  const flags: Record<string, boolean> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg.startsWith("--")) {
       const name = arg.slice(2);
+      if (flagNames.includes(name)) {
+        flags[name] = true;
+        continue;
+      }
       if (!optionNames.includes(name)) throw new Error(`unknown option: --${name}`);
       const value = argv[++i];
       if (value === undefined) throw new Error(`--${name} requires a value`);
@@ -87,7 +98,7 @@ export function parseCli(argv: string[], optionNames: string[]): { positionals: 
       positionals.push(arg);
     }
   }
-  return { positionals, options };
+  return { positionals, options, flags };
 }
 
 /** Run an ADW's async main() and translate its outcome into a process exit code. */

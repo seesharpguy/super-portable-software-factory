@@ -60,8 +60,8 @@ import {
 import type { PhaseHandle } from "../core/runner.ts";
 import type { Run } from "../core/runner.ts";
 
-const REQUIRED_AGENTS = ["planner", "builder", "reviewer", "documenter"];
-const REQUIRED_SUITES: string[] = ["test"];
+export const REQUIRED_AGENTS = ["planner", "builder", "reviewer", "documenter"];
+export const REQUIRED_SUITES: string[] = ["test"];
 const MAX_FIX_LOOPS = 3;
 const MAX_REVISION_LOOPS = 2;
 

@@ -22,8 +22,8 @@ import * as session from "../core/session.ts";
 import { BuildOutput, ReviewOutput, makeAgentCall, makePhaseParams, type BuildOutputT, type ReviewOutputT } from "../core/data_types.ts";
 import type { ChainContext } from "./context.ts";
 
-const REQUIRED_AGENTS = ["builder", "reviewer"];
-const REQUIRED_SUITES: string[] = [];
+export const REQUIRED_AGENTS = ["builder", "reviewer"];
+export const REQUIRED_SUITES: string[] = [];
 const MAX_REVISION_LOOPS = 3;
 
 export async function main(ctx: ChainContext): Promise<number> {

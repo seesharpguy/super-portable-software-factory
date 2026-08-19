@@ -23,8 +23,8 @@ import * as session from "../core/session.ts";
 import { DocumentOutput, makeAgentCall, makeChangeCapture, makePhaseParams } from "../core/data_types.ts";
 import type { ChainContext } from "./context.ts";
 
-const REQUIRED_AGENTS = ["documenter"];
-const REQUIRED_SUITES: string[] = [];
+export const REQUIRED_AGENTS = ["documenter"];
+export const REQUIRED_SUITES: string[] = [];
 
 const DOCUMENT_NOTES =
   "Read diff_path in full before writing. Document only what the diff shows, then copy the write-up into app_docs/ as your task describes.";

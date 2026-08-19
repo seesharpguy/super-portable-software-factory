@@ -23,6 +23,8 @@ import { findRepoRoot } from "./git_helper.ts";
 
 export const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..", "..");
 export const ASSETS_DIR = path.join(PACKAGE_ROOT, "assets");
+/** The prebuilt SPA — a sibling of dist/ and assets/, built once at publish time (see app/). */
+export const WEB_DIR = path.join(PACKAGE_ROOT, "web");
 export const BUILTIN_CONFIG_PATH = path.join(ASSETS_DIR, "defaults", "sf.config.yaml");
 export const BUILTIN_PROMPTS_DIR = path.join(ASSETS_DIR, "prompts");
 

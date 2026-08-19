@@ -24,8 +24,8 @@ import { BuildOutput, makeAgentCall, makePhaseParams, type QualityResult } from 
 import type { PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
 
-const REQUIRED_AGENTS = ["builder"];
-const REQUIRED_SUITES: string[] = ["test"];
+export const REQUIRED_AGENTS = ["builder"];
+export const REQUIRED_SUITES: string[] = ["test"];
 const MAX_FIX_LOOPS = 3;
 
 function record(ph: PhaseHandle, result: QualityResult): void {

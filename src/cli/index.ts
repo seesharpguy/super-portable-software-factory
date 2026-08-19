@@ -1,20 +1,37 @@
 /**
- * Phase-2 stub dispatcher: still just enough to run one chain end-to-end for
- * verification — now building a real ChainContext through the resolved
- * workspace anchor instead of threading raw strings. Gets replaced (not
- * extended) once the real command surface — list, sessions, phases, events,
- * ui, init, doctor, etc. — lands.
- *
- * Usage: sf <chain-name> "<prompt or path/to/prompt.md>"
- *          [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
- *   <chain-name> is an adw_*.ts file's basename minus the "adw_" prefix,
- *   e.g. "scout" -> chains/adw_scout.ts, "plan_build_test" -> chains/adw_plan_build_test.ts.
+ * `sf` — the command surface. `sf <chain-name> "<prompt>"` and
+ * `sf run <chain-name> "<prompt>"` are identical; the bare form exists
+ * because typing the chain name IS choosing what to run, and that's the
+ * common case. Everything else is a named subcommand.
  */
-
 import * as agentFlue from "../core/agent_flue.ts";
-import * as paths from "../core/paths.ts";
-import { parseCli, resolvePrompt } from "../core/utils.ts";
-import type { ChainContext } from "../chains/context.ts";
+import { findChain } from "../chains/index.ts";
+import { dispatchChain, usageFor } from "./commands/run.ts";
+import { listCommand } from "./commands/list.ts";
+import { initCommand } from "./commands/init.ts";
+import { doctorCommand } from "./commands/doctor.ts";
+import { sessionsCommand } from "./commands/sessions.ts";
+import { phasesCommand } from "./commands/phases.ts";
+import { eventsCommand } from "./commands/events.ts";
+import { abortCommand } from "./commands/abort.ts";
+import { uiCommand } from "./commands/ui.ts";
+import { versionCommand } from "./commands/version.ts";
+
+const HELP = `sf — repeatable agents-plus-code workflows (ADWs)
+
+  sf list                                  the chain registry — names, phases, what each needs
+  sf <chain> "<prompt>" [options]          run a chain (sf run <chain> ... works identically)
+  sf init [--force]                        seed .sf/sf.config.yaml in the current repo
+  sf doctor [--json]                       check everything that fails silently otherwise
+  sf ui [--port N] [--no-open] [--db path] open the trace visualizer
+  sf sessions [--limit N] [--json]         recent runs
+  sf phases <adw_id> [--json]              one run's phases
+  sf events <adw_id> [--follow] [--json]   one run's trace events
+  sf abort <adw_id>                        signal a run's process to stop
+  sf version                               print the installed version
+
+Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
+Run \`sf list\` to see every chain and what it needs.`;
 
 export async function main(): Promise<void> {
   try {
@@ -23,50 +40,78 @@ export async function main(): Promise<void> {
     // no .env in cwd — fine, nothing to load
   }
 
-  const [chainArg, ...rest] = process.argv.slice(2);
-  if (!chainArg) {
-    console.error('usage: sf <chain-name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]');
-    process.exitCode = 1;
+  const [cmd, ...rest] = process.argv.slice(2);
+
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
+    console.log(HELP);
+    process.exitCode = 0;
     return;
   }
-
-  const { positionals, options } = parseCli(rest, ["config", "adw-id", "cwd", "agent", "base"]);
-  if (positionals.length < 1) {
-    console.error('usage: sf <chain-name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]');
-    process.exitCode = 1;
+  if (cmd === "version" || cmd === "--version" || cmd === "-v") {
+    process.exitCode = versionCommand();
     return;
   }
-
-  const moduleName = `adw_${chainArg}.js`;
-  let chain: { main: (ctx: ChainContext, options?: Record<string, string>) => Promise<number> };
-  try {
-    chain = await import(`../chains/${moduleName}`);
-  } catch {
-    console.error(`unknown chain: ${chainArg} (looked for chains/${moduleName})`);
-    process.exitCode = 1;
-    return;
-  }
-
-  const anchor = paths.resolveAnchor(options["cwd"]);
-  const ctx: ChainContext = {
-    prompt: resolvePrompt(positionals[0]),
-    config_paths: paths.resolveConfigPaths(anchor, options["config"]).paths,
-    adw_id: options["adw-id"] ?? null,
-    cwd: anchor.cwd,
-  };
-
-  const chainOptions: Record<string, string> = {};
-  if (options["agent"] !== undefined) chainOptions["agent"] = options["agent"];
-  if (options["base"] !== undefined) chainOptions["base"] = options["base"];
 
   try {
-    process.exitCode = await chain.main(ctx, chainOptions);
+    switch (cmd) {
+      case "run": {
+        const [chainName, ...chainArgs] = rest;
+        const chain = chainName ? findChain(chainName) : undefined;
+        if (!chain) {
+          console.error(`unknown chain: ${chainName ?? "(none given)"} — run \`sf list\` to see every chain`);
+          process.exitCode = 1;
+          return;
+        }
+        process.exitCode = await dispatchChain(chain, chainArgs);
+        return;
+      }
+      case "list":
+        process.exitCode = listCommand();
+        return;
+      case "init":
+        process.exitCode = initCommand(rest);
+        return;
+      case "doctor":
+        process.exitCode = doctorCommand(rest);
+        return;
+      case "ui":
+        process.exitCode = await uiCommand(rest);
+        return;
+      case "sessions":
+        process.exitCode = sessionsCommand(rest);
+        return;
+      case "phases":
+        process.exitCode = phasesCommand(rest);
+        return;
+      case "events":
+        process.exitCode = await eventsCommand(rest);
+        return;
+      case "abort":
+        process.exitCode = abortCommand(rest);
+        return;
+      default: {
+        const chain = findChain(cmd);
+        if (!chain) {
+          console.error(`unknown command or chain: ${cmd}\n`);
+          console.error(HELP);
+          process.exitCode = 1;
+          return;
+        }
+        if (rest.length < 1) {
+          console.error(usageFor(chain));
+          process.exitCode = 1;
+          return;
+        }
+        process.exitCode = await dispatchChain(chain, rest);
+        return;
+      }
+    }
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   } finally {
-    // A no-op if this chain never touched an agent (e.g. adw_quality) — the
-    // Flue runtime is only ever started lazily, on the first real call.
+    // A no-op if this invocation never touched an agent (e.g. sf quality,
+    // sf list, sf doctor) — the Flue runtime only ever starts lazily.
     await agentFlue.shutdown();
   }
 }

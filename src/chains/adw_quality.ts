@@ -13,8 +13,8 @@ import * as session from "../core/session.ts";
 import { makePhaseParams } from "../core/data_types.ts";
 import type { ChainContext } from "./context.ts";
 
-const REQUIRED_AGENTS: string[] = [];
-const REQUIRED_SUITES: string[] = ["all"];
+export const REQUIRED_AGENTS: string[] = [];
+export const REQUIRED_SUITES: string[] = ["all"];
 
 export async function main(ctx: ChainContext): Promise<number> {
   const { prompt, config_paths, adw_id, cwd } = ctx;
