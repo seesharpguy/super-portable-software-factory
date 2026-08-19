@@ -27,11 +27,14 @@
   },
   "scripts": {
     "build:cli": "tsc -p tsconfig.build.json",
-    "build": "npm run clean && npm run build:cli",
+    "build:app": "npm --prefix app ci && npm --prefix app run build",
+    "build": "npm run clean && npm run build:cli && npm run build:app",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build",
-    "test": "node --test \"dist/**/*.test.js\""
+    "pretest": "npm run build:cli",
+    "test": "node --test \"dist/**/*.test.js\"",
+    "prepack": "node scripts/check-pack-ready.js",
+    "size-check": "node scripts/check-tarball-size.js"
   },
   "dependencies": {
     "@flue/runtime": "2.0.3",
