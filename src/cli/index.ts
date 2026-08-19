@@ -9,6 +9,7 @@ import { findChain } from "../chains/index.ts";
 import { dispatchChain, usageFor } from "./commands/run.ts";
 import { listCommand } from "./commands/list.ts";
 import { initCommand } from "./commands/init.ts";
+import { installSkillCommand } from "./commands/install-skill.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { sessionsCommand } from "./commands/sessions.ts";
 import { phasesCommand } from "./commands/phases.ts";
@@ -22,6 +23,7 @@ const HELP = `sf — repeatable agents-plus-code workflows (ADWs)
   sf list                                  the chain registry — names, phases, what each needs
   sf <chain> "<prompt>" [options]          run a chain (sf run <chain> ... works identically)
   sf init [--force]                        seed .sf/sf.config.yaml in the current repo
+  sf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
   sf doctor [--json]                       check everything that fails silently otherwise
   sf ui [--port N] [--no-open] [--db path] open the trace visualizer
   sf sessions [--limit N] [--json]         recent runs
@@ -70,6 +72,9 @@ export async function main(): Promise<void> {
         return;
       case "init":
         process.exitCode = initCommand(rest);
+        return;
+      case "install-skill":
+        process.exitCode = installSkillCommand(rest);
         return;
       case "doctor":
         process.exitCode = doctorCommand(rest);

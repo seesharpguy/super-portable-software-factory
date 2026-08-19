@@ -1,82 +1,80 @@
 ---
 name: sf
-description: Software Factory (TypeScript/Bun edition) — deploy and operate repeatable agents+code workflows (ADWs) in any codebase. Use when the user says /sf install, wants to create/run/update an ADW, manage the agent roster in sf.config.yaml, or observe running agent workflows. Keywords - sf, software factory, ADW, AI developer workflow, agent pipeline, install factory.
-argument-hint: "[install | create adw | run adw | update config | ...]"
+description: Orchestrate SF (Super Simple Software Factory) ADW chains via the `sf` CLI — deterministic agents-plus-code workflows with typed envelopes, gates, and a sqlite trace. Use when the user wants work planned/built/tested/reviewed/documented through SF rather than done freehand.
 ---
 
-# SF — Software Factory (TypeScript/Bun edition)
+# SF — orchestrator's skill
 
-Reusable combination of **agents plus code**: deterministic TypeScript ADW scripts, run by Bun, own sequencing, retries, and acceptance; coding agents (Pi in v1) work inside bounded phases; typed JSON envelopes carry context between them; everything streams into SQLite for the polled visualizer. Agent proposes, code disposes.
+SF runs **ADWs**: deterministic TypeScript chains that sequence typed agent
+calls and code phases, verify claims with gates, and trace everything to
+sqlite. `sf` is a globally installed CLI, not a template stamped into this
+repo — it runs against this repo's `.sf/` overrides (if any) merged over its
+own packaged defaults.
 
-This is a TypeScript/Bun port of the `sssf` skill (same design, same guarantees) — pick this one for a Bun/Node-first codebase, `sssf` for a `uv`/Python-first one. They install into disjoint paths (`sf.config.yaml` vs `sssf.config.yaml`, `sf.db` vs `sssf.db`) so both can coexist in the same repo if you ever need to compare them.
+**You are the orchestrator, not the worker.** Launch a chain, watch its
+trace, report to the engineer. Never read the target files an agent was
+asked to change and "help," never fix what an agent was supposed to fix,
+never hand-edit an envelope. A failed run is fixed by a config, prompt, or
+chain change — made deliberately — then a re-run.
 
 ## Startup
 
-Three steps. Then stop.
+Run `sf list` once, at the start of the conversation — it's the real menu;
+chain names elsewhere in this skill are shape, not literal. `sf doctor`
+answers "why did nothing happen" in one shot (every path, agent, quality
+suite, provider key) before you spend a token guessing.
 
-1. Read [cookbooks/sf_overview.md](cookbooks/sf_overview.md) — the system map.
-2. `ls adws/adw_*.ts` and read each file's `Phases:` docstring line.
-3. Print the ADWs as a table — name, the chain, one line on when to reach for it — and **wait for the engineer's request.**
-
-```
-| ADW | Chain | Use when |
-|---|---|---|
-| adw_scout | engineer → scout | read-only recon; nothing changes |
-| adw_simple_sdlc | plan → build → test → review → document, 3 commits | the work is real and its shape is not obvious |
-```
-
-**Nothing else.** No trace-db queries, no reading the config or the ADW scripts' bodies, no repo inventory, no last-runs summary, no diagnosing an old failure, no "current state" dashboard. None of it was asked for, and it is not free:
-
-- **Volunteered state is guessed state.** An orchestrator that improvised a status board queried a `runs` table and a `payload` column — neither exists (`sessions`, `payload_json`). The spec that would have said so is `references/observability.md`, one lazy read away. Probing to look prepared is how you end up confidently wrong in your first message.
-- **It spends the context the real task needs**, before you know what the task is.
-- **It is stale on arrival.** State printed before the request describes a system that the very next run changes.
-
-Everything else — the db schema, the roster, the handoff contract — is lazy-loaded through the routing table below, when a request actually calls for it. Reading it early defeats the mechanism.
-
-Two exceptions, both narrow: if the engineer's first message already contains a request, skip the waiting and route it; and if the factory is plainly not installed (no `adws/`, no config), say that in one line instead of the table.
+Don't volunteer more state than asked — "is it done" wants a status line,
+not a phase-by-phase replay (`how_to_prompt_for_the_eng.md` has the fuller
+rule and the anecdote behind it: an orchestrator once guessed a `runs`
+table and a `payload` column that were never there; `sf sessions`/`sf
+phases`/`sf events` exist so nobody has to guess the schema again).
 
 ## Orchestrator rules
 
-You run the system, observe the system, and help the user interact with it. **You do no ADW work yourself:**
+- Never do a chain's work yourself — a missing chain shape is a `sf list`
+  gap to report or author (`authoring_chains.md`), not a reason to freehand it.
+- Never hand-edit anything under `.sf/data/sessions/<adw_id>/` — audit trail, not a scratchpad.
+- Observe through `sf sessions`/`sf phases`/`sf events`, never by guessing at `sf.db`'s schema.
 
-- Never implement, plan, or test in an agent's place — launch the ADW and watch it.
-- Never edit files inside `adws/adw_data/sessions/` — that is the run record.
-- Observe by querying `adws/adw_data/sf.db` (WAL — reads never block writers) **when observing is the task**. This is a capability, not a startup step: query it to follow a run you launched or one the engineer asked about, never to volunteer a status report nobody requested.
-- Report phase status plainly: name, owner, status, error if any.
+## Request routing
 
-## Request routing (lazy-load the cookbook, then follow it)
-
-| Request | Cookbook |
+| Request shape | Go to |
 |---|---|
-| `/sf install`, set up the factory in this repo | [cookbooks/install.md](cookbooks/install.md) |
-| create a new ADW / workflow | [cookbooks/create_adw.md](cookbooks/create_adw.md) |
-| modify an existing ADW chain | [cookbooks/update_adw.md](cookbooks/update_adw.md) |
-| create the config / agent roster | [cookbooks/create_config.md](cookbooks/create_config.md) |
-| add or retune an agent (model, thinking, tools, prompts) | [cookbooks/update_config.md](cookbooks/update_config.md) |
-| extend adw_modules with new low-level logic | [cookbooks/update_modules.md](cookbooks/update_modules.md) |
-| run / monitor an ADW | [cookbooks/how_to_prompt_for_the_eng.md](cookbooks/how_to_prompt_for_the_eng.md) **first**, then [cookbooks/run_adw.md](cookbooks/run_adw.md) |
-| turn a request into an ADW prompt | [cookbooks/how_to_prompt_for_the_eng.md](cookbooks/how_to_prompt_for_the_eng.md) |
+| "run/build/plan/fix X" | `run_adw.md` — read `how_to_prompt_for_the_eng.md` first, always |
+| "add/retune an agent or model" | `roster.md` |
+| "add a chain / a phase / an output type / a gate" | `authoring_chains.md` |
+| "what is SF" | `sf_overview.md` |
+| envelope/gate/session contract | `references/handoff.md` |
+| trace schema, spend vs. context | `references/observability.md` |
+| config field reference | `references/config.md` |
 
-Deep specs, when needed: [references/config.md](references/config.md) · [references/handoff.md](references/handoff.md) · [references/observability.md](references/observability.md)
+## Hard rules
 
-## Hard rules (enforced across everything the factory generates)
-
-1. **Validate before running** — every ADW declares `REQUIRED_AGENTS` and calls `agents.validate()` first; a missing/misnamed agent fails before anything spawns.
-2. **Typed outputs only** — every agent call pairs with a concrete envelope type built with `envelopeType()` in `adw_modules/data_types.ts` (zod under the hood — TypeScript's equivalent of a pydantic model); parse failures re-prompt the same session (context intact), never restart.
-   **The output contract is a synced triad**: (a) the type in `data_types.ts`, (b) the JSON example in the agent's `user.md` `## Report` section, (c) `output_type:` at every call site. These are ONE contract — change any one, update all three in the same edit (grep the type name to find every call site).
-3. **Gates validate claims, not guesses** — `gate(envelope, run) -> GateReport` violations; failures return to the same session as corrections.
-4. **Four-param rule** — any function with more than 4 parameters takes one concrete data type instead (`AgentCall`, `PhaseParams` are the pattern).
-5. **One agent, one prompt, one purpose** — identity lives in `system.md`; task shape (user prompt + output type) lives at the call site.
-6. **ADW scripts stay thin** — all low-level logic lives in `adw_modules/`.
-7. **Every phase earns a description** — one sentence on what it does and why, never a restatement of its name. It is the only intent the trace, the console, and the UI ever show; `commit_plan: "Commit the plan"` is rejected at construction, blank is too.
-8. **A known command is code, not an agent** — if you can write the invocation down (`bun test`, `oxlint`), it belongs in a `kind: "code"` phase via `adw_modules/quality.ts`. Agents are for the parts that need reading and deciding; failures come back to the builder as an envelope either way.
-9. **`tools:` is a capability list, `writes:` is the boundary** — `bash` runs anything (including `git checkout`) and `write` reaches any path, so a tool list can never make "this agent changes nothing" true. `writes:` per agent and `protected_files` in defaults are enforced in `adw_modules/permissions.ts` after every agent call: unauthorized changes are rolled back and the phase dies. The session runtime under `data_dir` is always writable — a read-only agent is read-only with respect to the REPO, never mute.
-10. **Every ADW ends in `run.finish()`** — phases passing is not the same as the run being accepted. A test phase that ran a red suite succeeded at its job. Pass `accepted` so the exit code, the session status, and the banner are decided together and cannot disagree.
-
-## v1 scope
-
-Pi coding agent only (`coding_agent: pi`), default model `gemini-3.6-flash` via openrouter, thinking `medium`. `claude_code` is schema-valid but stubbed until v2. The visualizer app ships in a later pass — observe via sqlite queries until then.
-
-## Runtime
-
-Every ADW and script is a Bun script run directly: `bun run adws/adw_scout.ts "..."` — no build step, no compiler config beyond what ships in `adws/tsconfig.json`. Bun loads `.env` automatically (parity with Python's `python-dotenv`), and `bun:sqlite` is the trace store's driver (parity with `sqlite3`). Runtime dependencies (`zod` for envelope/config validation, `yaml` for config parsing) live in `adws/package.json` — run `bun install` there once after `/sf install`.
+1. **Validate before running.** `agents.loadConfig()` + `agents.validate()`
+   run before any phase opens — a bad roster, missing prompt, unknown tool
+   name, or unconfigured quality suite fails loudly there, never mid-run.
+2. **Typed outputs — the synced triad.** Every call's envelope schema
+   (Valibot, `data_types.ts`), the JSON in that agent's `user.md`
+   `## Report`, and the `output_type:` at the call site are one fact in
+   three places. Edit them together.
+3. **Gates verify claims, never predict them.** They run *after* the
+   response and check what it claimed. A violation triggers a same-session
+   correction, never a cold restart.
+4. **The four-param rule.** >4 parameters becomes one data object
+   (`AgentCall`, `PhaseParams`, `RunInit`).
+5. **One agent, one prompt, one purpose.** A roster entry is who an agent
+   *is*; output type and per-call prompt are how it's *used*, and live at
+   the call site, never in config.
+6. **Chains stay thin.** Sequencing only — business logic belongs in `core/`.
+7. **Every phase needs a real description**, not a restatement of its name — rejected at construction time.
+8. **A known command is code.** Lint/test/typecheck/build are
+   `quality.checks` run by a `code` phase, never an agent rediscovering a
+   command. An unconfigured suite a chain needs is a hard error, never a placeholder green.
+9. **`writes` is the enforced boundary; `tools` is not.** `tools` grants
+   capability without promising restraint. `writes` is checked in code
+   after every call against the real diff — a breach is rolled back and
+   fails the phase; it is not a gate, because the write already happened.
+10. **`run.finish(accepted, reason)`, called once.** Every phase succeeding
+    and the run's own acceptance are separate questions — a red test-suite
+    phase that ran correctly still "succeeded."

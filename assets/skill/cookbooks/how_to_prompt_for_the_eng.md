@@ -1,6 +1,6 @@
 # How to Prompt for the Engineering
 
-Read this **before every ADW launch**. The prompt you pass is what the whole chain reads: the planner plans from it, the builder builds from it, the reviewer judges against it. Your prompt might run through 10s or 100s of agents. A sloppy prompt is not a small tax; it is paid again by every agent in the chain.
+Read this **before every chain launch**. The prompt you pass is what the whole chain reads: the planner plans from it, the builder builds from it, the reviewer judges against it. Your prompt might run through 10s or 100s of agents. A sloppy prompt is not a small tax; it is paid again by every agent in the chain.
 
 ## Purpose
 
@@ -54,18 +54,17 @@ Out of scope: tag editing UI, tag filtering on the post list.
 
 Same idea, same scope. What changed is that "popularity" became a sort order, the files are named, and nobody has to guess where it stops.
 
-## Which ADW
+## Which chain
 
 **If the engineer named one, launch that one.** Their call stands — no second-guessing, no "upgrading" them to a longer chain. If you think another fits better, say so in your own message and launch what they asked for.
 
-**If they did not, read what this repo actually has and choose from that.**
+**If they did not, read what this install actually has and choose from that.**
 
 ```bash
-ls adws/adw_*.ts                       # the menu
-head -20 adws/adw_<name>.ts            # every ADW opens with its `Phases:` line — the chain in one line
+sf list                                # every chain, its phases, what it needs — the menu
 ```
 
-Chains are the engineer's to add, rename, and rewire, so **the files on disk are the only authority**. Never launch from memory or from a name you saw in a doc; read the docstrings, then match by shape:
+Chains are the engineer's to add, rename, and rewire, so **`sf list`'s output is the only authority**. Never launch from memory or from a name you saw in a doc; read what it prints, then match by shape:
 
 | The work | Look for a chain that |
 |---|---|
@@ -76,11 +75,11 @@ Chains are the engineer's to add, rename, and rewire, so **the files on disk are
 | Writes up work already shipped | captures the diff and documents it |
 | Is a question, and nothing should change | is a single read-only agent — the one case where one phase is right |
 
-**Never a single-agent chain when the engineer asked for work to be done.** One-phase ADWs answer questions and run one-offs; they do not deliver.
+**Never a single-agent chain when the engineer asked for work to be done.** One-phase chains answer questions and run one-offs; they do not deliver.
 
 **The more complex the ask, the more complete the chain.** Complexity means: more than one file, a behaviour you cannot describe in one sentence, anything touching data or an interface others call, or any request where you had to guess. When two chains both fit, take the longer one — a phase you did not need costs cents, while a change nobody planned, verified, reviewed, or wrote up costs an afternoon.
 
-If nothing on disk fits the shape you need, say so and offer to compose one (`create_adw.md`) rather than forcing the work into a chain that skips the phase it needed.
+If nothing in `sf list` fits the shape you need, say so and offer to compose one (`authoring_chains.md`) rather than forcing the work into a chain that skips the phase it needed.
 
 ## Workflow
 
@@ -89,7 +88,7 @@ If nothing on disk fits the shape you need, say so and offer to compose one (`cr
 3. **Draft the four lines.**
 4. **Diff against the original.** Every specific thing they said, still there? Anything in your draft they did not say? Delete it.
 5. **Ask at most one question**, only when two readings would produce different code. Otherwise state your assumption in the prompt and say so when you report.
-6. **Launch** the chain from *Which ADW* above; `run_adw.md` covers the mechanics and the watching. Inline for a short ask; for anything longer, write `requests/<slug>.md` and pass the path — every ADW takes either.
+6. **Launch** the chain from *Which chain* above; `run_adw.md` covers the mechanics and the watching. Inline for a short ask; for anything longer, write `requests/<slug>.md` and pass the path — every chain takes either.
 
 ## Rules that do not bend here
 
@@ -103,8 +102,8 @@ If nothing on disk fits the shape you need, say so and offer to compose one (`cr
 After launching, show the engineer three things so a bad translation dies in seconds rather than at the commit phase:
 
 1. **The prompt you actually sent** — verbatim.
-2. **The ADW you chose**, and the one-line reason — or that you used the one they named.
+2. **The chain you chose**, and the one-line reason — or that you used the one they named.
    If they named a roster (a config, a model tier), say which one you ran on; if they did not, you ran the default, and switching that is their call, not yours (`run_adw.md`).
-3. **The `adw_id`**, so they can watch it (`just phases <adw_id>`).
+3. **The `adw_id`**, so they can watch it (`sf phases <adw_id>`).
 
 Then observe and report per `run_adw.md`. You run the system; you do not do the work inside it.
