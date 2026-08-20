@@ -1,0 +1,22 @@
+# Catches, before a push, exactly what CI's `test` and `pack` jobs would
+# catch after one — this exists because a push landed with a real test
+# failure that a local `npm test` would have caught immediately.
+#
+# Deliberately sequential (no `parallel: true`): `build`'s `npm run clean`
+# (rm -rf dist) racing `test`'s own `pretest` (build:cli, which writes
+# dist/) would be a real, not just theoretical, correctness problem.
+#
+# "lint" here is TypeScript's own typecheck — there's no separate linter
+# configured for the CLI source. app/'s SPA has its own `oxlint` (`npm
+# --prefix app run lint`), but nothing — not this hook, not CI — runs it
+# today; it's a real gap, left alone rather than silently claimed as covered.
+pre-push:
+  commands:
+    typecheck:
+      run: npm run typecheck
+    test:
+      run: npm test
+    build:
+      run: npm run build
+    size-check:
+      run: npm run size-check

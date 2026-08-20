@@ -25,6 +25,7 @@
     "access": "public"
   },
   "scripts": {
+    "prepare": "lefthook install",
     "build:cli": "tsc -p tsconfig.build.json && chmod +x dist/cli/bin.js",
     "build:app": "npm --prefix app ci && npm --prefix app run build",
     "build": "npm run clean && npm run build:cli && npm run build:app",
@@ -45,6 +46,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "lefthook": "^2.1.10",
     "typescript": "^7.0.2"
   }
 }

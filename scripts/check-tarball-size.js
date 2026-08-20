@@ -17,8 +17,19 @@ const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
 // prepack guard has already had its say; running it again here would only
 // print its own output onto the same stdout stream this script parses as JSON.
+// It does NOT suppress `prepare`, though (verified directly: npm still ran
+// `lefthook install` here despite the flag, printing "sync hooks: ..." onto
+// stdout) — `prepare`'s whole point is to run before packing regardless, so
+// rather than fight that, find where npm's own JSON array actually starts
+// (its own line, always "[") and parse from there instead of the raw string.
 const raw = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf-8" });
-const [info] = JSON.parse(raw);
+const lines = raw.split("\n");
+const jsonStart = lines.findIndex((line) => line.trim() === "[");
+if (jsonStart === -1) {
+  console.error("check-tarball-size: could not find the start of npm pack's JSON output:\n" + raw);
+  process.exit(1);
+}
+const [info] = JSON.parse(lines.slice(jsonStart).join("\n"));
 
 function fmt(bytes) {
   return `${(bytes / 1000).toFixed(1)}kB`;
