@@ -25,7 +25,7 @@
     "access": "public"
   },
   "scripts": {
-    "build:cli": "tsc -p tsconfig.build.json",
+    "build:cli": "tsc -p tsconfig.build.json && chmod +x dist/cli/bin.js",
     "build:app": "npm --prefix app ci && npm --prefix app run build",
     "build": "npm run clean && npm run build:cli && npm run build:app",
     "clean": "rm -rf dist",
