@@ -4,6 +4,10 @@
   "description": "Super Portable Factory — a global CLI for repeatable agents-plus-code workflows (ADWs)",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/seesharpguy/super-portable-software-factory"
+  },
   "bin": {
     "spf": "dist/cli/bin.js"
   },
