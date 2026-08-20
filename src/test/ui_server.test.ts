@@ -21,7 +21,14 @@ const ADW_ID = "t1";
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "spf-ui-test-"));
   execFileSync("git", ["init", "-q"], { cwd: dir });
-  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: dir });
+  // -c user.*, not a global git config: this must pass in a fresh CI runner
+  // with no git identity configured at all, not just on a dev machine that
+  // already has one.
+  execFileSync(
+    "git",
+    ["-c", "user.email=test@example.com", "-c", "user.name=spf tests", "commit", "-q", "--allow-empty", "-m", "init"],
+    { cwd: dir },
+  );
 
   const dbPath = join(dir, "spf.db");
   const tracer = new Tracer(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
