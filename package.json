@@ -1,5 +1,5 @@
 {
-  "name": "@grateful8/spf",
+  "name": "@gr8ful/spf",
   "version": "0.1.0",
   "description": "Super Portable Factory — a global CLI for repeatable agents-plus-code workflows (ADWs)",
   "type": "module",

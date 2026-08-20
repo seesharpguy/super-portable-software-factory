@@ -64,7 +64,7 @@ jobs:
       - run: npm run size-check
       # No NODE_AUTH_TOKEN / secrets.NPM_TOKEN: this repo's GitHub Actions
       # workflow is registered as a Trusted Publisher on npmjs.com for
-      # @grateful8/spf (Packages -> @grateful8/spf -> Settings -> Trusted
+      # @gr8ful/spf (Packages -> @gr8ful/spf -> Settings -> Trusted
       # publishing), so npm exchanges this job's own OIDC token for a
       # short-lived publish credential instead of a long-lived secret.
       # Provenance is generated automatically by trusted publishing — no

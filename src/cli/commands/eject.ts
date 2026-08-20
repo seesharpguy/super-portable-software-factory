@@ -44,7 +44,7 @@ export function ejectCommand(argv: string[]): number {
 
   writeFileSync(
     path.join(destRoot, "NOTES.md"),
-    `# Ejected engine — @grateful8/spf v${pkg.version}\n\n` +
+    `# Ejected engine — @gr8ful/spf v${pkg.version}\n\n` +
       `A reference copy of this install's compiled engine (\`core/\`, \`chains/\`), for reading or for\n` +
       `reapplying hand-edited logic from an old stamped \`adws/adw_modules/\` tree.\n\n` +
       `**This is JS, not TypeScript** — the published package ships compiled output only. It is **not\n` +

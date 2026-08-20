@@ -123,7 +123,7 @@ export function installSkillCommand(argv: string[]): number {
   }
 
   mkdirSync(destRoot, { recursive: true });
-  const manifest: Manifest = { package: "@grateful8/spf", version, files: finalFiles };
+  const manifest: Manifest = { package: "@gr8ful/spf", version, files: finalFiles };
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
   console.log(`spf install-skill: ${destRoot} (v${version})`);

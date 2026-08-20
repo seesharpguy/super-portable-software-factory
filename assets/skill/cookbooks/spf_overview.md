@@ -11,7 +11,7 @@ between. "Agent proposes, code disposes" — an agent's response is a claim,
 and code (a gate, a quality check, a permissions check) verifies it before
 the chain moves on.
 
-SPF is a global CLI (`npm i -g @grateful8/spf`), not a template stamped into
+SPF is a global CLI (`npm i -g @gr8ful/spf`), not a template stamped into
 the target repo. It ships:
 
 - a packaged **default roster** (`spf.config.yaml`) and **default prompts**,

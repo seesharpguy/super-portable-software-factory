@@ -12,7 +12,7 @@ Everyone can get an agent to write code once. Almost nobody gets the same result
 ## Install
 
 ```bash
-npm i -g @grateful8/spf
+npm i -g @gr8ful/spf
 ```
 
 No Bun, no separate coding-agent binary to install first, no template stamped into your repo. `spf` ships with a packaged default agent roster and default prompts — it runs against any repo with zero setup, and only writes files into that repo if you explicitly ask it to (`spf init`, `spf install-skill`).
@@ -54,7 +54,7 @@ npm test            # node --test against dist/**/*.test.js (runs build:cli firs
 npm run size-check  # tarball size gate — what `npm pack` would actually publish
 ```
 
-For a one-off check without touching global npm state at all, run the built CLI directly: `node dist/cli/bin.js doctor --cwd /path/to/repo`. When you're done with the linked version, `npm unlink -g @grateful8/spf` removes it.
+For a one-off check without touching global npm state at all, run the built CLI directly: `node dist/cli/bin.js doctor --cwd /path/to/repo`. When you're done with the linked version, `npm unlink -g @gr8ful/spf` removes it.
 
 ---
 
