@@ -5,7 +5,7 @@
  * actual state machine; this file is just the wiring: config, the GitHub
  * provider, the chain-dispatch callback, the lockfile, and the CLI loop.
  */
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import * as agents from "../../core/agents.ts";
@@ -168,6 +168,27 @@ export async function watchCommand(argv: string[]): Promise<number> {
   const worktreesDir = path.join(homedir(), ".spf", "watch", path.basename(anchor.repo_root), "worktrees");
   mkdirSync(worktreesDir, { recursive: true });
 
+  /**
+   * Without this, a claimed issue's chain resolves its session/trace data
+   * relative to `cwd` (the worktree, not the main repo — see
+   * ChainContext's doc comment), so it lands in a fresh `.spf/data` that
+   * `cleanupWorktree` deletes along with the rest of the worktree once the
+   * issue finishes: invisible in `spf ui` while running, and gone entirely
+   * afterward. Symlinking `.spf/data` in the worktree to the main repo's
+   * own `dataPaths.data_dir` makes every claimed issue show up in the same
+   * `spf ui` you already have open, and survive worktree cleanup. Multiple
+   * concurrent worktrees writing through the same symlink to one sqlite
+   * file is exactly what tracer.ts's WAL + busy_timeout=5000 already exist
+   * for. Idempotent: a no-op if the worktree already has a `.spf/data`
+   * (e.g. resuming an orphaned worktree).
+   */
+  function linkDataDir(worktreePath: string): void {
+    const target = path.join(worktreePath, ".spf", "data");
+    if (existsSync(target)) return;
+    mkdirSync(path.dirname(target), { recursive: true });
+    symlinkSync(dataPaths.data_dir, target, "dir");
+  }
+
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
     const chainDef = findChain(cfg.watch.chain)!; // checked above
     const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd };
@@ -197,6 +218,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     baseBranch: cfg.watch.base_branch,
     concurrency: cfg.watch.concurrency,
     worktreesDir,
+    linkDataDir,
     dryRun: Boolean(flags["dry-run"]),
     runChain,
     log: (message) => console.log(message),

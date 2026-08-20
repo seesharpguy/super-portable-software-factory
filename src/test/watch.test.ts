@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { branchNameFor, claimNewWork, createWatchState, finishReviews, reconcileOrphans } from "../core/watch.js";
 import type { GitHandle } from "../core/git_helper.js";
 import type { ChainRunResult, WatchDeps } from "../core/watch.js";
@@ -115,6 +116,7 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     baseBranch: "main",
     concurrency: 2,
     worktreesDir: "/tmp/spf-watch-test-worktrees",
+    linkDataDir: () => {},
     dryRun: false,
     runChain: async (): Promise<ChainRunResult> => ({ accepted: true, adwId: "issue-1", detail: "" }),
     log: () => {},
@@ -136,12 +138,47 @@ test("branchNameFor: sanitizes a title into a safe branch name", () => {
   assert.equal(branchNameFor({ id: "PROJ-123", title: "Fix the thing", body: "", labels: [] }), "spf-watch/PROJ-123-fix-the-thing");
 });
 
+test("claimNewWork: clears a stale worktree/branch from a killed prior attempt before creating a fresh one", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("2", "Retry me");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const calls: string[] = [];
+  // Simulates a `spf watch` process killed mid-run for this exact issue: a
+  // real `git.worktreeAdd` would refuse outright with "fatal: a branch
+  // named '...' already exists" until the leftover branch is cleared.
+  let branchExists = true;
+  const deps = makeDeps(provider, codeHost, {
+    git: fakeGit({
+      worktreeRemove: (p) => calls.push(`remove:${p}`),
+      deleteLocalBranch: (n) => {
+        calls.push(`delete-branch:${n}`);
+        branchExists = false;
+      },
+      worktreeAdd: (p, b) => {
+        if (branchExists) throw new Error(`fatal: a branch named '${b}' already exists`);
+        calls.push(`add:${p}`);
+      },
+    }),
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  const branchIdx = calls.findIndex((c) => c.startsWith("delete-branch:"));
+  const addIdx = calls.findIndex((c) => c.startsWith("add:"));
+  assert.ok(branchIdx !== -1 && addIdx !== -1 && branchIdx < addIdx, `expected the stale branch cleared before worktreeAdd, got: ${calls.join(", ")}`);
+  // The retry then succeeds normally, same as any other claim.
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["review"]);
+});
+
 test("claimNewWork: claims a ready issue, runs the chain, opens a PR, and moves to review", async () => {
   const provider = new FakeProvider();
   provider.addIssue("1", "Add a /health endpoint");
   const codeHost = new FakeCodeHost();
   const state = createWatchState();
-  const deps = makeDeps(provider, codeHost);
+  const linkedWorktrees: string[] = [];
+  const deps = makeDeps(provider, codeHost, { linkDataDir: (worktreePath) => linkedWorktrees.push(worktreePath) });
 
   await claimNewWork(deps, state);
   await waitUntil(() => state.inflight.size === 0);
@@ -151,6 +188,11 @@ test("claimNewWork: claims a ready issue, runs the chain, opens a PR, and moves 
   assert.match(codeHost.openedPrs[0]!.title, /^Add a \/health endpoint \(1\)/);
   assert.deepEqual(provider.transitions.map((t) => t.to), ["review"]);
   assert.equal(provider.entries.get("1")!.marker?.pr, 1000);
+  // linkDataDir must run before the chain does — otherwise the run's own
+  // session/trace data resolves into the worktree's throwaway .spf/data
+  // instead of the main repo's persistent one (invisible in spf ui, and
+  // deleted along with the worktree on cleanup).
+  assert.deepEqual(linkedWorktrees, [path.join(deps.worktreesDir, "issue-1")]);
 });
 
 test("claimNewWork: a rejected chain run blocks the issue with the failure detail", async () => {

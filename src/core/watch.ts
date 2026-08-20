@@ -51,6 +51,18 @@ export interface WatchDeps {
   baseBranch: string;
   concurrency: number;
   worktreesDir: string; // OUTSIDE the repo — see module doc comment
+  /**
+   * Symlink (or otherwise wire up) `<worktreePath>/.spf/data` to the MAIN
+   * repo's own persistent data_dir, called once per worktree right after
+   * it's created. Without this, a chain run's session/trace data resolves
+   * relative to `cwd` (the worktree — see ChainContext's doc comment) and
+   * lands in a fresh, throwaway `.spf/data` that `cleanupWorktree` deletes
+   * along with the rest of the worktree once the issue finishes: no trace
+   * in `spf ui`, and no trace anywhere at all after cleanup. Injected (not
+   * called directly) so watch.ts's own tests never touch the real
+   * filesystem for it.
+   */
+  linkDataDir: (worktreePath: string) => void;
   dryRun: boolean;
   runChain: (opts: { prompt: string; cwd: string; adwId: string }) => Promise<ChainRunResult>;
   log: (message: string) => void;
@@ -157,8 +169,19 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
   const worktreePath = worktreePathFor(deps, issue);
   const adwId = `issue-${issue.id}`;
   try {
+    // Both worktreePath and branch are fully deterministic from issue.id —
+    // the only way either could already exist is a previous spf watch
+    // attempt for THIS issue that never reached its own cleanup (killed
+    // mid-run, crashed, machine restart). `git worktree add -b` refuses
+    // outright if the branch already exists ("fatal: a branch named '...'
+    // already exists"), which without this would permanently block the
+    // issue from ever being claimed again — it'd fail this same way on
+    // every single retry. Safe to clear unconditionally: worktreeRemove/
+    // deleteLocalBranch are both no-ops if there's nothing to remove.
+    cleanupWorktree(deps, { worktree: worktreePath, branch });
     deps.git.fetch("origin", deps.baseBranch);
     deps.git.worktreeAdd(worktreePath, branch, `origin/${deps.baseBranch}`);
+    deps.linkDataDir(worktreePath);
     await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
 
     const prompt = `${issue.title}\n\n${issue.body}`.trim();
