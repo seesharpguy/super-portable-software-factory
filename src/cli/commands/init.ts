@@ -29,7 +29,10 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 
 # Uncomment to enable \`spf watch\` — polls GitHub issues labeled
 # <label_prefix>:ready and runs \`chain\` against each in its own worktree.
-# Needs a GITHUB_TOKEN env var (classic PAT, repo scope) — \`spf doctor\` checks.
+# Needs a GITHUB_TOKEN env var: a classic PAT with repo scope (or public_repo
+# for a public-only repo) — never the project scope, which is unrelated and
+# unused here. See README.md's "GITHUB_TOKEN scope" section. \`spf doctor\`
+# checks it's set.
 # watch:
 #   repo: owner/name
 #   label_prefix: spf

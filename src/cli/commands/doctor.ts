@@ -164,7 +164,14 @@ export function doctorCommand(argv: string[]): number {
 
   if (cfg.watch.repo.trim()) {
     check(report, "watch.provider", cfg.watch.provider === "github", cfg.watch.provider);
-    check(report, "GITHUB_TOKEN", Boolean(process.env["GITHUB_TOKEN"]), process.env["GITHUB_TOKEN"] ? "set" : "not set — spf watch needs a classic PAT with repo scope");
+    check(
+      report,
+      "GITHUB_TOKEN",
+      Boolean(process.env["GITHUB_TOKEN"]),
+      process.env["GITHUB_TOKEN"]
+        ? "set"
+        : 'not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo); see README.md\'s "GITHUB_TOKEN scope" section',
+    );
     check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
   }
 

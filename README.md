@@ -233,7 +233,7 @@ watch:
 ```
 
 ```bash
-export GITHUB_TOKEN=...     # classic PAT, repo scope — spf doctor checks it's set
+export GITHUB_TOKEN=...     # classic PAT — see "GITHUB_TOKEN scope" below; spf doctor checks it's set
 spf watch init                # idempotently create/update the 5 labels below — run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
 spf watch --once             # one poll tick, then exit — good for cron
@@ -243,6 +243,19 @@ spf watch --dry-run          # log intended claims/transitions, mutate nothing
 `spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked` with a color and description each — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
 
 No GitHub App, no webhook — it's a plain REST poll, same philosophy as the trace db's own polling contract. See [`docs/examples/`](docs/examples/) for full worked configs, and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
+
+### `GITHUB_TOKEN` scope
+
+A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes: creating/editing labels, reading and labeling issues, posting comments, opening PRs, and reading PR/check-run status.
+
+| Target repo | Scope | Covers |
+|---|---|---|
+| Private | `repo` | Everything above, full read/write |
+| Public only | `public_repo` | The same, restricted to public repos |
+
+**Do not grant the `project` scope.** It's a separate, unrelated permission for GitHub Projects (classic/org/user boards) — `spf watch` doesn't touch Projects at all (deliberately out of scope for v1; see the label-based state machine above), so granting it would just be more access than this tool ever uses.
+
+There's no dedicated "issues" or "pull requests" scope on classic PATs — GitHub bundles both into `repo`/`public_repo`, which is why that's the whole table.
 
 ## What's in this repo
 

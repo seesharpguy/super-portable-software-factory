@@ -39,7 +39,7 @@ function resolveWatchProvider(cfg: SFConfig): IssueProvider | null {
   }
   const token = process.env["GITHUB_TOKEN"];
   if (!token) {
-    console.error("GITHUB_TOKEN is not set — spf watch needs a classic PAT with repo scope");
+    console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
     return null;
   }
   return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
