@@ -1,0 +1,26 @@
+# .spf/spf.config.yaml — using the factory on itself.
+#
+# Wired for a Node/TypeScript repo: typecheck, a CLI-only build (fast — the
+# visualizer SPA build is skipped here on purpose, see below), and the test
+# suite (which builds the CLI itself via `pretest`, so "build" and "test"
+# together cover both dist/ and web/ correctness paths that matter day to
+# day). `npm run build` (the full build, cli + app) is deliberately NOT a
+# quality check — it's slow (installs app/'s deps) and only matters right
+# before a publish, which `.github/workflows/ci.yml`'s pack job already
+# covers.
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build:cli"], timeout_seconds: 120 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 180 }
+  suites:
+    test: [test]
+    all: [typecheck, build, test]
+
+# Every agent runs on Claude Code instead of Flue — no separate provider API
+# key needed beyond being logged into `claude` (spf doctor checks it's on
+# PATH). Per-agent model/thinking/tools/writes overrides all still apply on
+# top of this, same as with Flue.
+defaults:
+  coding_agent: claude_code
+  model: sonnet

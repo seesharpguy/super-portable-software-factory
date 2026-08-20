@@ -160,3 +160,7 @@ sssf.db*
 apps/inkwell/inkwell.db*
 
 *.mov
+
+# spf runtime
+.spf/data/
+.spf/engine/
