@@ -46,7 +46,23 @@ export interface WatchMarker {
   attempt?: number;
 }
 
+/** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */
+export interface EnsureLabelsResult {
+  created: string[];
+  updated: string[];
+  unchanged: string[];
+}
+
 export interface IssueProvider {
+  /**
+   * Idempotently seed whatever this tracker needs for the state machine to
+   * work at all — GitHub: the five `<prefix>:*` labels, with a color and
+   * description, created if missing and corrected if drifted. A tracker
+   * with no such concept (a future one might model state entirely as a
+   * workflow field) can make this a no-op — `spf watch init` just reports
+   * whatever comes back, empty results included.
+   */
+  ensureLabels(): Promise<EnsureLabelsResult>;
   /** Issues currently labeled `<prefix>:ready`. */
   listEligible(): Promise<Issue[]>;
   /**

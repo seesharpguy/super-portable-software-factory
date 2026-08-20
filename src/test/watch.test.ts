@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { branchNameFor, claimNewWork, createWatchState, finishReviews, reconcileOrphans } from "../core/watch.js";
 import type { GitHandle } from "../core/git_helper.js";
 import type { ChainRunResult, WatchDeps } from "../core/watch.js";
-import type { Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "../core/issues/provider.js";
+import type { EnsureLabelsResult, Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "../core/issues/provider.js";
 
 interface FakeEntry {
   issue: Issue;
@@ -15,6 +15,7 @@ interface FakeEntry {
 class FakeProvider implements IssueProvider {
   entries = new Map<number, FakeEntry>();
   prs = new Map<number, PrStatus>();
+  ensureLabelsCalls = 0;
   transitions: Array<{ number: number; to: WatchState; detail?: string }> = [];
   openedPrs: Array<{ issueNumber: number; branch: string }> = [];
   claimCalls: number[] = [];
@@ -24,6 +25,10 @@ class FakeProvider implements IssueProvider {
     this.entries.set(number, { issue: { number, title, body: "", labels: [`spf:${state}`] }, state, marker });
   }
 
+  async ensureLabels(): Promise<EnsureLabelsResult> {
+    this.ensureLabelsCalls++;
+    return { created: [], updated: [], unchanged: [] };
+  }
   async listEligible(): Promise<Issue[]> {
     return [...this.entries.values()].filter((e) => e.state === "ready").map((e) => e.issue);
   }

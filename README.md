@@ -234,10 +234,13 @@ watch:
 
 ```bash
 export GITHUB_TOKEN=...     # classic PAT, repo scope — spf doctor checks it's set
+spf watch init                # idempotently create/update the 5 labels below — run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
 spf watch --once             # one poll tick, then exit — good for cron
 spf watch --dry-run          # log intended claims/transitions, mutate nothing
 ```
+
+`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked` with a color and description each — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
 
 No GitHub App, no webhook — it's a plain REST poll, same philosophy as the trace db's own polling contract. See [`docs/examples/`](docs/examples/) for full worked configs, and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
 

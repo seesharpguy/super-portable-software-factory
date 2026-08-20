@@ -12,11 +12,20 @@
  * makes (a repo with >100 open `<prefix>:ready` issues at once is not this
  * version's problem to solve).
  */
-import type { Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "./provider.ts";
+import type { EnsureLabelsResult, Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "./provider.ts";
 
 const API = "https://api.github.com";
 const STATES: WatchState[] = ["ready", "working", "review", "done", "blocked"];
 const MARKER_RE = /<!--\s*spf-watch:\s*(\{.*?\})\s*-->/s;
+
+// GitHub label colors are 6 hex digits, no leading '#'.
+const LABEL_META: Record<WatchState, { color: string; description: string }> = {
+  ready: { color: "0e8a16", description: "spf watch will claim this issue on its next poll" },
+  working: { color: "fbca04", description: "spf watch has claimed this issue and is running a chain against it" },
+  review: { color: "1d76db", description: "spf watch opened a PR for this issue — awaiting merge" },
+  done: { color: "5319e7", description: "spf watch's PR for this issue merged" },
+  blocked: { color: "d93f0b", description: "spf watch gave up — needs a human" },
+};
 
 interface GhIssue {
   number: number;
@@ -54,6 +63,49 @@ export class GitHubProvider implements IssueProvider {
 
   private label(state: WatchState): string {
     return `${this.labelPrefix}:${state}`;
+  }
+
+  /** `null` on a real 404 (label doesn't exist yet) — any other non-2xx still throws, same as `gh()`. */
+  private async getLabel(name: string): Promise<{ color: string; description: string | null } | null> {
+    const response = await fetch(`${API}/repos/${this.repo}/labels/${encodeURIComponent(name)}`, {
+      headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`GitHub GET /repos/${this.repo}/labels/${name} -> ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    return (await response.json()) as { color: string; description: string | null };
+  }
+
+  /**
+   * Idempotent by inspection, not by "create and catch a 422": GET each
+   * label first, then create/update/leave alone depending on what's
+   * actually there. One fewer request in the common "already correct"
+   * case, and no brittle matching against GitHub's error-message text.
+   */
+  async ensureLabels(): Promise<EnsureLabelsResult> {
+    const created: string[] = [];
+    const updated: string[] = [];
+    const unchanged: string[] = [];
+    for (const state of STATES) {
+      const name = this.label(state);
+      const { color, description } = LABEL_META[state];
+      const existing = await this.getLabel(name);
+      if (!existing) {
+        await this.gh(`/repos/${this.repo}/labels`, { method: "POST", body: JSON.stringify({ name, color, description }) });
+        created.push(name);
+      } else if (existing.color !== color || (existing.description ?? "") !== description) {
+        await this.gh(`/repos/${this.repo}/labels/${encodeURIComponent(name)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ color, description }),
+        });
+        updated.push(name);
+      } else {
+        unchanged.push(name);
+      }
+    }
+    return { created, updated, unchanged };
   }
 
   private toIssue(raw: GhIssue): Issue {

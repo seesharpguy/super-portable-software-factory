@@ -12,11 +12,38 @@ import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import { isRepoAt, makeGit } from "../../core/git_helper.ts";
 import { GitHubProvider } from "../../core/issues/github_provider.ts";
+import type { IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
+import type { SFConfig } from "../../core/data_types.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
+
+/**
+ * Shared by `watch` and `watch init`: resolve config and build the
+ * provider, checking only what BOTH need — a supported provider, a
+ * non-empty `watch.repo`, and `GITHUB_TOKEN`. `watch`'s own extra checks
+ * (a real git repo, a registered chain) don't apply to seeding labels.
+ * Prints its own error and returns `null` on failure — the caller just
+ * needs to `return 1`.
+ */
+function resolveWatchProvider(cfg: SFConfig): IssueProvider | null {
+  if (cfg.watch.provider !== "github") {
+    console.error(`watch.provider ${JSON.stringify(cfg.watch.provider)} is not supported`);
+    return null;
+  }
+  if (!cfg.watch.repo.trim()) {
+    console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
+    return null;
+  }
+  const token = process.env["GITHUB_TOKEN"];
+  if (!token) {
+    console.error("GITHUB_TOKEN is not set — spf watch needs a classic PAT with repo scope");
+    return null;
+  }
+  return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -51,25 +78,36 @@ function releaseLock(lockPath: string): void {
   }
 }
 
+/**
+ * `spf watch init` — idempotently seed the `<prefix>:*` labels the state
+ * machine needs, with sensible colors/descriptions. Doesn't touch git or
+ * run anything, so it skips watchCommand's repo/chain checks entirely —
+ * you can seed labels before ever wiring up a worktree-capable checkout.
+ */
+export async function watchInitCommand(argv: string[]): Promise<number> {
+  const { options } = parseCli(argv, ["cwd", "config"], []);
+  const anchor = paths.resolveAnchor(options["cwd"]);
+  const cfg = agents.loadConfig(paths.resolveConfigPaths(anchor, options["config"]).paths);
+
+  const provider = resolveWatchProvider(cfg);
+  if (!provider) return 1;
+
+  const result = await provider.ensureLabels();
+  console.log(`spf watch init: ${cfg.watch.repo} (label prefix "${cfg.watch.label_prefix}")`);
+  for (const name of result.created) console.log(`  + ${name} (created)`);
+  for (const name of result.updated) console.log(`  ~ ${name} (updated color/description)`);
+  for (const name of result.unchanged) console.log(`  = ${name} (already correct)`);
+  return 0;
+}
+
 export async function watchCommand(argv: string[]): Promise<number> {
   const { options, flags } = parseCli(argv, ["cwd", "config"], ["dry-run", "once"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
   const configPaths = paths.resolveConfigPaths(anchor, options["config"]).paths;
   const cfg = agents.loadConfig(configPaths);
 
-  if (cfg.watch.provider !== "github") {
-    console.error(`watch.provider ${JSON.stringify(cfg.watch.provider)} is not supported`);
-    return 1;
-  }
-  if (!cfg.watch.repo.trim()) {
-    console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
-    return 1;
-  }
-  const token = process.env["GITHUB_TOKEN"];
-  if (!token) {
-    console.error("GITHUB_TOKEN is not set — spf watch needs a classic PAT with repo scope");
-    return 1;
-  }
+  const provider = resolveWatchProvider(cfg);
+  if (!provider) return 1;
   if (!isRepoAt(anchor.repo_root)) {
     console.error(`${anchor.repo_root} is not a git repository`);
     return 1;
@@ -88,7 +126,6 @@ export async function watchCommand(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const provider = new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
   const git = makeGit(anchor.repo_root);
   const worktreesDir = path.join(homedir(), ".spf", "watch", path.basename(anchor.repo_root), "worktrees");
   mkdirSync(worktreesDir, { recursive: true });

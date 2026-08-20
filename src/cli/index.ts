@@ -21,7 +21,7 @@ import { phasesCommand } from "./commands/phases.ts";
 import { eventsCommand } from "./commands/events.ts";
 import { abortCommand } from "./commands/abort.ts";
 import { uiCommand } from "./commands/ui.ts";
-import { watchCommand } from "./commands/watch.ts";
+import { watchCommand, watchInitCommand } from "./commands/watch.ts";
 import { versionCommand } from "./commands/version.ts";
 
 const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
@@ -34,6 +34,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
   spf doctor [--json]                       check everything that fails silently otherwise
   spf ui [--port N] [--no-open] [--db path] open the trace visualizer
+  spf watch init                            idempotently seed the <prefix>:* labels watch.repo needs
   spf watch [--dry-run] [--once]            poll watch.repo for labeled issues, run watch.chain on each
   spf sessions [--limit N] [--json]         recent runs
   spf phases <adw_id> [--json]              one run's phases
@@ -111,9 +112,11 @@ export async function main(): Promise<void> {
       case "ui":
         process.exitCode = await uiCommand(rest);
         return;
-      case "watch":
-        process.exitCode = await watchCommand(rest);
+      case "watch": {
+        const [sub, ...watchArgs] = rest;
+        process.exitCode = sub === "init" ? await watchInitCommand(watchArgs) : await watchCommand(rest);
         return;
+      }
       case "sessions":
         process.exitCode = sessionsCommand(rest);
         return;
