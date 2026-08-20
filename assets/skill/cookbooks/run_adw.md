@@ -12,18 +12,18 @@ that prompt.
 
 ## Launch
 
-`sf list` shows every chain this install knows, its phases, and what it
+`spf list` shows every chain this install knows, its phases, and what it
 requires — the names are shape, not a fixed menu; read the actual output.
 
 ```bash
-sf <chain> "<prompt>"                          # e.g. sf plan-build-test "add a /health endpoint"
-sf <chain> requests/health.md                  # prompt can be a file path instead of inline text
-sf <chain> "implement the plan" --adw-id a1b2c3d4   # join an existing session
-sf <chain> "..." --config path/to/other.config.yaml # a non-default roster
-sf <chain> "..." --cwd /path/to/other-repo          # run against a different repo
+spf <chain> "<prompt>"                          # e.g. spf plan-build-test "add a /health endpoint"
+spf <chain> requests/health.md                  # prompt can be a file path instead of inline text
+spf <chain> "implement the plan" --adw-id a1b2c3d4   # join an existing session
+spf <chain> "..." --config path/to/other.config.yaml # a non-default roster
+spf <chain> "..." --cwd /path/to/other-repo          # run against a different repo
 ```
 
-Launch in the background so you can poll while it works. `sf` prints the
+Launch in the background so you can poll while it works. `spf` prints the
 `adw_id` on startup — capture it, everything else keys off it.
 
 ### Naming a roster
@@ -51,18 +51,18 @@ plan under one id, then build under the same id.
 ## Observe
 
 ```bash
-sf sessions [--limit N]              # recent runs
-sf phases <adw_id>                   # phase-by-phase status for one run
-sf events <adw_id> [--follow]        # the trace, live-tailable
-sf abort <adw_id>                    # signal a stuck run's process to stop
+spf sessions [--limit N]              # recent runs
+spf phases <adw_id>                   # phase-by-phase status for one run
+spf events <adw_id> [--follow]        # the trace, live-tailable
+spf abort <adw_id>                    # signal a stuck run's process to stop
 ```
 
-`sf events --follow` polls the same rowid cursor the visualizer does — safe
-to leave running. `sf phases` marks each phase ✓/✗/… — remember **every
+`spf events --follow` polls the same rowid cursor the visualizer does — safe
+to leave running. `spf phases` marks each phase ✓/✗/… — remember **every
 phase defaults to fail**, so `✗` may mean it never completed, and `…` means
 still running, not stuck.
 
-For a visual view of the same data: `sf ui` — opens a browser, renders
+For a visual view of the same data: `spf ui` — opens a browser, renders
 sessions as cards and runs as swim lanes, phases and tool calls drill in.
 
 ## When a run is stuck
@@ -71,11 +71,11 @@ A hung agent produces no events at all, so the trace goes quiet rather than
 red.
 
 ```bash
-sf phases <adw_id>       # which phase is still "running"
-sf abort <adw_id>        # stop it
+spf phases <adw_id>       # which phase is still "running"
+spf abort <adw_id>        # stop it
 ```
 
-`sf abort` sends `SIGTERM` to the OS process running the chain (there's no
+`spf abort` sends `SIGTERM` to the OS process running the chain (there's no
 separate per-agent handle to target from a different CLI invocation — Flue
 runs in-process, so stopping the run means stopping that process). A killed
 run finalizes its own trace: it lands on `fail` with its process rows
@@ -86,7 +86,7 @@ closed, never left claiming `running` forever.
 Tell the engineer, in order: which chain and which roster you launched (name
 the config whenever it wasn't the default), which phase is running now or
 which failed, phase statuses in sequence, and for a failure the gate
-violations or the error verbatim, from `sf phases`/`sf events`. Don't dress
+violations or the error verbatim, from `spf phases`/`spf events`. Don't dress
 up a partial run as a success.
 
 Full trace schema and what each column means: `references/observability.md`.

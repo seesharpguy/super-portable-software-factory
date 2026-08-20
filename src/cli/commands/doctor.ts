@@ -1,5 +1,5 @@
 /**
- * `sf doctor` — the answer to every "why did nothing happen". Resolves and
+ * `spf doctor` — the answer to every "why did nothing happen". Resolves and
  * prints every anchor, validates the whole roster (not just what one chain
  * needs), and checks the things that fail silently otherwise: a missing
  * provider key, a quality check whose binary isn't on PATH, a
@@ -60,9 +60,9 @@ export function doctorCommand(argv: string[]): number {
   const anchor = paths.resolveAnchor(options["cwd"]);
   check(report, "cwd", true, anchor.cwd);
   check(report, "repo_root", true, anchor.repo_root);
-  // Informational only — no .sf/ is a fully valid, supported state (pure
+  // Informational only — no .spf/ is a fully valid, supported state (pure
   // built-ins), never a failure on its own.
-  check(report, ".sf directory", true, anchor.sf_dir ?? "(none — running off packaged built-ins; run `sf init` to override)");
+  check(report, ".spf directory", true, anchor.spf_dir ?? "(none — running off packaged built-ins; run `spf init` to override)");
 
   const isRepo = isRepoAt(anchor.repo_root);
   check(report, "git repository", isRepo, isRepo ? "yes" : "no — commit phases and change capture will fail");
@@ -146,7 +146,7 @@ function finish(report: Report, json: boolean): number {
     for (const c of report.checks) {
       console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
     }
-    console.log(report.ok ? "\nsf doctor: clean" : "\nsf doctor: problems found above");
+    console.log(report.ok ? "\nspf doctor: clean" : "\nspf doctor: problems found above");
   }
   return report.ok ? 0 : 1;
 }

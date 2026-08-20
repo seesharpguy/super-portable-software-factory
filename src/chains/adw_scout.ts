@@ -2,7 +2,7 @@
  * ADW Scout — read-only recon workflow. Just looking for stuff.
  *
  * Usage:
- *   bun run adws/adw_scout.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf scout "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> scout
  */

@@ -4,7 +4,7 @@ import { openTrace } from "./trace.ts";
 export function phasesCommand(argv: string[]): number {
   const { positionals, options, flags } = parseCli(argv, ["cwd", "config"], ["json"]);
   if (positionals.length < 1) {
-    console.error("usage: sf phases <adw_id> [--cwd <dir>] [--config <path>] [--json]");
+    console.error("usage: spf phases <adw_id> [--cwd <dir>] [--config <path>] [--json]");
     return 1;
   }
   const adwId = positionals[0];

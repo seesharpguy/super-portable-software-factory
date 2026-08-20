@@ -9,7 +9,7 @@ export interface ChainContext {
   /**
    * Absolute paths, in load order (agents.loadConfig merges them: later
    * overrides earlier). The built-in packaged default, then an optional
-   * discovered `.sf/sf.config.yaml` — or just the one explicit `--config`
+   * discovered `.spf/spf.config.yaml` — or just the one explicit `--config`
    * path, standalone, with no built-in underneath it.
    */
   config_paths: string[];

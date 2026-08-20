@@ -1,6 +1,6 @@
 /**
  * Route-parity regression test for the Bun.serve -> Hono port. Builds a real
- * sf.db (via the tracer, not a fixture file) and drives runUi() with real
+ * spf.db (via the tracer, not a fixture file) and drives runUi() with real
  * HTTP requests — the same shape as the manual verification this port was
  * checked against, kept as a regression guard rather than a one-off.
  */
@@ -19,11 +19,11 @@ let handle: UiHandle;
 const ADW_ID = "t1";
 
 before(async () => {
-  dir = mkdtempSync(join(tmpdir(), "sf-ui-test-"));
+  dir = mkdtempSync(join(tmpdir(), "spf-ui-test-"));
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: dir });
 
-  const dbPath = join(dir, "sf.db");
+  const dbPath = join(dir, "spf.db");
   const tracer = new Tracer(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
   tracer.sessionStart(ADW_ID, "tester", "adw_quality");
   const phase = {

@@ -2,7 +2,7 @@
  * ADW Plan — one-shot planning workflow.
  *
  * Usage:
- *   bun run adws/adw_plan.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf plan "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> planner
  */

@@ -6,12 +6,12 @@ always: **agents → sqlite → CLI / web UI.**
 ## Two stores, one truth
 
 **Files are the raw record** (`envelope.json`, `agent_map.json`, Flue's own
-`.sf/data/flue.db` conversation store); **SQLite (`.sf/data/sf.db`, via
+`.spf/data/flue.db` conversation store); **SQLite (`.spf/data/spf.db`, via
 `node:sqlite`) is the queryable mirror** the CLI and UI read. `tracer.ts`
 writes both. Losing the db loses nothing that can't be rebuilt from files.
 
-Location comes from `observability.db` in `sf.config.yaml`, default
-`.sf/data/sf.db` — inside the target repo, always gitignored.
+Location comes from `observability.db` in `spf.config.yaml`, default
+`.spf/data/spf.db` — inside the target repo, always gitignored.
 
 ## Event schema
 
@@ -123,7 +123,7 @@ agent_sessions (                        -- the queryable mirror of agent_map.jso
 `processes.kind = 'agent'` rows are reserved for a future per-conversation
 distinction — since Flue runs in-process rather than as a child, there is
 currently no separate agent pid to record beyond the chain process itself;
-`sf abort <adw_id>` signals that one process.
+`spf abort <adw_id>` signals that one process.
 
 **Derived, never stored:** phase durations (`ended_at − started_at`),
 session phase-progress (query `phases` by `adw_id`), lane layout (`kind` +
@@ -148,7 +148,7 @@ WAL allows readers during writes. `src/core/sqlite.ts`'s `node:sqlite` shim
 sets these explicitly and also disables `enableForeignKeyConstraints`
 (`node:sqlite` defaults it **on**, unlike `bun:sqlite`/plain SQLite — left
 on, a session's first `events` row inserting before its `sessions` row
-commits throws). `sf ui` opens its connection with `{readOnly: true}` —
+commits throws). `spf ui` opens its connection with `{readOnly: true}` —
 verified the shim translates that correctly; `readonly` (lowercase) is a
 silent no-op in `node:sqlite` itself, which is exactly the footgun the shim
 exists to close.
@@ -162,15 +162,15 @@ rowid cursor:
 SELECT ... FROM events WHERE adw_id = ? AND rowid > ? ORDER BY rowid LIMIT 500;
 ```
 
-`sf events <adw_id> --follow` and `sf ui` both do this at
+`spf events <adw_id> --follow` and `spf ui` both do this at
 `observability.poll_ms` (default 500). History is the same queries with
 filters, lazy-paged — one mechanism serves both live and past runs.
 
 ## Finding and stopping a stuck run
 
 ```bash
-sf phases <adw_id>     # which phase is still "running"
-sf abort <adw_id>      # SIGTERM the chain's process
+spf phases <adw_id>     # which phase is still "running"
+spf abort <adw_id>      # SIGTERM the chain's process
 ```
 
 A hung agent produces no events at all — the trace goes quiet rather than

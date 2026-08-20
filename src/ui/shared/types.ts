@@ -1,7 +1,7 @@
 /**
  * Types shared by the read-only server and the Vue client.
  *
- * Every interface mirrors a table in sf.db one-for-one (see
+ * Every interface mirrors a table in spf.db one-for-one (see
  * references/observability.md). Nothing here is derived state: phase durations,
  * session progress and lane layout are computed in the UI, never stored.
  */
@@ -140,7 +140,7 @@ export interface AgentSession {
   model: string | null;
   session_id: string | null;
   /**
-   * The agent's lane color from sf.config.yaml, e.g. "#a78bfa". Null on dbs
+   * The agent's lane color from spf.config.yaml, e.g. "#a78bfa". Null on dbs
    * written by a tracer predating the column, and on agents with no configured
    * color — fall back to the UI's own palette.
    */

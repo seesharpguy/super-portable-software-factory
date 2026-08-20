@@ -1,7 +1,7 @@
 /**
  * Tracer: every event lands in JSONL and SQLite AS IT HAPPENS.
  *
- * Files are the raw record; sf.db is the queryable mirror the UI polls.
+ * Files are the raw record; spf.db is the queryable mirror the UI polls.
  * No push transport — the flow is always: agents -> sqlite -> web ui.
  * WAL mode so the UI can read while ADW processes write.
  */
@@ -116,7 +116,7 @@ export class Tracer {
     this.migrate();
   }
 
-  /** Additive column migrations, so a db from an older SF still opens. */
+  /** Additive column migrations, so a db from an older SPF still opens. */
   private migrate(): void {
     for (const [table, column, decl] of MIGRATIONS) {
       const columns = new Set(

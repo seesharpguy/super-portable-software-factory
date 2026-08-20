@@ -25,7 +25,7 @@
  * redo; a breach cannot be corrected by re-prompting, because the write already
  * happened. It aborts the phase and names every offending path.
  *
- * Two keys drive it, both in sf.config.yaml:
+ * Two keys drive it, both in spf.config.yaml:
  *     defaults.protected_files   paths no agent may touch unless it names them itself
  *     agents[].writes      undefined = unrestricted · [] = read-only · [...] = only these
  */

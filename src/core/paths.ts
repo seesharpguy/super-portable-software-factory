@@ -25,7 +25,7 @@ export const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..", "..");
 export const ASSETS_DIR = path.join(PACKAGE_ROOT, "assets");
 /** The prebuilt SPA — a sibling of dist/ and assets/, built once at publish time (see app/). */
 export const WEB_DIR = path.join(PACKAGE_ROOT, "web");
-export const BUILTIN_CONFIG_PATH = path.join(ASSETS_DIR, "defaults", "sf.config.yaml");
+export const BUILTIN_CONFIG_PATH = path.join(ASSETS_DIR, "defaults", "spf.config.yaml");
 export const BUILTIN_PROMPTS_DIR = path.join(ASSETS_DIR, "prompts");
 
 export interface RepoAnchor {
@@ -33,15 +33,15 @@ export interface RepoAnchor {
   cwd: string;
   /** Git toplevel containing `cwd`, or `cwd` itself if it's not a repo. Always absolute. */
   repo_root: string;
-  /** Nearest `.sf/` directory walking up from `cwd`, capped at `repo_root`. `null` if none exists. */
-  sf_dir: string | null;
+  /** Nearest `.spf/` directory walking up from `cwd`, capped at `repo_root`. `null` if none exists. */
+  spf_dir: string | null;
 }
 
-/** Walk up from `cwd` to (and including) `repoRoot` looking for a `.sf/` directory. */
+/** Walk up from `cwd` to (and including) `repoRoot` looking for a `.spf/` directory. */
 function findSfDir(cwd: string, repoRoot: string): string | null {
   let dir = cwd;
   while (true) {
-    const candidate = path.join(dir, ".sf");
+    const candidate = path.join(dir, ".spf");
     if (existsSync(candidate) && statSync(candidate).isDirectory()) return candidate;
     if (dir === repoRoot) return null;
     const parent = path.dirname(dir);
@@ -54,13 +54,13 @@ function findSfDir(cwd: string, repoRoot: string): string | null {
 export function resolveAnchor(cwd?: string): RepoAnchor {
   const resolvedCwd = path.resolve(cwd ?? process.cwd());
   const repo_root = findRepoRoot(resolvedCwd);
-  return { cwd: resolvedCwd, repo_root, sf_dir: findSfDir(resolvedCwd, repo_root) };
+  return { cwd: resolvedCwd, repo_root, spf_dir: findSfDir(resolvedCwd, repo_root) };
 }
 
 export interface ConfigResolution {
   /** In load order — later paths override earlier ones (agents.loadConfig). */
   paths: string[];
-  source: "explicit" | "sf-dir" | "built-in-only";
+  source: "explicit" | "spf-dir" | "built-in-only";
 }
 
 /**
@@ -68,15 +68,15 @@ export interface ConfigResolution {
  *
  * An explicit path is used STANDALONE — no merge with the built-in defaults,
  * because naming a file is "use exactly this." Otherwise the built-in
- * packaged config always loads first, and a discovered `.sf/sf.config.yaml`
+ * packaged config always loads first, and a discovered `.spf/spf.config.yaml`
  * merges on top of it if one exists — this is the "override one field"
  * path, via agents.loadConfig's merge.
  */
 export function resolveConfigPaths(anchor: RepoAnchor, explicit?: string): ConfigResolution {
   if (explicit) return { paths: [path.resolve(anchor.cwd, explicit)], source: "explicit" };
-  if (anchor.sf_dir) {
-    const override = path.join(anchor.sf_dir, "sf.config.yaml");
-    if (existsSync(override)) return { paths: [BUILTIN_CONFIG_PATH, override], source: "sf-dir" };
+  if (anchor.spf_dir) {
+    const override = path.join(anchor.spf_dir, "spf.config.yaml");
+    if (existsSync(override)) return { paths: [BUILTIN_CONFIG_PATH, override], source: "spf-dir" };
   }
   return { paths: [BUILTIN_CONFIG_PATH], source: "built-in-only" };
 }
@@ -117,14 +117,14 @@ export function resolveDataPaths(anchor: RepoAnchor, rawDataDir: string, rawDbPa
  * if a prompt file is missing" gap, where a bad ref just threw ENOENT deep
  * inside readFileSync with no context.
  */
-export function resolvePromptRef(anchor: Pick<RepoAnchor, "repo_root" | "sf_dir">, ref: string): string {
+export function resolvePromptRef(anchor: Pick<RepoAnchor, "repo_root" | "spf_dir">, ref: string): string {
   if (path.isAbsolute(ref)) {
     if (existsSync(ref)) return ref;
     throw new Error(`prompt ref not found: ${ref}`);
   }
   const candidates = [path.join(anchor.repo_root, ref)];
-  if (anchor.sf_dir) {
-    candidates.push(path.join(anchor.sf_dir, ref), path.join(anchor.sf_dir, "prompt_engineering", ref));
+  if (anchor.spf_dir) {
+    candidates.push(path.join(anchor.spf_dir, ref), path.join(anchor.spf_dir, "prompt_engineering", ref));
   }
   candidates.push(path.join(ASSETS_DIR, ref), path.join(BUILTIN_PROMPTS_DIR, ref));
   for (const candidate of candidates) {

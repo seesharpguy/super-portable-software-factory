@@ -1,23 +1,23 @@
 # Config Reference
 
-The full `sf.config.yaml` spec: every field, how defaults merge, and how
+The full `spf.config.yaml` spec: every field, how defaults merge, and how
 model / thinking / tools map onto Flue. The schema is Valibot-enforced —
 `agents.validate()` refuses a bad config before anything spawns — so this is
-semantics and gotchas, not a shape you have to memorize by hand; `sf doctor`
+semantics and gotchas, not a shape you have to memorize by hand; `spf doctor`
 always shows the resolved, merged result for the repo you're in.
 
 ## Resolution order
 
-1. The packaged built-in default (`assets/defaults/sf.config.yaml` inside
+1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
-2. `.sf/sf.config.yaml` in the target repo, if present — merged on top,
+2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
    field by field (`defaults`/`observability`/`quality` merge key-by-key;
    `agents` merges by `name`: a matching name patches that entry, a new name
    appends).
 3. An explicit `--config <path>` replaces both — standalone, no built-in
    underneath it.
 
-`sf init` seeds step 2 with a commented starter; omitting it entirely means
+`spf init` seeds step 2 with a commented starter; omitting it entirely means
 running off pure built-ins, which is a fully supported, valid state.
 
 ## Shape
@@ -28,11 +28,11 @@ defaults:
   model: google/gemini-3.6-flash           # ALWAYS provider/model-id
   thinking: medium
   tools: [read, bash, edit, write, grep, glob]
-  protected_files: [.sf/, sf.config.yaml]
-  data_dir: .sf/data
+  protected_files: [.spf/, spf.config.yaml]
+  data_dir: .spf/data
 
 observability:
-  db: .sf/data/sf.db
+  db: .spf/data/spf.db
   poll_ms: 500
 
 quality:
@@ -67,14 +67,14 @@ agents:
 | `color` | hex string | Lane color fallback for agents that don't set their own. |
 | `harness_engineering` | string[] | **Must stay `[]`** — no Flue analogue; a non-empty entry fails validate(). |
 | `tools` | string[] \| null | Roster-wide allowlist. Unset/null = every built-in tool usable. |
-| `protected_files` | string[] | Paths no agent may touch unless named in its own `writes`. Default `[".sf/", "sf.config.yaml"]`. |
-| `data_dir` | path | Runtime home, repo-relative. Default `.sf/data`. |
+| `protected_files` | string[] | Paths no agent may touch unless named in its own `writes`. Default `[".spf/", "spf.config.yaml"]`. |
+| `data_dir` | path | Runtime home, repo-relative. Default `.spf/data`. |
 
 ### `observability`
 
 | Field | Type | Meaning |
 |---|---|---|
-| `db` | path | The trace sqlite db. Default `.sf/data/sf.db`. |
+| `db` | path | The trace sqlite db. Default `.spf/data/spf.db`. |
 | `poll_ms` | int | UI live-poll cadence. Default `500`. |
 
 ### `quality`
@@ -90,7 +90,7 @@ and `authoring_chains.md`.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | The identifier chains use. Chains name agents, never models. |
-| `prompt_engineering.system` / `.user` | yes | Paths to the two prompt files. Resolved against the repo root, then `.sf/`, then `.sf/prompt_engineering/`, then the packaged assets — first hit wins; a total miss throws listing every path tried. |
+| `prompt_engineering.system` / `.user` | yes | Paths to the two prompt files. Resolved against the repo root, then `.spf/`, then `.spf/prompt_engineering/`, then the packaged assets — first hit wins; a total miss throws listing every path tried. |
 | `purpose` | no | One sentence; should match the system prompt's stated purpose. |
 | `coding_agent`, `model`, `thinking`, `color`, `harness_engineering` | no | Override the matching `defaults` key. |
 | `tools` | no | Allowlist. Omitting it means all tools usable. A capability list, not a boundary — see `writes`. |
@@ -107,7 +107,7 @@ checks only the static shape at `agents.validate()` time; a genuinely wrong
 provider or id surfaces at the first real dispatch instead. Provider
 credentials come from the environment, matching the provider you named
 (`GEMINI_API_KEY`/`GOOGLE_API_KEY` for `google/...`, `ANTHROPIC_API_KEY` for
-`anthropic/...`, etc.) — `sf doctor` checks the common ones are set.
+`anthropic/...`, etc.) — `spf doctor` checks the common ones are set.
 
 The resolved model is recorded per agent in `agent_map.json`, mirrored in
 the `agent_sessions` table. **Changing an agent's model invalidates its

@@ -1,9 +1,9 @@
 # Roster
 
-Add or retune agents in `sf.config.yaml`. There's nothing to generate — `sf
-init` seeds a starter `.sf/sf.config.yaml` with a couple of commented
+Add or retune agents in `spf.config.yaml`. There's nothing to generate — `spf
+init` seeds a starter `.spf/spf.config.yaml` with a couple of commented
 examples; everything else is inherited from the packaged defaults until you
-override it. `sf doctor` always shows what's actually in effect and where it
+override it. `spf doctor` always shows what's actually in effect and where it
 came from.
 
 ## The rule
@@ -22,7 +22,7 @@ agents:
     thinking: high                       # was medium
 ```
 
-Write the model as `provider/model-id`, never a bare id — SF has no live
+Write the model as `provider/model-id`, never a bare id — SPF has no live
 model catalog to check against (that was `pi --list-models`; Flue has no
 public equivalent), so an unqualified or malformed pattern is only caught by
 shape at `agents.validate()` time, and a genuinely wrong id surfaces at the
@@ -97,8 +97,8 @@ startup, before anything spawns:
    identity only) and `<name>/user.md` (one h3 per incoming datum —
    `{{prompt}}`, `{{previous_envelope}}`, `{{context_handoff_dir}}` — then
    the task, then a `## Report` section showing the exact output JSON).
-   Copy an existing pair as the shape. If you're overriding in `.sf/`, put
-   them under `.sf/prompt_engineering/<name>/`.
+   Copy an existing pair as the shape. If you're overriding in `.spf/`, put
+   them under `.spf/prompt_engineering/<name>/`.
 2. **Config entry.** Name, purpose, prompt refs, plus anything that differs
    from `defaults`.
 3. **An output type.** Pick an existing envelope type or add one — see
@@ -120,7 +120,7 @@ That's what catches the `git checkout` case.
 
 ```yaml
 defaults:
-  protected_files: [.sf/, sf.config.yaml]   # the machinery that grades an agent's work
+  protected_files: [.spf/, spf.config.yaml]   # the machinery that grades an agent's work
 
 agents:
   - name: builder      # no `writes` key -> unrestricted, minus protected_files

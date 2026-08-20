@@ -5,7 +5,7 @@
  * milliseconds, costs nothing, and returns the same answer every time.
  * Agents are for the parts that need reading and deciding.
  *
- * `quality.checks`/`quality.suites` in sf.config.yaml name the commands and
+ * `quality.checks`/`quality.suites` in spf.config.yaml name the commands and
  * group them into what a chain actually runs. There is no packaged default
  * suite — an unconfigured suite fails at agents.validate() time, before
  * anything spawns, rather than silently reporting green the way a
@@ -51,7 +51,7 @@ export function resolveSuite(run: RunLike, suiteName: string): QualityCheckSpec[
   if (!names || names.length === 0) {
     const known = Object.keys(run.cfg.quality.suites);
     throw new QualityNotConfigured(
-      `quality.suites.${suiteName} is not configured — add it to sf.config.yaml` +
+      `quality.suites.${suiteName} is not configured — add it to spf.config.yaml` +
         (known.length > 0 ? ` (configured suites: ${known.join(", ")})` : " (no suites are configured yet)"),
     );
   }

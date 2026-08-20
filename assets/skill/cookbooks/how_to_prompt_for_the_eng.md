@@ -61,10 +61,10 @@ Same idea, same scope. What changed is that "popularity" became a sort order, th
 **If they did not, read what this install actually has and choose from that.**
 
 ```bash
-sf list                                # every chain, its phases, what it needs — the menu
+spf list                                # every chain, its phases, what it needs — the menu
 ```
 
-Chains are the engineer's to add, rename, and rewire, so **`sf list`'s output is the only authority**. Never launch from memory or from a name you saw in a doc; read what it prints, then match by shape:
+Chains are the engineer's to add, rename, and rewire, so **`spf list`'s output is the only authority**. Never launch from memory or from a name you saw in a doc; read what it prints, then match by shape:
 
 | The work | Look for a chain that |
 |---|---|
@@ -79,7 +79,7 @@ Chains are the engineer's to add, rename, and rewire, so **`sf list`'s output is
 
 **The more complex the ask, the more complete the chain.** Complexity means: more than one file, a behaviour you cannot describe in one sentence, anything touching data or an interface others call, or any request where you had to guess. When two chains both fit, take the longer one — a phase you did not need costs cents, while a change nobody planned, verified, reviewed, or wrote up costs an afternoon.
 
-If nothing in `sf list` fits the shape you need, say so and offer to compose one (`authoring_chains.md`) rather than forcing the work into a chain that skips the phase it needed.
+If nothing in `spf list` fits the shape you need, say so and offer to compose one (`authoring_chains.md`) rather than forcing the work into a chain that skips the phase it needed.
 
 ## Workflow
 
@@ -104,6 +104,6 @@ After launching, show the engineer three things so a bad translation dies in sec
 1. **The prompt you actually sent** — verbatim.
 2. **The chain you chose**, and the one-line reason — or that you used the one they named.
    If they named a roster (a config, a model tier), say which one you ran on; if they did not, you ran the default, and switching that is their call, not yours (`run_adw.md`).
-3. **The `adw_id`**, so they can watch it (`sf phases <adw_id>`).
+3. **The `adw_id`**, so they can watch it (`spf phases <adw_id>`).
 
 Then observe and report per `run_adw.md`. You run the system; you do not do the work inside it.

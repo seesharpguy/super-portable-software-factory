@@ -1,4 +1,4 @@
-/** Shared by both `sf <chain> "..."` and `sf run <chain> "..."` — same dispatch. */
+/** Shared by both `spf <chain> "..."` and `spf run <chain> "..."` — same dispatch. */
 import * as paths from "../../core/paths.ts";
 import { parseCli, resolvePrompt } from "../../core/utils.ts";
 import type { ChainDefinition } from "../../chains/index.ts";
@@ -7,7 +7,7 @@ import type { ChainContext } from "../../chains/context.ts";
 const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base"];
 
 export function usageFor(chain: ChainDefinition): string {
-  return `usage: sf ${chain.name} "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>]`;
+  return `usage: spf ${chain.name} "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>]`;
 }
 
 export async function dispatchChain(chain: ChainDefinition, argv: string[]): Promise<number> {

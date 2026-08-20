@@ -2,7 +2,7 @@
  * ADW Document — write up the work that was just done, from the diff.
  *
  * Usage:
- *   bun run adws/adw_document.ts "<prompt or path/to/prompt.md>" [--base main] [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf document "<prompt or path/to/prompt.md>" [--base main] [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> code(changes) -> documenter
  *

@@ -2,7 +2,7 @@
  * ADW Plan Build Test — the full starter chain.
  *
  * Usage:
- *   bun run adws/adw_plan_build_test.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf plan-build-test "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> planner -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded] -> git(commit)
  *
@@ -86,7 +86,7 @@ export async function main(ctx: ChainContext): Promise<number> {
     await run.phase(
       makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Land the code only after the suite came back green" }),
       async (ph) => {
-        const message = previous.commit_message || `sf(${run.adw_id}): ${previous.summary}`;
+        const message = previous.commit_message || `spf(${run.adw_id}): ${previous.summary}`;
         ph.log({ sha: run.git.commitAll(message), message });
       },
     );

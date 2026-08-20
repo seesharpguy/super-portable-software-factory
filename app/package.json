@@ -1,9 +1,9 @@
 {
-  "name": "sf-visualizer",
+  "name": "spf-visualizer",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only observability UI for the Software Factory — polled by the browser, served by the main package's sf ui command.",
+  "description": "Read-only observability UI for Super Portable Factory — polled by the browser, served by the main package's spf ui command.",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",

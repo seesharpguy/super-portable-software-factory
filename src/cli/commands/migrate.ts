@@ -1,18 +1,18 @@
 /**
- * `sf migrate` — move a repo stamped by the old skill-and-`bun run` design
- * (an `adws/` tree) onto the global-CLI `.sf/` convention. Detects the
+ * `spf migrate` — move a repo stamped by the old skill-and-`bun run` design
+ * (an `adws/` tree) onto the global-CLI `.spf/` convention. Detects the
  * stamped tree, then COPIES ONLY — nothing under `adws/` is ever deleted or
  * modified, so a bad migration costs nothing to walk away from. Defaults to
  * a dry run; pass `--apply` to actually write.
  *
- * What moves: the roster (rewritten onto `.sf/` paths, coding_agent: flue),
+ * What moves: the roster (rewritten onto `.spf/` paths, coding_agent: flue),
  * the prompt files, the trace db (WAL-checkpointed first) and its sessions/
  * directory as a strict sibling — the one invariant that must survive, or
- * `sf ui`/the prompts endpoint 404 on every migrated session.
+ * `spf ui`/the prompts endpoint 404 on every migrated session.
  *
  * What does NOT move, on purpose: `adws/adw_modules/*.ts` and any custom
  * `adw_*.ts` chains. Hand-edited engine code has no automatic equivalent —
- * the report points at `sf eject` for a copy of the current engine to
+ * the report points at `spf eject` for a copy of the current engine to
  * reapply those edits onto. `harness_engineering/` entries are dropped for
  * the same reason `agents.validate()` rejects them going forward: no Flue
  * analogue exists.
@@ -53,14 +53,14 @@ export function migrateCommand(argv: string[]): number {
   const anchor = paths.resolveAnchor(options["cwd"]);
   const apply = Boolean(flags["apply"]);
 
-  const oldConfigPath = path.join(anchor.repo_root, "adws", "adw_sf_config", "sf.config.yaml");
+  const oldConfigPath = path.join(anchor.repo_root, "adws", "adw_sf_config", "spf.config.yaml");
   if (!existsSync(oldConfigPath)) {
     console.log(`no stamped adws/ tree found at ${anchor.repo_root} (looked for ${oldConfigPath}) — nothing to migrate`);
     return 0;
   }
 
-  const newSfDir = path.join(anchor.repo_root, ".sf");
-  const newConfigPath = path.join(newSfDir, "sf.config.yaml");
+  const newSfDir = path.join(anchor.repo_root, ".spf");
+  const newConfigPath = path.join(newSfDir, "spf.config.yaml");
   if (existsSync(newConfigPath) && !flags["force"]) {
     console.error(`${newConfigPath} already exists — refusing to overwrite. Pass --force to proceed anyway.`);
     return 1;
@@ -74,8 +74,8 @@ export function migrateCommand(argv: string[]): number {
   const resolveOld = (p: string): string => path.resolve(oldAdwsRoot, "..", p); // old refs are "adws/..."-relative to repo_root
 
   const actions: Action[] = [];
-  const newDataDir = ".sf/data";
-  const newDbRel = ".sf/data/sf.db";
+  const newDataDir = ".spf/data";
+  const newDbRel = ".spf/data/spf.db";
 
   doc.setIn(["defaults", "data_dir"], newDataDir);
   doc.setIn(["observability", "db"], newDbRel);
@@ -85,8 +85,8 @@ export function migrateCommand(argv: string[]): number {
     actions.push({ kind: "note", detail: `defaults.harness_engineering (${defaultsHarness.join(", ")}) dropped — no Flue equivalent` });
   }
   doc.setIn(["defaults", "harness_engineering"], []);
-  // .sf/ is now the whole per-repo footprint; the old adws/ paths no longer exist.
-  doc.setIn(["defaults", "protected_files"], [".sf/", "sf.config.yaml"]);
+  // .spf/ is now the whole per-repo footprint; the old adws/ paths no longer exist.
+  doc.setIn(["defaults", "protected_files"], [".spf/", "spf.config.yaml"]);
 
   const agents: Array<Record<string, any>> = Array.isArray(oldConfig?.agents) ? oldConfig.agents : [];
   agents.forEach((agent, i) => {
@@ -102,17 +102,17 @@ export function migrateCommand(argv: string[]): number {
       const oldRef: string | undefined = agent?.prompt_engineering?.[slot];
       if (!oldRef) continue;
       const srcPath = resolveOld(oldRef);
-      const newRef = shortRef(oldRef); // "<agent>/system.md" — resolves via .sf/prompt_engineering/<agent>/...
+      const newRef = shortRef(oldRef); // "<agent>/system.md" — resolves via .spf/prompt_engineering/<agent>/...
       doc.setIn(["agents", i, "prompt_engineering", slot], newRef);
       if (existsSync(srcPath)) {
-        actions.push({ kind: "copy-file", detail: `${path.relative(anchor.repo_root, srcPath)} -> .sf/prompt_engineering/${newRef}` });
+        actions.push({ kind: "copy-file", detail: `${path.relative(anchor.repo_root, srcPath)} -> .spf/prompt_engineering/${newRef}` });
       } else {
         actions.push({ kind: "note", detail: `${name}.prompt_engineering.${slot} (${oldRef}) not found on disk — not copied` });
       }
     }
   });
 
-  const oldDbPath = resolveOld(oldConfig?.observability?.db ?? "adws/adw_data/sf.db");
+  const oldDbPath = resolveOld(oldConfig?.observability?.db ?? "adws/adw_data/spf.db");
   const oldSessionsDir = path.join(path.dirname(oldDbPath), "sessions");
   if (existsSync(oldDbPath)) {
     actions.push({ kind: "copy-file", detail: `${path.relative(anchor.repo_root, oldDbPath)} -> ${newDbRel} (WAL-checkpointed first)` });
@@ -120,10 +120,10 @@ export function migrateCommand(argv: string[]): number {
     actions.push({ kind: "note", detail: `no trace db found at ${path.relative(anchor.repo_root, oldDbPath)} — nothing to carry over` });
   }
   if (existsSync(oldSessionsDir)) {
-    actions.push({ kind: "copy-dir", detail: `${path.relative(anchor.repo_root, oldSessionsDir)}/ -> .sf/data/sessions/ (must stay a sibling of sf.db)` });
+    actions.push({ kind: "copy-dir", detail: `${path.relative(anchor.repo_root, oldSessionsDir)}/ -> .spf/data/sessions/ (must stay a sibling of spf.db)` });
   }
 
-  actions.push({ kind: "write-config", detail: `.sf/sf.config.yaml (rewritten: data_dir, observability.db, prompt refs, coding_agent: flue)` });
+  actions.push({ kind: "write-config", detail: `.spf/spf.config.yaml (rewritten: data_dir, observability.db, prompt refs, coding_agent: flue)` });
 
   const oldAdwFiles = existsSync(oldAdwsRoot)
     ? readdirSync(oldAdwsRoot).filter((f) => f.startsWith("adw_") && f.endsWith(".ts"))
@@ -132,20 +132,20 @@ export function migrateCommand(argv: string[]): number {
     kind: "note",
     detail:
       `adws/adw_modules/ and adws/${oldAdwFiles.length > 0 ? oldAdwFiles.join(", ") : "adw_*.ts"} were NOT migrated — ` +
-      `hand-edited engine code has no automatic equivalent. Run \`sf eject\` for an editable copy of the current ` +
+      `hand-edited engine code has no automatic equivalent. Run \`spf eject\` for an editable copy of the current ` +
       `engine to reapply any customizations onto, then delete adws/ yourself once you've confirmed the migration.`,
   });
 
   if (flags["json"]) {
     console.log(JSON.stringify({ apply, actions }, null, 2));
   } else {
-    console.log(apply ? `sf migrate --apply: ${anchor.repo_root}` : `sf migrate (dry run — pass --apply to write): ${anchor.repo_root}`);
+    console.log(apply ? `spf migrate --apply: ${anchor.repo_root}` : `spf migrate (dry run — pass --apply to write): ${anchor.repo_root}`);
     for (const a of actions) console.log(`  [${a.kind}] ${a.detail}`);
   }
   if (!apply) return 0;
 
   mkdirSync(newSfDir, { recursive: true });
-  mkdirSync(path.join(anchor.repo_root, ".sf", "data"), { recursive: true });
+  mkdirSync(path.join(anchor.repo_root, ".spf", "data"), { recursive: true });
 
   agents.forEach((agent) => {
     for (const slot of ["system", "user"] as const) {
@@ -170,11 +170,11 @@ export function migrateCommand(argv: string[]): number {
     copyFileSync(oldDbPath, path.join(anchor.repo_root, newDbRel));
   }
   if (existsSync(oldSessionsDir)) {
-    copyDirRecursive(oldSessionsDir, path.join(anchor.repo_root, ".sf", "data", "sessions"));
+    copyDirRecursive(oldSessionsDir, path.join(anchor.repo_root, ".spf", "data", "sessions"));
   }
 
   writeFileSync(newConfigPath, doc.toString());
 
-  console.log(`\ndone. Verify with: sf doctor && sf sessions`);
+  console.log(`\ndone. Verify with: spf doctor && spf sessions`);
   return 0;
 }

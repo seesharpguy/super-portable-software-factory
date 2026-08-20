@@ -2,7 +2,7 @@
  * ADW Quality — lint, typecheck, and build the project.
  *
  * Usage:
- *   bun run adws/adw_quality.ts "<reason for the quality run>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf quality "<reason for the quality run>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> code(quality)
  */

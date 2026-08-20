@@ -2,7 +2,7 @@
  * ADW Simple SDLC — plan, build, test, review, document, committing as it goes.
  *
  * Usage:
- *   bun run adws/adw_simple_sdlc.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf simple-sdlc "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> planner -> git(commit_plan)
  *         -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded]
@@ -70,7 +70,7 @@ const DOCUMENT_NOTES =
 
 /** Commit what the preceding phase produced, in that agent's own words. */
 function commit(run: Run, ph: PhaseHandle, envelope: EnvelopeBase & { commit_message?: string }): void {
-  const message = envelope.commit_message || `sf(${run.adw_id}): ${envelope.summary}`;
+  const message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
   ph.log({ sha: run.git.commitAll(message), message });
 }
 

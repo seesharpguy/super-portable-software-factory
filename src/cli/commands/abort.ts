@@ -1,8 +1,8 @@
 /**
- * `sf abort <adw_id>` — there is no in-process Flue handle to call .abort()
+ * `spf abort <adw_id>` — there is no in-process Flue handle to call .abort()
  * on from a separate CLI invocation, so this is OS-level: find the pid(s)
  * recorded as still running for this adw_id and SIGTERM them. Since Flue
- * runs in-process, that pid is the whole `sf` invocation driving the chain
+ * runs in-process, that pid is the whole `spf` invocation driving the chain
  * — this stops the run, not just the current model call.
  */
 import { Database } from "../../core/sqlite.ts";
@@ -19,7 +19,7 @@ interface ProcessRow {
 export function abortCommand(argv: string[]): number {
   const { positionals, options } = parseCli(argv, ["cwd", "config"]);
   if (positionals.length < 1) {
-    console.error("usage: sf abort <adw_id> [--cwd <dir>] [--config <path>]");
+    console.error("usage: spf abort <adw_id> [--cwd <dir>] [--config <path>]");
     return 1;
   }
   const adwId = positionals[0];

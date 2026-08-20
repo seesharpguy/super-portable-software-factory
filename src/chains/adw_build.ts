@@ -2,7 +2,7 @@
  * ADW Build — one-shot implementation workflow.
  *
  * Usage:
- *   bun run adws/adw_build.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf build "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> builder
  */

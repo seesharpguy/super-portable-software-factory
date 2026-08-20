@@ -1,14 +1,14 @@
 ---
-name: sf
-description: Orchestrate SF (Super Simple Software Factory) ADW chains via the `sf` CLI — deterministic agents-plus-code workflows with typed envelopes, gates, and a sqlite trace. Use when the user wants work planned/built/tested/reviewed/documented through SF rather than done freehand.
+name: spf
+description: Orchestrate SPF (Super Simple Software Factory) ADW chains via the `spf` CLI — deterministic agents-plus-code workflows with typed envelopes, gates, and a sqlite trace. Use when the user wants work planned/built/tested/reviewed/documented through SPF rather than done freehand.
 ---
 
-# SF — orchestrator's skill
+# SPF — orchestrator's skill
 
-SF runs **ADWs**: deterministic TypeScript chains that sequence typed agent
+SPF runs **ADWs**: deterministic TypeScript chains that sequence typed agent
 calls and code phases, verify claims with gates, and trace everything to
-sqlite. `sf` is a globally installed CLI, not a template stamped into this
-repo — it runs against this repo's `.sf/` overrides (if any) merged over its
+sqlite. `spf` is a globally installed CLI, not a template stamped into this
+repo — it runs against this repo's `.spf/` overrides (if any) merged over its
 own packaged defaults.
 
 **You are the orchestrator, not the worker.** Launch a chain, watch its
@@ -19,23 +19,23 @@ chain change — made deliberately — then a re-run.
 
 ## Startup
 
-Run `sf list` once, at the start of the conversation — it's the real menu;
-chain names elsewhere in this skill are shape, not literal. `sf doctor`
+Run `spf list` once, at the start of the conversation — it's the real menu;
+chain names elsewhere in this skill are shape, not literal. `spf doctor`
 answers "why did nothing happen" in one shot (every path, agent, quality
 suite, provider key) before you spend a token guessing.
 
 Don't volunteer more state than asked — "is it done" wants a status line,
 not a phase-by-phase replay (`how_to_prompt_for_the_eng.md` has the fuller
 rule and the anecdote behind it: an orchestrator once guessed a `runs`
-table and a `payload` column that were never there; `sf sessions`/`sf
-phases`/`sf events` exist so nobody has to guess the schema again).
+table and a `payload` column that were never there; `spf sessions`/`spf
+phases`/`spf events` exist so nobody has to guess the schema again).
 
 ## Orchestrator rules
 
-- Never do a chain's work yourself — a missing chain shape is a `sf list`
+- Never do a chain's work yourself — a missing chain shape is a `spf list`
   gap to report or author (`authoring_chains.md`), not a reason to freehand it.
-- Never hand-edit anything under `.sf/data/sessions/<adw_id>/` — audit trail, not a scratchpad.
-- Observe through `sf sessions`/`sf phases`/`sf events`, never by guessing at `sf.db`'s schema.
+- Never hand-edit anything under `.spf/data/sessions/<adw_id>/` — audit trail, not a scratchpad.
+- Observe through `spf sessions`/`spf phases`/`spf events`, never by guessing at `spf.db`'s schema.
 
 ## Request routing
 
@@ -44,7 +44,7 @@ phases`/`sf events` exist so nobody has to guess the schema again).
 | "run/build/plan/fix X" | `run_adw.md` — read `how_to_prompt_for_the_eng.md` first, always |
 | "add/retune an agent or model" | `roster.md` |
 | "add a chain / a phase / an output type / a gate" | `authoring_chains.md` |
-| "what is SF" | `sf_overview.md` |
+| "what is SPF" | `spf_overview.md` |
 | envelope/gate/session contract | `references/handoff.md` |
 | trace schema, spend vs. context | `references/observability.md` |
 | config field reference | `references/config.md` |

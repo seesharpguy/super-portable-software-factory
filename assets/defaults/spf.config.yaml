@@ -1,4 +1,4 @@
-# sf.config.yaml — the factory's agent roster. One agent, one prompt, one purpose.
+# spf.config.yaml — the factory's agent roster. One agent, one prompt, one purpose.
 # Runs on Flue (@flue/runtime) — coding_agent: flue is the only implemented value.
 defaults:
   coding_agent: flue
@@ -27,12 +27,12 @@ defaults:
   # raw output. Every agent can always write its own report; `writes: []` means
   # read-only with respect to the repo, not mute.
   protected_files:
-    - .sf/
-    - sf.config.yaml
-  data_dir: .sf/data               # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
+    - .spf/
+    - spf.config.yaml
+  data_dir: .spf/data               # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
 
 observability:
-  db: .sf/data/sf.db               # tracer writes here directly; the UI polls it
+  db: .spf/data/spf.db               # tracer writes here directly; the UI polls it
   poll_ms: 500                     # visualizer live-poll cadence
 
 # No default quality checks or suites are shipped — an unconfigured chain

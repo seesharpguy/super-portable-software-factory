@@ -2,7 +2,7 @@
  * ADW Prompt — the smallest ADW: one agent, one prompt, traced end-to-end.
  *
  * Usage:
- *   bun run adws/adw_prompt.ts "<prompt or path/to/prompt.md>" [--agent builder] [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf prompt "<prompt or path/to/prompt.md>" [--agent builder] [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> <agent>
  */

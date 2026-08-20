@@ -1,6 +1,6 @@
 /**
- * `sf` — the command surface. `sf <chain-name> "<prompt>"` and
- * `sf run <chain-name> "<prompt>"` are identical; the bare form exists
+ * `spf` — the command surface. `spf <chain-name> "<prompt>"` and
+ * `spf run <chain-name> "<prompt>"` are identical; the bare form exists
  * because typing the chain name IS choosing what to run, and that's the
  * common case. Everything else is a named subcommand.
  */
@@ -20,24 +20,24 @@ import { abortCommand } from "./commands/abort.ts";
 import { uiCommand } from "./commands/ui.ts";
 import { versionCommand } from "./commands/version.ts";
 
-const HELP = `sf — repeatable agents-plus-code workflows (ADWs)
+const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 
-  sf list                                  the chain registry — names, phases, what each needs
-  sf <chain> "<prompt>" [options]          run a chain (sf run <chain> ... works identically)
-  sf init [--force]                        seed .sf/sf.config.yaml in the current repo
-  sf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
-  sf migrate [--apply] [--force]           move an old stamped adws/ tree onto .sf/ (dry run by default)
-  sf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
-  sf doctor [--json]                       check everything that fails silently otherwise
-  sf ui [--port N] [--no-open] [--db path] open the trace visualizer
-  sf sessions [--limit N] [--json]         recent runs
-  sf phases <adw_id> [--json]              one run's phases
-  sf events <adw_id> [--follow] [--json]   one run's trace events
-  sf abort <adw_id>                        signal a run's process to stop
-  sf version                               print the installed version
+  spf list                                  the chain registry — names, phases, what each needs
+  spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
+  spf init [--force]                        seed .spf/spf.config.yaml in the current repo
+  spf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
+  spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
+  spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
+  spf doctor [--json]                       check everything that fails silently otherwise
+  spf ui [--port N] [--no-open] [--db path] open the trace visualizer
+  spf sessions [--limit N] [--json]         recent runs
+  spf phases <adw_id> [--json]              one run's phases
+  spf events <adw_id> [--follow] [--json]   one run's trace events
+  spf abort <adw_id>                        signal a run's process to stop
+  spf version                               print the installed version
 
 Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
-Run \`sf list\` to see every chain and what it needs.`;
+Run \`spf list\` to see every chain and what it needs.`;
 
 export async function main(): Promise<void> {
   try {
@@ -64,7 +64,7 @@ export async function main(): Promise<void> {
         const [chainName, ...chainArgs] = rest;
         const chain = chainName ? findChain(chainName) : undefined;
         if (!chain) {
-          console.error(`unknown chain: ${chainName ?? "(none given)"} — run \`sf list\` to see every chain`);
+          console.error(`unknown chain: ${chainName ?? "(none given)"} — run \`spf list\` to see every chain`);
           process.exitCode = 1;
           return;
         }
@@ -125,8 +125,8 @@ export async function main(): Promise<void> {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   } finally {
-    // A no-op if this invocation never touched an agent (e.g. sf quality,
-    // sf list, sf doctor) — the Flue runtime only ever starts lazily.
+    // A no-op if this invocation never touched an agent (e.g. spf quality,
+    // spf list, spf doctor) — the Flue runtime only ever starts lazily.
     await agentFlue.shutdown();
   }
 }

@@ -1,5 +1,5 @@
 /**
- * SQLite reader over a target repo's sf.db.
+ * SQLite reader over a target repo's spf.db.
  *
  * The read connection is opened readonly and every query on it is a SELECT —
  * the writers are the tracers of running ADW processes, and WAL lets us read
@@ -36,7 +36,7 @@ export class SfDb {
   /**
    * Where the ADW session dirs live: `{data_dir}/sessions/{adw_id}/{agent}/`.
    * The db sits in the same data_dir (config's `observability.db` defaults to
-   * `adws/adw_data/sf.db`), so deriving it as a sibling of the db file keeps
+   * `adws/adw_data/spf.db`), so deriving it as a sibling of the db file keeps
    * working when the whole data_dir is relocated.
    */
   readonly sessionsDir: string;
@@ -51,8 +51,8 @@ export class SfDb {
   constructor(path: string) {
     if (!existsSync(path)) {
       throw new Error(
-        `sf.db not found at ${path}\n` +
-          `Point sf ui at a target repo: --db <path>, SF_DB=<path>, --cwd <repo>, or run it from inside one.`,
+        `spf.db not found at ${path}\n` +
+          `Point spf ui at a target repo: --db <path>, SF_DB=<path>, --cwd <repo>, or run it from inside one.`,
       );
     }
     this.path = path;

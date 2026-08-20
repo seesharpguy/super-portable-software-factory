@@ -81,8 +81,8 @@ export class Run {
   repo_root: string; // where every agent is spawned to work — always absolute
   /** Every git operation for this run, bound to repo_root. Never call git_helper directly. */
   git: GitHandle;
-  /** From the same anchor as repo_root — null if no .sf/ dir exists. */
-  sf_dir: string | null;
+  /** From the same anchor as repo_root — null if no .spf/ dir exists. */
+  spf_dir: string | null;
   /** Absolute. Sibling of it: flue.db (Flue's own conversation store), sessions/. */
   data_dir: string;
   session_dir: string;
@@ -99,7 +99,7 @@ export class Run {
     this.engineer = init.engineer;
     this.seq = init.tracer.maxPhaseSeq(init.adwId);
     this.repo_root = init.repoRoot;
-    this.sf_dir = init.sfDir;
+    this.spf_dir = init.sfDir;
     this.git = makeGit(init.repoRoot);
     this.data_dir = init.dataDir;
     this.session_dir = ensureDir(path.join(init.dataDir, "sessions", init.adwId));

@@ -2,7 +2,7 @@
  * ADW Plan Build — two-agent chain: planner -> envelope -> builder.
  *
  * Usage:
- *   bun run adws/adw_plan_build.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf plan-build "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> planner -> builder -> git(commit)
  */
@@ -39,7 +39,7 @@ export async function main(ctx: ChainContext): Promise<number> {
   await run.phase(
     makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Land the builder's changes, using the message it wrote" }),
     async (ph) => {
-      const message = build.commit_message || `sf(${run.adw_id}): ${build.summary}`;
+      const message = build.commit_message || `spf(${run.adw_id}): ${build.summary}`;
       ph.log({ sha: run.git.commitAll(message), message });
     },
   );

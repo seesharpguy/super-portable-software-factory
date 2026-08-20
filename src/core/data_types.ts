@@ -1,5 +1,5 @@
 /**
- * Concrete data types for the SF ADW system.
+ * Concrete data types for the SPF ADW system.
  *
  * RULE (four-param rule): any function that takes more than 4 parameters takes
  * ONE of these objects instead. AgentCall and PhaseParams are the pattern.
@@ -168,7 +168,7 @@ export type QualityArea = v.InferOutput<typeof QualityAreaSchema>;
 export const QualityOperationSchema = v.picklist(["lint", "typecheck", "build"]);
 export type QualityOperation = v.InferOutput<typeof QualityOperationSchema>;
 
-/** One deterministic quality command, as configured in sf.config.yaml's `quality.checks`. */
+/** One deterministic quality command, as configured in spf.config.yaml's `quality.checks`. */
 export const QualityCheckSpecSchema = v.object({
   name: v.string(),
   area: v.optional(QualityAreaSchema, "backend"),
@@ -406,14 +406,14 @@ export const ConfigDefaultsSchema = v.object({
   // Off-limits to every agent that has not named them in its own `writes`.
   // The factory's own code is the default: an agent must not be able to edit
   // the machinery that decides whether its work passed.
-  // .sf/ is the whole per-repo footprint now — no adws/ tree to protect.
-  protected_files: v.optional(v.array(v.string()), () => [".sf/", "sf.config.yaml"]),
-  data_dir: v.optional(v.string(), ".sf/data"),
+  // .spf/ is the whole per-repo footprint now — no adws/ tree to protect.
+  protected_files: v.optional(v.array(v.string()), () => [".spf/", "spf.config.yaml"]),
+  data_dir: v.optional(v.string(), ".spf/data"),
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
 export const ObservabilityConfigSchema = v.object({
-  db: v.optional(v.string(), ".sf/data/sf.db"),
+  db: v.optional(v.string(), ".spf/data/spf.db"),
   poll_ms: v.optional(v.number(), 500),
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;

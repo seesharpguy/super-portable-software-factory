@@ -9,6 +9,6 @@ export function listCommand(): number {
     console.log(`${"".padEnd(width)}  agents: ${agents}${chain.requiredSuites.length ? `  ·  quality suites: ${chain.requiredSuites.join(", ")}` : ""}`);
     console.log();
   }
-  console.log(`sf <name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]   (sf run <name> ... works identically)`);
+  console.log(`spf <name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]   (spf run <name> ... works identically)`);
   return 0;
 }

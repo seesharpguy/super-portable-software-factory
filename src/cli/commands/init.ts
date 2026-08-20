@@ -1,12 +1,12 @@
-/** `sf init` — seed a `.sf/` override directory. Everything else is inherited from the packaged defaults. */
+/** `spf init` — seed a `.spf/` override directory. Everything else is inherited from the packaged defaults. */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as paths from "../../core/paths.ts";
 import { parseCli } from "../../core/utils.ts";
 
-const STARTER_CONFIG = `# .sf/sf.config.yaml — merged ON TOP of sf's packaged built-in defaults.
+const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packaged built-in defaults.
 # List only what you want to CHANGE; everything else (the roster, prompts,
-# models) is inherited. Run \`sf doctor\` any time to see what's actually in
+# models) is inherited. Run \`spf doctor\` any time to see what's actually in
 # effect for this repo, and where each value came from.
 
 # Uncomment to enable a quality-gated chain (build-test, plan-build-test,
@@ -25,7 +25,7 @@ const STARTER_CONFIG = `# .sf/sf.config.yaml — merged ON TOP of sf's packaged 
 #     model: anthropic/claude-sonnet-4-6
 `;
 
-const GITIGNORE_ENTRIES = [".sf/data/", ".env"];
+const GITIGNORE_ENTRIES = [".spf/data/", ".env"];
 
 function ensureGitignore(repoRoot: string): void {
   const gitignorePath = path.join(repoRoot, ".gitignore");
@@ -34,17 +34,17 @@ function ensureGitignore(repoRoot: string): void {
   const missing = GITIGNORE_ENTRIES.filter((entry) => !existing.includes(entry));
   if (missing.length === 0) return;
   const body = hadFile ? existing.join("\n").replace(/\n*$/, "\n") + "\n" : "";
-  writeFileSync(gitignorePath, `${body}# sf runtime\n${missing.join("\n")}\n`);
+  writeFileSync(gitignorePath, `${body}# spf runtime\n${missing.join("\n")}\n`);
   console.log(`updated ${gitignorePath} (added ${missing.join(", ")})`);
 }
 
 export function initCommand(argv: string[]): number {
   const { options, flags } = parseCli(argv, ["cwd"], ["force"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
-  const sfDir = path.join(anchor.repo_root, ".sf");
+  const sfDir = path.join(anchor.repo_root, ".spf");
   mkdirSync(sfDir, { recursive: true });
 
-  const configPath = path.join(sfDir, "sf.config.yaml");
+  const configPath = path.join(sfDir, "spf.config.yaml");
   if (existsSync(configPath) && !flags["force"]) {
     console.log(`${configPath} already exists — leaving it alone (--force to overwrite)`);
   } else {
@@ -53,6 +53,6 @@ export function initCommand(argv: string[]): number {
   }
 
   ensureGitignore(anchor.repo_root);
-  console.log(`\nnext: sf doctor   (confirm everything resolves), then sf scout "describe this repo"`);
+  console.log(`\nnext: spf doctor   (confirm everything resolves), then spf scout "describe this repo"`);
   return 0;
 }

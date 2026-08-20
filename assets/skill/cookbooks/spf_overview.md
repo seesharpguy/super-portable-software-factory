@@ -1,24 +1,24 @@
-# SF Overview
+# SPF Overview
 
 The map, not the procedure — read this once to know how the pieces fit
 before touching any of the other cookbooks.
 
-## What SF is
+## What SPF is
 
-SF runs **ADWs**: TypeScript chains that own sequencing, retries, and
+SPF runs **ADWs**: TypeScript chains that own sequencing, retries, and
 acceptance, calling bounded agent phases and deterministic code phases in
 between. "Agent proposes, code disposes" — an agent's response is a claim,
 and code (a gate, a quality check, a permissions check) verifies it before
 the chain moves on.
 
-SF is a global CLI (`npm i -g @grateful8/sf`), not a template stamped into
+SPF is a global CLI (`npm i -g @grateful8/spf`), not a template stamped into
 the target repo. It ships:
 
-- a packaged **default roster** (`sf.config.yaml`) and **default prompts**,
+- a packaged **default roster** (`spf.config.yaml`) and **default prompts**,
   usable with zero setup;
-- an optional per-repo **`.sf/` override directory** (`sf init` seeds it) —
+- an optional per-repo **`.spf/` override directory** (`spf init` seeds it) —
   merged on top of the packaged defaults, field by field;
-- an optional per-repo **`.sf/data/`** runtime home for the sqlite trace and
+- an optional per-repo **`.spf/data/`** runtime home for the sqlite trace and
   session files, created on first run, always gitignored.
 
 There is no `adws/` tree to stamp, no `bun install`, no external `pi`
@@ -29,10 +29,10 @@ agent harness — no subprocess, no separate CLI to have on `PATH`.
 
 ```
 <repo>/
-  .sf/                          # optional — only if you ran `sf init`
-    sf.config.yaml              # your overrides, merged over the built-in defaults
-  .sf/data/                     # runtime — always gitignored
-    sf.db                       # the trace: sessions, phases, events, envelopes, gates
+  .spf/                          # optional — only if you ran `spf init`
+    spf.config.yaml              # your overrides, merged over the built-in defaults
+  .spf/data/                     # runtime — always gitignored
+    spf.db                       # the trace: sessions, phases, events, envelopes, gates
     flue.db                     # Flue's own conversation store (session resumption)
     sessions/<adw_id>/
       agent_map.json            # agent name -> its Flue conversation id + model
@@ -42,7 +42,7 @@ agent harness — no subprocess, no separate CLI to have on `PATH`.
         envelope.json           # the final parsed, validated response
 ```
 
-`sf doctor` prints exactly what resolved and from where — config paths,
+`spf doctor` prints exactly what resolved and from where — config paths,
 prompt paths, the trace db path — so "is my override even taking effect" is
 always a one-command answer.
 
@@ -77,21 +77,21 @@ Full contract: `references/handoff.md`.
 ## Running a chain
 
 ```bash
-sf list                                        # every chain, its phases, what it needs
-sf <chain-name> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>]
-sf doctor                                      # confirm the roster/config/quality all resolve first
-sf sessions                                    # recent runs
-sf phases <adw_id>                             # one run's phase-by-phase status
-sf events <adw_id> --follow                    # the live trace
-sf ui                                          # the visualizer, browser-based
+spf list                                        # every chain, its phases, what it needs
+spf <chain-name> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>]
+spf doctor                                      # confirm the roster/config/quality all resolve first
+spf sessions                                    # recent runs
+spf phases <adw_id>                             # one run's phase-by-phase status
+spf events <adw_id> --follow                    # the live trace
+spf ui                                          # the visualizer, browser-based
 ```
 
-`sf <chain-name> ...` and `sf run <chain-name> ...` are identical — the bare
+`spf <chain-name> ...` and `spf run <chain-name> ...` are identical — the bare
 form exists because naming the chain *is* choosing what runs.
 
 ## When you've finished reading this
 
-Startup discipline still applies: run `sf list`, don't volunteer more state
+Startup discipline still applies: run `spf list`, don't volunteer more state
 than the engineer asked for, and read `how_to_prompt_for_the_eng.md` before
 launching anything.
 

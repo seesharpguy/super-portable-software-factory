@@ -1,5 +1,5 @@
 /**
- * `sf ui` bootstrap: bind the app to a real port, print the URL, optionally
+ * `spf ui` bootstrap: bind the app to a real port, print the URL, optionally
  * open a browser, and shut down cleanly on SIGINT/SIGTERM.
  *
  * Binds loopback-only (127.0.0.1) deliberately — this server can flip a

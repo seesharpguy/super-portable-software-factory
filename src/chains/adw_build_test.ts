@@ -2,7 +2,7 @@
  * ADW Build Test — implement, then verify; failures flow back into the builder.
  *
  * Usage:
- *   bun run adws/adw_build_test.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf build-test "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> builder -> code(test) [-> builder(fix) -> code(test) ... bounded]
  *

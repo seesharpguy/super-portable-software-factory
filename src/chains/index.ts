@@ -1,6 +1,6 @@
 /**
  * The chain registry — the one place a CLI-facing short name maps to a
- * chain module. `sf list` reads this; `sf <name>`/`sf run <name>` dispatch
+ * chain module. `spf list` reads this; `spf <name>`/`spf run <name>` dispatch
  * through it. Replaces guessing a module filename from the CLI argument.
  */
 import type { ChainContext } from "./context.ts";
@@ -18,7 +18,7 @@ import * as adwDocument from "./adw_document.ts";
 import * as adwSimpleSdlc from "./adw_simple_sdlc.ts";
 
 export interface ChainDefinition {
-  /** The name typed on the CLI: `sf <name> "..."`. */
+  /** The name typed on the CLI: `spf <name> "..."`. */
   name: string;
   describe: string;
   phases: string;

@@ -2,9 +2,9 @@
  * Flue coding agent interface — replaces agent_pi.ts.
  *
  * One generic Flue agent function (`SfAgent`), driven entirely by YAML: a
- * module-level registry maps a Flue conversation id (== SF's session id) to
+ * module-level registry maps a Flue conversation id (== SPF's session id) to
  * the model/thinking/sandbox/tools/instruction that call should use, set by
- * `run()` just before dispatching. SF's roster stays data; Flue never learns
+ * `run()` just before dispatching. SPF's roster stays data; Flue never learns
  * there are five different "kinds" of agent.
  *
  * Structured output has no Flue-native "constrain this agent's final
@@ -191,7 +191,7 @@ function resolveBuiltinTools(names: string[]): Array<(env: Sandbox) => unknown> 
 
 /**
  * `undefined`/`null` toolNames = every builtin (Flue's own default when no
- * `tools` override is given — matches SF's "unset = all tools usable").
+ * `tools` override is given — matches SPF's "unset = all tools usable").
  * `local()`'s env does NOT inherit process.env by default (only PATH/HOME/
  * USER/LANG/TERM/TMPDIR) — operatorEnv() restores today's actual behavior.
  */
@@ -207,7 +207,7 @@ function sandboxFor(toolNames: string[] | null | undefined, cwd: string): Sandbo
 /**
  * Flue exposes no public catalog of registered models (only pi's --list-models
  * CLI did, and that command is gone with pi). This checks only the STATIC
- * `provider/model-id` shape — the same shape SF's config docs already ask
+ * `provider/model-id` shape — the same shape SPF's config docs already ask
  * for — not that the provider is reachable or the id exists. An actually
  * wrong model now surfaces at the first real dispatch instead of at
  * validate() time; that trade is made explicit here rather than pretending
@@ -257,7 +257,7 @@ function sfAgentRender({ id }: AgentProps): string {
 }
 
 const SfAgent: Agent = Object.assign(sfAgentRender as AgentFunction<AgentProps>, {
-  agentName: "sf-agent",
+  agentName: "spf-agent",
 } satisfies AgentStatics);
 
 // ── runtime lifecycle ────────────────────────────────────────────────────────
@@ -321,7 +321,7 @@ function contextTokensOf(usage: { totalTokens: number; input: number; output: nu
  *
  * `onSpawn`/`onExit` bracket this call the way they bracketed pi's child
  * process, but there is no child process here: Flue runs in-process, so
- * both fire with this process's own pid. A future `sf abort` can still find
+ * both fire with this process's own pid. A future `spf abort` can still find
  * and stop the right OS process; distinguishing WHICH in-flight submission
  * that pid is running is a `processes.submission_id` column left for later,
  * not attempted here.

@@ -2,7 +2,7 @@
  * Serves the packaged SPA (built once, at publish time — see app/vite.config.ts)
  * from web/, a sibling of dist/ in the published package. Hand-rolled rather
  * than @hono/node-server/serve-static, whose `root` option resolves against
- * process.cwd() — wrong here, since `sf ui` runs from an arbitrary target repo,
+ * process.cwd() — wrong here, since `spf ui` runs from an arbitrary target repo,
  * not from inside the package.
  *
  * A missing web/ (no dist/index.html) is a hard startup error, not a
@@ -33,7 +33,7 @@ const MIME: Record<string, string> = {
 export function assertWebDir(webDir: string): void {
   if (!existsSync(join(webDir, "index.html"))) {
     throw new Error(
-      `sf ui: no packaged UI found at ${webDir} (missing index.html) — this looks like a corrupt install; try reinstalling.`,
+      `spf ui: no packaged UI found at ${webDir} (missing index.html) — this looks like a corrupt install; try reinstalling.`,
     );
   }
 }

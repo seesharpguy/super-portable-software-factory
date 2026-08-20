@@ -3,7 +3,7 @@
  * db.ts change only their import line.
  *
  * This is deliberately NOT a full bun:sqlite polyfill — it's the ~10-behavior
- * subset SF actually calls (query/exec/get/all/run, readonly, PRAGMAs, WAL).
+ * subset SPF actually calls (query/exec/get/all/run, readonly, PRAGMAs, WAL).
  * Every mapping below was verified live against node:sqlite, not assumed:
  *
  *  - bun:sqlite's `{ readonly: true }` maps to node:sqlite's `{ readOnly: true }`

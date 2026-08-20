@@ -1,9 +1,9 @@
 /**
- * `sf install-skill` — copy the packaged Claude Code skill (`assets/skill/`)
- * into a target repo (or `~/.claude/skills/sf` with `--user`), on explicit
+ * `spf install-skill` — copy the packaged Claude Code skill (`assets/skill/`)
+ * into a target repo (or `~/.claude/skills/spf` with `--user`), on explicit
  * request only. Nothing here ever runs unless a user asks for it.
  *
- * Idempotent via a manifest (`.sf-skill-version`: {package, version,
+ * Idempotent via a manifest (`.spf-skill-version`: {package, version,
  * files: {relpath: sha256}}) written at the skill root:
  *   - unchanged file, unchanged source -> no-op
  *   - unchanged file, source changed (version bump) -> upgraded in place
@@ -21,7 +21,7 @@ import path from "node:path";
 import * as paths from "../../core/paths.ts";
 import { parseCli } from "../../core/utils.ts";
 
-const MANIFEST_NAME = ".sf-skill-version";
+const MANIFEST_NAME = ".spf-skill-version";
 
 interface Manifest {
   package: string;
@@ -59,8 +59,8 @@ export function installSkillCommand(argv: string[]): number {
   const destRoot = options["target"]
     ? path.resolve(options["target"])
     : flags["user"]
-      ? path.join(homedir(), ".claude", "skills", "sf")
-      : path.join(paths.resolveAnchor(options["cwd"]).repo_root, ".claude", "skills", "sf");
+      ? path.join(homedir(), ".claude", "skills", "spf")
+      : path.join(paths.resolveAnchor(options["cwd"]).repo_root, ".claude", "skills", "spf");
 
   const srcRoot = path.join(paths.ASSETS_DIR, "skill");
   const sourceFiles = listFiles(srcRoot);
@@ -123,10 +123,10 @@ export function installSkillCommand(argv: string[]): number {
   }
 
   mkdirSync(destRoot, { recursive: true });
-  const manifest: Manifest = { package: "@grateful8/sf", version, files: finalFiles };
+  const manifest: Manifest = { package: "@grateful8/spf", version, files: finalFiles };
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  console.log(`sf install-skill: ${destRoot} (v${version})`);
+  console.log(`spf install-skill: ${destRoot} (v${version})`);
   if (report.length === 0) {
     console.log("  already up to date");
   } else {

@@ -2,7 +2,7 @@
  * ADW Plan Build Test Quality — full agent chain plus deterministic quality.
  *
  * Usage:
- *   bun run adws/adw_plan_build_test_quality.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf plan-build-test-quality "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> planner -> builder -> [code(verify) -> code(test) -> builder(fix)] bounded -> git(commit)
  *
@@ -85,7 +85,7 @@ export async function main(ctx: ChainContext): Promise<number> {
     await run.phase(
       makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Commit the tested and quality-verified working tree" }),
       async (ph) => {
-        const message = previous.commit_message || `sf(${run.adw_id}): ${previous.summary}`;
+        const message = previous.commit_message || `spf(${run.adw_id}): ${previous.summary}`;
         ph.log({ sha: run.git.commitAll(message), message });
       },
     );

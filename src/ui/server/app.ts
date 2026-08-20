@@ -1,5 +1,5 @@
 /**
- * SF visualizer app — JSON API over a target repo's sf.db, plus the packaged
+ * SPF visualizer app — JSON API over a target repo's spf.db, plus the packaged
  * SPA. Reads are read-only; the single write is POST
  * /api/sessions/:adw_id/archive, which sets one review flag on a row.
  *
@@ -109,7 +109,7 @@ export function createApp(db: SfDb, webDir: string): Hono {
   app.get("*", serveStatic(webDir));
 
   app.onError((err, c) => {
-    console.error(`[sf] ${c.req.method} ${c.req.path}:`, err);
+    console.error(`[spf] ${c.req.method} ${c.req.path}:`, err);
     return c.json({ error: err.message } satisfies ApiError, 500);
   });
 

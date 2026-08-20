@@ -1,12 +1,11 @@
 {
-  "name": "@grateful8/sf",
+  "name": "@grateful8/spf",
   "version": "0.1.0",
-  "description": "G8 Software Factory — a global CLI for repeatable agents-plus-code workflows (ADWs)",
+  "description": "Super Portable Factory — a global CLI for repeatable agents-plus-code workflows (ADWs)",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "sf": "dist/cli/bin.js",
-    "g8sf": "dist/cli/bin.js"
+    "spf": "dist/cli/bin.js"
   },
   "files": [
     "dist",

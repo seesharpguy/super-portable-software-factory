@@ -18,7 +18,7 @@ function printEvent(e: { rowid: number; type: string | null; name: string | null
 export async function eventsCommand(argv: string[]): Promise<number> {
   const { positionals, options, flags } = parseCli(argv, ["cwd", "config", "after", "limit"], ["json", "follow"]);
   if (positionals.length < 1) {
-    console.error("usage: sf events <adw_id> [--after <rowid>] [--follow] [--cwd <dir>] [--config <path>] [--json]");
+    console.error("usage: spf events <adw_id> [--after <rowid>] [--follow] [--cwd <dir>] [--config <path>] [--json]");
     return 1;
   }
   const adwId = positionals[0];

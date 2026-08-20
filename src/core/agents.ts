@@ -82,7 +82,7 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
 
 /**
  * Load and merge every existing path in `configPaths`, in order — later
- * paths override earlier ones. Built-in defaults first, an optional `.sf/`
+ * paths override earlier ones. Built-in defaults first, an optional `.spf/`
  * override second is the normal case; a single explicit `--config` path
  * (the caller passes just that one path, no built-in) is used standalone.
  * A path that doesn't exist is silently skipped, EXCEPT that if none of them
@@ -127,7 +127,7 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
     const names = cfg.quality.suites[suiteName];
     if (!names || names.length === 0) {
       problems.push(
-        `quality.suites.${JSON.stringify(suiteName)} is not configured — add it to sf.config.yaml before running a chain that needs it`,
+        `quality.suites.${JSON.stringify(suiteName)} is not configured — add it to spf.config.yaml before running a chain that needs it`,
       );
       continue;
     }
@@ -189,7 +189,7 @@ interface RunForAgents {
   cfg: SFConfig;
   adw_id: string;
   repo_root: string;
-  sf_dir: string | null;
+  spf_dir: string | null;
   data_dir: string;
   session_dir: string;
   context_handoff_dir: string;
@@ -411,7 +411,7 @@ function asReport(result: GateReport | string[]): GateReport {
 function agentSessionId(run: RunForAgents, agent: AgentConfig): string {
   const entry = run.agent_map[agent.name];
   if (entry && entry.model === agent.model) return entry.session_id; // rejoin the existing context window
-  return `sf-${run.adw_id}-${agent.name}-${newId(4)}`;
+  return `spf-${run.adw_id}-${agent.name}-${newId(4)}`;
 }
 
 /** One tool_call event per real tool call, with its exact args and result. */

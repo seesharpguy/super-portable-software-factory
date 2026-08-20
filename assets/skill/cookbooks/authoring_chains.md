@@ -2,16 +2,16 @@
 
 Creating a new chain, extending an existing one, and adding the engine
 primitives a chain needs (an output type, a gate) are one skill with three
-doors. All three live in `src/` inside the SF package itself — there is no
+doors. All three live in `src/` inside the SPF package itself — there is no
 per-repo copy to edit. If you need to change engine behavior for a specific
-target repo without forking the package, that's `sf eject` (prints the path
+target repo without forking the package, that's `spf eject` (prints the path
 to the installed package's `src/` for you to copy and load from your own
-`.sf/` — engine-level changes are the one thing `.sf/` config can't express).
+`.spf/` — engine-level changes are the one thing `.spf/` config can't express).
 
 ## Step 1 — design the chain before writing code
 
 Lay out the phases as a table: name, kind, owner, output type (if `agent`),
-gates. This is the same table `sf list` will end up describing.
+gates. This is the same table `spf list` will end up describing.
 
 | Phase | Kind | Owner | Output type | Gates |
 |---|---|---|---|---|
@@ -80,7 +80,7 @@ export async function main(ctx: ChainContext): Promise<number> {
 
   await run.phase(
     makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Commit the implementation" }),
-    async () => run.git.commitAll(build.commit_message || `sf: ${prompt.slice(0, 72)}`),
+    async () => run.git.commitAll(build.commit_message || `spf: ${prompt.slice(0, 72)}`),
   );
 
   return run.finish();
@@ -89,13 +89,13 @@ export async function main(ctx: ChainContext): Promise<number> {
 
 Then register it in `src/chains/index.ts`'s `CHAINS` array (name, describe,
 phases string, `requiredAgents`/`requiredSuites`, `run`) — that's what makes
-it show up in `sf list` and dispatchable as `sf <name>`.
+it show up in `spf list` and dispatchable as `spf <name>`.
 
-**Before you ship it:** run it against a scratch repo (`sf <name> "..." --cwd
-/tmp/scratch-repo`), then `sf phases <adw_id>` and `sf events <adw_id>` to
+**Before you ship it:** run it against a scratch repo (`spf <name> "..." --cwd
+/tmp/scratch-repo`), then `spf phases <adw_id>` and `spf events <adw_id>` to
 confirm every phase you designed actually appears with the status you
 expect, and open one `envelope.json` under
-`.sf/data/sessions/<adw_id>/<agent>/` to confirm it matches the type you
+`.spf/data/sessions/<adw_id>/<agent>/` to confirm it matches the type you
 declared.
 
 ## Step 3 — add a phase to an existing chain
@@ -188,6 +188,6 @@ this codebase; follow it for new primitives too.
 
 ### Before you finish
 
-Run the smallest chain that exercises the new code (`sf prompt "ping"` for
+Run the smallest chain that exercises the new code (`spf prompt "ping"` for
 an engine-level change, or the specific chain for a chain-level one) and
-confirm `sf phases <adw_id>` shows what you expect.
+confirm `spf phases <adw_id>` shows what you expect.

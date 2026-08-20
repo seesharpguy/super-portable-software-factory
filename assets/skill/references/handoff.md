@@ -125,7 +125,7 @@ static: Purpose + Instructions only.
 ## Session directory layout
 
 ```
-.sf/data/sessions/{adw_id}/
+.spf/data/sessions/{adw_id}/
 ├── agent_map.json          agent name -> Flue conversation id + model
 ├── context_handoff/        the ONE place agents write files for the agents that follow
 └── {agent_name}/
@@ -152,11 +152,11 @@ than starting cold.
 
 The map records the model each session was created with. If config drift
 changes an agent's model, that agent starts a **fresh** conversation and the
-map is updated — never a bad resume. `agent_sessions` in `sf.db` is the
+map is updated — never a bad resume. `agent_sessions` in `spf.db` is the
 queryable mirror of this file. Flue's own durable conversation state lives
-separately, in `.sf/data/flue.db` — a sibling with a different lifetime
-(resumed, not archived) from `sf.db`.
+separately, in `.spf/data/flue.db` — a sibling with a different lifetime
+(resumed, not archived) from `spf.db`.
 
 **Files are the raw record; the db is the queryable mirror.** Losing
-`sf.db` loses nothing that can't be rebuilt from `envelope.json` and
+`spf.db` loses nothing that can't be rebuilt from `envelope.json` and
 `agent_map.json` (plus Flue's own `flue.db` for conversation replay).

@@ -49,7 +49,7 @@ export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string): Run 
     tracer,
     engineer: engineerName(),
     repoRoot: anchor.repo_root,
-    sfDir: anchor.sf_dir,
+    sfDir: anchor.spf_dir,
     dataDir: dataPaths.data_dir,
   });
   const scriptPath = process.argv[1] || "adw";

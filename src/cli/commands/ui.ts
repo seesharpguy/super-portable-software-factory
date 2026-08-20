@@ -23,8 +23,8 @@ export async function uiCommand(argv: string[]): Promise<number> {
       port: options["port"] ? Number.parseInt(options["port"], 10) : undefined,
       open: !flags["no-open"],
     });
-    console.log(`[sf] ui        ${handle.url}`);
-    console.log(`[sf] db        ${dbPath}`);
+    console.log(`[spf] ui        ${handle.url}`);
+    console.log(`[spf] db        ${dbPath}`);
     // runUi() already registers SIGINT/SIGTERM handlers that exit the
     // process; just keep this call from returning until then.
     await new Promise(() => {});

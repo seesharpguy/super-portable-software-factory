@@ -2,7 +2,7 @@
  * ADW Build Review — implement, then confirm it is what was asked for.
  *
  * Usage:
- *   bun run adws/adw_build_review.ts "<prompt or path/to/prompt.md>" [--config adws/adw_sf_config/sf.config.yaml] [--adw-id a1b2c3d4]
+ *   spf build-review "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
  *
  * Phases: engineer(request) -> builder -> reviewer [-> builder(revise) -> reviewer ... bounded]
  *
