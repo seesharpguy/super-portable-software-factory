@@ -26,7 +26,7 @@ const CODES: Record<string, string> = {
   white: "37",
 };
 
-function paint(style: string, text: string): string {
+export function paint(style: string, text: string): string {
   const codes = style.split(" ").map((s) => CODES[s]).filter(Boolean);
   if (codes.length === 0) return text;
   return `\x1b[${codes.join(";")}m${text}${RESET}`;
