@@ -45,10 +45,6 @@ function resolveWatchProvider(cfg: SFConfig): IssueProvider | null {
   return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -165,8 +161,32 @@ export async function watchCommand(argv: string[]): Promise<number> {
 
   const state = createWatchState();
   let stopping = false;
+  // `sleep()`'s pending setTimeout keeps running regardless of `stopping` —
+  // setting the flag alone doesn't wake it, which is exactly why Ctrl-C
+  // used to appear to do nothing for up to poll_ms (default 60s): the
+  // signal landed, but nothing was listening for it to cancel the wait.
+  let interrupt: (() => void) | null = null;
+  function interruptibleSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      interrupt = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+  let sigints = 0;
   const stop = () => {
     stopping = true;
+    interrupt?.();
+    sigints++;
+    if (sigints >= 2) {
+      console.error("\n[spf] watch     second interrupt — exiting immediately, without draining");
+      releaseLock(lockPath);
+      process.exit(130);
+    } else {
+      console.error("\n[spf] watch     stopping after the current tick (press again to force-quit without draining)");
+    }
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -179,11 +199,13 @@ export async function watchCommand(argv: string[]): Promise<number> {
     for (;;) {
       await tick(deps, state);
       if (flags["once"] || stopping) break;
-      await sleep(cfg.watch.poll_ms);
+      await interruptibleSleep(cfg.watch.poll_ms);
+      if (stopping) break;
     }
     while (state.inflight.size > 0) {
       console.log(`[spf] watch     draining ${state.inflight.size} in-flight issue(s)...`);
-      await sleep(1000);
+      await interruptibleSleep(1000);
+      if (stopping && sigints >= 2) break; // stop() itself already exits on the 2nd signal; this is belt-and-suspenders
     }
     return 0;
   } finally {
