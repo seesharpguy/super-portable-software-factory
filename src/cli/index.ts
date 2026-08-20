@@ -4,8 +4,10 @@
  * because typing the chain name IS choosing what to run, and that's the
  * common case. Everything else is a named subcommand.
  */
+import path from "node:path";
 import * as agentCc from "../core/agent_cc.ts";
 import * as agentFlue from "../core/agent_flue.ts";
+import * as paths from "../core/paths.ts";
 import { findChain } from "../chains/index.ts";
 import { dispatchChain, usageFor } from "./commands/run.ts";
 import { listCommand } from "./commands/list.ts";
@@ -42,14 +44,28 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
 Run \`spf list\` to see every chain and what it needs.`;
 
-export async function main(): Promise<void> {
-  try {
-    process.loadEnvFile();
-  } catch {
-    // no .env in cwd — fine, nothing to load
-  }
+/** A raw scan for `--cwd`, ahead of any command-specific argv parsing — every command that takes it means the same thing by it. */
+function findCwdFlag(argv: string[]): string | undefined {
+  const idx = argv.indexOf("--cwd");
+  return idx !== -1 ? argv[idx + 1] : undefined;
+}
 
+export async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
+
+  // `process.loadEnvFile()` with no argument reads from `process.cwd()` —
+  // the OS process's actual working directory, NOT spf's own `--cwd`
+  // option. Every other path in this codebase anchors to `--cwd` (that's
+  // the whole point of paths.resolveAnchor()); loading .env from the
+  // invoking shell's directory instead of the target repo's is exactly the
+  // anchor-mismatch bug that principle exists to close. Resolve the same
+  // way every command does, and load .env from the repo root it finds.
+  try {
+    const anchor = paths.resolveAnchor(findCwdFlag(rest));
+    process.loadEnvFile(path.join(anchor.repo_root, ".env"));
+  } catch {
+    // no .env there — fine, nothing to load
+  }
 
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     console.log(HELP);
