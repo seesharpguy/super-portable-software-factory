@@ -83,8 +83,25 @@ agents:
 `checks[]`: `{name, area: "frontend"|"backend", operation: "lint"|"typecheck"|"build", argv: string[], timeout_seconds}`.
 `suites`: `{suite_name: [check_name, ...]}`. No packaged default suite exists
 on purpose — a chain that needs one and finds it unconfigured fails loudly
-at `agents.validate()` time, not with a placeholder green. See `roster.md`
-and `authoring_chains.md`.
+at `agents.validate()` time, not with a placeholder green. Adding a check
+whose result is really a test run, not a lint/typecheck/build, still needs
+one of those three `operation` values — it only affects how the trace/UI
+labels the check, never what actually runs — `build` is the closest fit.
+
+```yaml
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    test: [test]              # what build-test/plan-build-test's fix loop runs
+    all: [typecheck, build, test]   # what plan-build-test-quality/quality run
+```
+
+A full worked example, including the `defaults.coding_agent`/`watch:`
+sections: `docs/examples/node-typescript.spf.config.yaml` in the spf
+repo (or wherever this skill's own package is installed from).
 
 ### `agents[]`
 

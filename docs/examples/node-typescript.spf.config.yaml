@@ -1,0 +1,52 @@
+# Example .spf/spf.config.yaml for a Node/TypeScript project.
+#
+# Copy the pieces you want into your own .spf/spf.config.yaml — this is a
+# worked example, not something spf reads directly. `spf init` seeds a
+# starter with the same shape, commented out; this fills it in with real
+# commands so `plan-build-test`/`plan-build-test-quality`/`quality`/
+# `simple-sdlc` — every chain with a REQUIRED_SUITES entry — actually have
+# something to run instead of failing loudly at validate() time.
+#
+# Adjust the argv to your own project: swap `npm` for `pnpm`/`yarn`, point
+# `build`/`typecheck` at whatever scripts you already have in package.json.
+quality:
+  checks:
+    # `operation` classifies the check for the trace/UI (lint | typecheck |
+    # build) — it doesn't have to literally match the argv. Running a test
+    # suite doesn't have its own operation value, so `build` is the closest
+    # fit; it doesn't change what actually runs.
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: lint, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    # `test:` is what build-test/plan-build-test/simple-sdlc's bounded fix
+    # loop runs after every build. Keep it fast — it runs on every attempt.
+    test: [test]
+    # `all:` is what plan-build-test-quality/quality run — the full bar.
+    all: [typecheck, lint, build, test]
+
+# Optional: run agents on Claude Code instead of the default Flue backend.
+# Needs the `claude` CLI installed and authenticated (`spf doctor` checks) —
+# no separate provider API key required if you're logged in via `claude
+# login`. Remove this whole block to stay on Flue with a `provider/model-id`
+# roster instead.
+defaults:
+  coding_agent: claude_code
+  model: sonnet # claude_code's own alias — NOT provider/model-id
+
+# Optional: retune one agent without touching the rest of the roster.
+# agents:
+#   - name: builder
+#     thinking: high
+#     writes: [src/, tests/]   # narrow what this agent may change in the repo
+
+# Optional: poll a GitHub repo's `spf:ready`-labeled issues and run a chain
+# against each — see roster.md's "Coding agent backends" section for the
+# Ollama recipe, and references/config.md for the full watch: field list.
+# Needs a GITHUB_TOKEN env var (classic PAT, repo scope).
+# watch:
+#   repo: owner/name
+#   label_prefix: spf
+#   chain: plan-build-test
+#   base_branch: main
