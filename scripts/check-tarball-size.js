@@ -24,12 +24,16 @@ const root = path.resolve(import.meta.dirname, "..");
 // (its own line, always "[") and parse from there instead of the raw string.
 const raw = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf-8" });
 const lines = raw.split("\n");
-const jsonStart = lines.findIndex((line) => line.trim() === "[");
+const jsonStart = lines.findIndex((line) => line.trim() === "[" || line.trim() === "{");
 if (jsonStart === -1) {
   console.error("check-tarball-size: could not find the start of npm pack's JSON output:\n" + raw);
   process.exit(1);
 }
-const [info] = JSON.parse(lines.slice(jsonStart).join("\n"));
+const parsed = JSON.parse(lines.slice(jsonStart).join("\n"));
+// npm <11 reports an array (`[{...}]`); npm >=12 reports an object keyed by
+// package id (`{"@scope/name": {...}}`) -- support both rather than pin to
+// whichever shape happened to be installed when this was last verified.
+const info = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
 
 function fmt(bytes) {
   return `${(bytes / 1000).toFixed(1)}kB`;
