@@ -7,6 +7,14 @@
  * backend needs installed anyway) — shelling out costs SPF zero new
  * dependencies, the same trade the pre-Flue `agent_pi.ts` made for `pi`.
  *
+ * The `claude` command is resolved from `PATH` by default. To route it through
+ * a wrapper, proxy server, or launcher (e.g., Ollama), set `SPF_CLAUDE_CMD`
+ * before running spf. Space-separated command chains are supported:
+ *   - `SPF_CLAUDE_CMD="claude"` (default)
+ *   - `SPF_CLAUDE_CMD="ollama launch claude"` (Ollama launcher)
+ * The command/launcher must support the full Claude Code CLI interface.
+ * When unset, defaults to `claude`.
+ *
  * Every flag below was verified against a REAL local run of this exact
  * machine's `claude` CLI (v2.1.237) before being written — not assumed from
  * the SDK's docs, which describe a related but separately-versioned
@@ -259,7 +267,10 @@ export async function run(
     "--strict-mcp-config", // see the module doc comment — required, not optional
   ];
 
-  const child = spawn("claude", args, { cwd: request.cwd, env: operatorEnv() });
+  const cmdSpec = process.env.SPF_CLAUDE_CMD || "claude";
+  const [cmd, ...cmdArgs] = cmdSpec.split(/\s+/);
+  const fullArgs = [...cmdArgs, ...args];
+  const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: operatorEnv() });
   // The prompt travels as a positional argv element, not stdin — closing it
   // immediately avoids a real, observed ~3s "no stdin data received" stall
   // where `claude` otherwise waits to see whether anything is piped in.
