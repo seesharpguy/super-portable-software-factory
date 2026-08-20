@@ -23,6 +23,17 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 # agents:
 #   - name: builder
 #     model: anthropic/claude-sonnet-4-6
+#     coding_agent: claude_code   # run this agent on Claude Code instead of Flue
+#     model: sonnet               # claude_code's own alias, NOT provider/model-id
+
+# Uncomment to enable \`spf watch\` — polls GitHub issues labeled
+# <label_prefix>:ready and runs \`chain\` against each in its own worktree.
+# Needs a GITHUB_TOKEN env var (classic PAT, repo scope) — \`spf doctor\` checks.
+# watch:
+#   repo: owner/name
+#   label_prefix: spf
+#   chain: plan-build-test
+#   base_branch: main
 `;
 
 const GITIGNORE_ENTRIES = [".spf/data/", ".env"];

@@ -76,6 +76,7 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
     observability: { ...(base.observability || {}), ...(override.observability || {}) },
     quality: { ...(base.quality || {}), ...(override.quality || {}) },
+    watch: { ...(base.watch || {}), ...(override.watch || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }

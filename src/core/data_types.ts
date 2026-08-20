@@ -418,11 +418,38 @@ export const ObservabilityConfigSchema = v.object({
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
 
+/**
+ * `spf watch`'s configuration. `provider` is a small enum today (just
+ * `"github"`) by design — adding Jira/Linear later is a new provider
+ * module (`core/issues/*_provider.ts`) implementing `IssueProvider` plus
+ * one more enum entry here, not a rewrite of the poll loop.
+ *
+ * `repo` has no sensible default and is validated as required at `spf
+ * watch` startup, not here — an empty string parses fine (this schema has
+ * no opinion on whether watch is even configured), matching the same
+ * "fails loudly before anything spawns, not eagerly at parse time" pattern
+ * `quality:` already uses.
+ */
+export const WatchProviderSchema = v.picklist(["github"]);
+export type WatchProvider = v.InferOutput<typeof WatchProviderSchema>;
+
+export const WatchConfigSchema = v.object({
+  provider: v.optional(WatchProviderSchema, "github"),
+  repo: v.optional(v.string(), ""), // "owner/name"
+  label_prefix: v.optional(v.string(), "spf"),
+  chain: v.optional(v.string(), "plan-build-test"),
+  base_branch: v.optional(v.string(), "main"),
+  poll_ms: v.optional(v.number(), 60_000),
+  concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),
+});
+export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
+
 export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
   agents: v.optional(v.array(AgentConfigSchema), () => []),
   quality: v.optional(QualityConfigSchema, () => v.parse(QualityConfigSchema, {})),
+  watch: v.optional(WatchConfigSchema, () => v.parse(WatchConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 

@@ -16,6 +16,7 @@ import * as agentCc from "../../core/agent_cc.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { parseCli } from "../../core/utils.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
+import { findChain } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
 
 // Common providers' env var conventions — public knowledge (pi-ai's own
@@ -159,6 +160,12 @@ export function doctorCommand(argv: string[]): number {
   for (const envFile of [".env"]) {
     const p = path.join(anchor.repo_root, envFile);
     check(report, `${envFile}`, true, existsSync(p) ? `present (${statSync(p).size} bytes)` : "absent — fine if no provider needs a key from it");
+  }
+
+  if (cfg.watch.repo.trim()) {
+    check(report, "watch.provider", cfg.watch.provider === "github", cfg.watch.provider);
+    check(report, "GITHUB_TOKEN", Boolean(process.env["GITHUB_TOKEN"]), process.env["GITHUB_TOKEN"] ? "set" : "not set — spf watch needs a classic PAT with repo scope");
+    check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
   }
 
   return finish(report, flags["json"]);

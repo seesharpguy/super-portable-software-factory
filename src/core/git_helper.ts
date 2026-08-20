@@ -67,6 +67,15 @@ export interface GitHandle {
   /** [insertions, deletions] across the diff. Binary files count as neither. */
   diffCounts(base: string): [number, number];
   diffText(base: string): string;
+  /** `git fetch <remote> <ref>` — needed before branching off a remote base that may have moved. */
+  fetch(remote: string, ref: string): void;
+  /** `git worktree add <path> -b <branch> <startPoint>` — used by `spf watch` to isolate one issue's work outside the repo. */
+  worktreeAdd(worktreePath: string, branch: string, startPoint: string): void;
+  /** `git worktree remove <path> --force`. Never throws if the path is already gone. */
+  worktreeRemove(worktreePath: string): void;
+  /** `git branch -D <name>`. Never throws if the branch is already gone. */
+  deleteLocalBranch(name: string): void;
+  push(remote: string, branch: string): void;
 }
 
 /** Every operation this returns is bound to `repoRoot` — never `process.cwd()`. */
@@ -144,5 +153,25 @@ export function makeGit(repoRoot: string): GitHandle {
     },
 
     diffText: (base) => run(["diff", base]),
+
+    fetch: (remote, ref) => {
+      run(["fetch", remote, ref]);
+    },
+
+    worktreeAdd: (worktreePath, branch, startPoint) => {
+      run(["worktree", "add", worktreePath, "-b", branch, startPoint]);
+    },
+
+    worktreeRemove: (worktreePath) => {
+      spawnSync("git", ["worktree", "remove", worktreePath, "--force"], { cwd: repoRoot, encoding: "utf-8" });
+    },
+
+    deleteLocalBranch: (name) => {
+      spawnSync("git", ["branch", "-D", name], { cwd: repoRoot, encoding: "utf-8" });
+    },
+
+    push: (remote, branch) => {
+      run(["push", "-u", remote, branch]);
+    },
   };
 }
