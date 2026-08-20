@@ -26,6 +26,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:cli
+      # ui_server.test.ts serves the packaged web/ SPA, so it must exist
+      # before `npm test` runs here too, not just in the pack job.
+      - run: npm run build:app
       - run: npm test
 
   pack:
