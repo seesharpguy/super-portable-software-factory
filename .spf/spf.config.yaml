@@ -24,3 +24,13 @@ quality:
 defaults:
   coding_agent: claude_code
   model: sonnet
+
+# `spf watch init` (seed the 5 spf:* labels) then `spf watch` — needs a
+# GITHUB_TOKEN env var, classic PAT, "repo" scope (never "project" — see
+# README.md's "GITHUB_TOKEN scope" section). Runs plan-build-test, which
+# uses the `test` suite configured above.
+watch:
+  repo: seesharpguy/super-portable-software-factory
+  label_prefix: spf
+  chain: plan-build-test
+  base_branch: main
