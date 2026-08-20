@@ -25,7 +25,7 @@ import {
   type AgentCall,
   type AgentConfig,
   type EnvelopeBase,
-  type FlueRequest,
+  type AgentRequest,
   type Phase,
   type SFConfig,
 } from "./data_types.ts";
@@ -257,7 +257,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   const spent = new UsageBreakdown();
 
   async function send(promptText: string): Promise<FlueResultLike> {
-    const request: FlueRequest = {
+    const request: AgentRequest = {
       prompt: promptText,
       system_prompt: systemText,
       model: agent.model,

@@ -458,29 +458,37 @@ export function makeEventRecord(input: Partial<EventRecord> & { adw_id: string; 
   };
 }
 
-// ── Flue coding agent interface ──────────────────────────────────────────────
+// ── Coding agent interface (backend-neutral: Flue, Claude Code, ...) ────────
 
 /**
- * Everything one Flue dispatch+read turn needs.
+ * Everything one coding-agent dispatch+read turn needs, whichever backend
+ * (`coding_agent:` in config) actually runs it — Flue today, others later.
+ * Each backend module (`agent_flue.ts`, ...) is free to ignore fields it has
+ * no use for (a subprocess-based backend has no use for `flue_db_path`) and
+ * to interpret `model` in its own vocabulary (Flue: `provider/model-id`;
+ * others may take a bare alias) — `agents.validate()` already branches its
+ * model-shape check on `coding_agent` for exactly this reason.
  *
  * No `session_dir`/`raw_output_path` (Flue's own persistence is the durable
- * record; there is no child process whose JSONL stdout needs a home) and no
- * `extensions` (harness_engineering has no Flue analogue — see
- * agents.validate()). `output_schema`/`output_type_name` drive the injected
- * `sf_report` tool, which is how a Valibot envelope type becomes the tool
- * schema Flue validates the model's structured output against.
+ * record for Flue; a subprocess backend owns its own equivalent) and no
+ * `extensions` (harness_engineering has no analogue on any current backend —
+ * see agents.validate()). `output_schema`/`output_type_name` is the one
+ * contract every backend must honor somehow — Flue via an injected
+ * `sf_report` tool, a CLI-shaped backend via its own structured-output flag —
+ * so a Valibot envelope type becomes that backend's schema-validated output
+ * with no second definition anywhere.
  */
-export interface FlueRequest {
+export interface AgentRequest {
   prompt: string;
   system_prompt: string;
-  model: string; // provider/model-id
+  model: string; // vocabulary depends on coding_agent — see above
   thinking: ThinkingLevel;
-  session_id: string; // Flue conversation id: init(agent, {id}) creates or continues
+  session_id: string; // this backend's own conversation/session id: creates or continues
   tools?: string[] | null;
   output_schema: v.GenericSchema<Record<string, unknown>, unknown>;
   output_type_name: string;
   cwd: string; // set from run.repo_root — the codebase root agents work in
-  flue_db_path: string; // only consulted on the runtime's first-ever call
+  flue_db_path: string; // Flue-specific: its own conversation store, consulted only by agent_flue.ts
 }
 
 /**
@@ -540,14 +548,15 @@ export class UsageBreakdown {
   }
 }
 
-export interface FlueResult {
+export interface AgentResult {
   text: string;
   /**
-   * The validated argument the model's `sf_report` call carried, captured
-   * via useDataWriter — present whenever the model called that tool at all,
-   * regardless of whether it also produced JSON in `text`. `null` means the
-   * model never called it, so the caller falls back to extracting JSON from
-   * `text` directly.
+   * The validated structured output, however this backend produced it —
+   * Flue's injected `sf_report` tool call, or another backend's own
+   * schema-validated result field. Present whenever the backend captured
+   * one, regardless of whether it also produced JSON in `text`. `null`
+   * means it never validated, so the caller falls back to extracting JSON
+   * from `text` directly.
    */
   report: unknown | null;
   session_id: string;
@@ -558,10 +567,10 @@ export interface FlueResult {
   // turn; this is how full the window is right now, which is what the
   // visualizer's context bar measures against `context_window`.
   context_tokens: number;
-  context_window: number; // 0 — Flue has no model-registry lookup for this (see agent_flue.ts)
+  context_window: number; // 0 if this backend has no way to report it (Flue never does; see agent_flue.ts)
 }
 
-export function makeFlueResult(input: Partial<FlueResult> & { session_id: string }): FlueResult {
+export function makeAgentResult(input: Partial<AgentResult> & { session_id: string }): AgentResult {
   return {
     text: "",
     report: null,

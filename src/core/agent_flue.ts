@@ -46,8 +46,8 @@ import {
   type SandboxFactory,
 } from "@flue/runtime";
 import { local, sqlite, start, type Flue } from "@flue/runtime/node";
-import type { FlueRequest, FlueResult, ThinkingLevel } from "./data_types.ts";
-import { UsageBreakdown, makeFlueResult } from "./data_types.ts";
+import type { AgentRequest, AgentResult, ThinkingLevel } from "./data_types.ts";
+import { UsageBreakdown, makeAgentResult } from "./data_types.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
 
 const RESULT_SNIPPET_CHARS = 20_000; // tool output rides along whole; clip only guards pathological cases
@@ -229,7 +229,7 @@ interface RenderSpec {
   cwd: string;
   toolNames: string[] | null | undefined;
   systemText: string;
-  outputSchema: FlueRequest["output_schema"];
+  outputSchema: AgentRequest["output_schema"];
   outputTypeName: string;
 }
 
@@ -327,11 +327,11 @@ function contextTokensOf(usage: { totalTokens: number; input: number; output: nu
  * not attempted here.
  */
 export async function run(
-  request: FlueRequest,
+  request: AgentRequest,
   onEvent?: (chunk: ConversationStreamChunk) => void,
   onSpawn?: (pid: number) => void,
   onExit?: (pid: number) => void,
-): Promise<FlueResult> {
+): Promise<AgentResult> {
   await ensureRuntime(request.flue_db_path);
 
   REGISTRY.set(request.session_id, {
@@ -360,7 +360,7 @@ export async function run(
     const reply = await handle.read(receipt, { onEvent });
     const reportEntries = reply.data["sf_report"];
     const report = reportEntries && reportEntries.length > 0 ? reportEntries[reportEntries.length - 1] : null;
-    return makeFlueResult({
+    return makeAgentResult({
       session_id: request.session_id,
       text: reply.text,
       report,
