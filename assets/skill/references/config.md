@@ -1,7 +1,8 @@
 # Config Reference
 
 The full `spf.config.yaml` spec: every field, how defaults merge, and how
-model / thinking / tools map onto Flue. The schema is Valibot-enforced —
+model / thinking / tools map onto each coding-agent backend (Flue by
+default, or Claude Code). The schema is Valibot-enforced —
 `agents.validate()` refuses a bad config before anything spawns — so this is
 semantics and gotchas, not a shape you have to memorize by hand; `spf doctor`
 always shows the resolved, merged result for the repo you're in.
@@ -61,11 +62,11 @@ agents:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `coding_agent` | `"flue"` | Only implemented value — enforced by the schema. |
-| `model` | string | `provider/model-id`. Default `google/gemini-3.6-flash`. |
-| `thinking` | enum | `off\|minimal\|low\|medium\|high\|xhigh\|max`. Default `medium`. |
+| `coding_agent` | `"flue"` \| `"claude_code"` | Which backend runs the agent. Default `flue`. `claude_code` shells out to your own installed `claude` CLI — `spf doctor` checks it's on `PATH`. |
+| `model` | string | Vocabulary depends on `coding_agent`: Flue wants `provider/model-id`; Claude Code wants its own bare alias/full name (`sonnet`, `claude-sonnet-5`, ...). Default `google/gemini-3.6-flash`. |
+| `thinking` | enum | `off\|minimal\|low\|medium\|high\|xhigh\|max`. Default `medium`. On a `claude_code` agent this maps to `--effort` (`off`/`minimal` both floor to Claude Code's own minimum — it has no true "disabled" level for a headless run). |
 | `color` | hex string | Lane color fallback for agents that don't set their own. |
-| `harness_engineering` | string[] | **Must stay `[]`** — no Flue analogue; a non-empty entry fails validate(). |
+| `harness_engineering` | string[] | **Must stay `[]`** — no analogue on any current backend; a non-empty entry fails validate(). |
 | `tools` | string[] \| null | Roster-wide allowlist. Unset/null = every built-in tool usable. |
 | `protected_files` | string[] | Paths no agent may touch unless named in its own `writes`. Default `[".spf/", "spf.config.yaml"]`. |
 | `data_dir` | path | Runtime home, repo-relative. Default `.spf/data`. |
@@ -101,13 +102,22 @@ agent *is*; the call site defines how it's *used*.
 
 ## Model resolution
 
-Always write `model` as `provider/model-id`. There is no live catalog to
-validate against (Flue has no public model-registry API) — `agents.ts`
-checks only the static shape at `agents.validate()` time; a genuinely wrong
-provider or id surfaces at the first real dispatch instead. Provider
-credentials come from the environment, matching the provider you named
-(`GEMINI_API_KEY`/`GOOGLE_API_KEY` for `google/...`, `ANTHROPIC_API_KEY` for
-`anthropic/...`, etc.) — `spf doctor` checks the common ones are set.
+**For `coding_agent: flue` (the default):** always write `model` as
+`provider/model-id`. There is no live catalog to validate against (Flue has
+no public model-registry API) — `agents.ts` checks only the static shape at
+`agents.validate()` time; a genuinely wrong provider or id surfaces at the
+first real dispatch instead. Provider credentials come from the
+environment, matching the provider you named (`GEMINI_API_KEY`/
+`GOOGLE_API_KEY` for `google/...`, `ANTHROPIC_API_KEY` for `anthropic/...`,
+etc.) — `spf doctor` checks the common ones are set.
+
+**For `coding_agent: claude_code`:** write `model` in Claude Code's own
+vocabulary — a bare alias (`sonnet`, `opus`) or a full model name — never
+`provider/model-id`. `agents.validate()` only checks it's non-empty; a
+genuinely wrong name surfaces at the first real dispatch, same as Flue.
+Credentials come from whatever the `claude` CLI itself is authenticated
+with (`ANTHROPIC_API_KEY`, or its own `claude login` flow) — `spf doctor`
+treats a missing key as informational for this backend, not a failure.
 
 The resolved model is recorded per agent in `agent_map.json`, mirrored in
 the `agent_sessions` table. **Changing an agent's model invalidates its
@@ -123,7 +133,12 @@ session** — a joined run starts that agent fresh instead of resuming.
 | `write` | create/overwrite files |
 | `grep` | search file contents |
 | `glob` (alias: `find`) | find files by pattern |
-| `ls` | recognized name, **no Flue built-in** — harmless to list, never mounts |
+| `ls` | recognized name, **no built-in on either backend** — harmless to list, never mounts |
+
+These names are canonical across backends — a roster entry never says
+which; each backend module (`agent_flue.ts`, `agent_cc.ts`) maps them to
+its own tool vocabulary (Flue's lowercase functions, Claude Code's
+capitalized `Read`/`Bash`/...).
 
 **Resolution order:** an agent's own `tools` wins → else `defaults.tools` →
 else unset (all tools usable). An empty list is a tool-less agent, and it
@@ -140,7 +155,17 @@ not a gate — it's checked in code, not by asking the model to redo work.
 
 ## Harness engineering — no longer applicable
 
-Kept as a field for config-shape stability, but it must be empty. Flue's
-equivalents (extra tools, subagents, MCP-style extension) are engine-level
-changes made inside `src/core/agent_flue.ts`, not config — see
+Kept as a field for config-shape stability, but it must be empty. Each
+backend's own equivalent (Flue: extra tools/subagents via `useTool()`/
+`useSandbox()`; Claude Code: an MCP server or plugin) is an engine-level
+change made inside that backend's own module, not config — see
 `authoring_chains.md`.
+
+## Pointing `claude_code` at Ollama
+
+No config section for this — it's an environment-variable recipe, since
+`agent_cc.ts` passes the operator's environment straight through to the
+`claude` subprocess, exactly like every other env var. Set
+`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (local or cloud Ollama) before
+running `spf`; see `roster.md`'s "Coding agent backends" section for the
+exact commands.

@@ -90,6 +90,10 @@ Every agent gets its own model, thinking level, prompts, and tools. Give the pla
 
 Config defines who an agent **is**. The chain call site defines how it is **used**. That split is what lets one agent serve many different calls. **Chains name agents, never models.**
 
+### A second backend: Claude Code
+
+Set `coding_agent: claude_code` on any agent (or in `defaults`) to run it on your own installed [Claude Code](https://claude.com/product/claude-code) CLI instead of Flue — `spf doctor` checks it's on `PATH`. Model names follow Claude Code's own vocabulary (a bare alias like `sonnet`, not `provider/model-id`); everything else — `tools`, `writes`, `thinking` — stays the same shape. Pointing a `claude_code` agent at a local or cloud [Ollama](https://ollama.com) server needs no config at all — just `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` set before you run `spf`, since Claude Code's CLI reads those itself.
+
 ---
 
 ## Phases: three lanes, one primitive

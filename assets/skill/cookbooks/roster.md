@@ -30,6 +30,14 @@ first real dispatch. Thinking levels: `off | minimal | low | medium | high |
 xhigh | max` — inert (no error, no effect) on a model that isn't a reasoning
 model.
 
+**This is Flue's model vocabulary, not every backend's.** An agent with
+`coding_agent: claude_code` (see below) writes `model:` in Claude Code's own
+vocabulary instead — a bare alias (`sonnet`, `opus`) or a full model name —
+never `provider/model-id`. `agents.validate()` knows which shape check
+applies from `coding_agent`, so mixing the two conventions in the same
+roster is fine as long as each agent's own `model:` matches its own
+backend.
+
 **A model change means a fresh session.** `agent_map.json` records the
 model each agent's Flue conversation was created with. When a joined run
 (`--adw-id`) finds the config's model no longer matches, that agent starts a
@@ -48,12 +56,53 @@ Cosmetic, safe mid-project — rides the `agent_start` event and the
 `agent_sessions` row, so the UI picks it up on the next run without
 touching past sessions. Omit it for the UI's fallback palette.
 
+## Coding agent backends
+
+`coding_agent: flue` (the default) or `coding_agent: claude_code` — set per
+agent or in `defaults`. Both read the same roster shape (`tools:`,
+`writes:`, `thinking:`), but each backend interprets a couple of fields in
+its own vocabulary:
+
+```yaml
+agents:
+  - name: builder
+    coding_agent: claude_code
+    model: sonnet              # Claude Code's own alias/name, NOT provider/model-id
+    thinking: high
+    tools: [read, edit, bash]  # same canonical names either way — see "Retune tools" below
+```
+
+`claude_code` shells out to your own installed `claude` CLI (`spf doctor`
+checks it's on `PATH`) — it needs no separate npm install, since SPF never
+depends on it directly. A missing `ANTHROPIC_API_KEY` is informational, not
+a hard failure: Claude Code also supports its own `claude login` flow.
+
+**Pointing a `claude_code` agent at Ollama** — local or cloud — needs no
+config at all, just environment variables set before you run `spf` (Claude
+Code's CLI reads them itself):
+
+```bash
+# local Ollama
+export ANTHROPIC_BASE_URL=http://localhost:11434
+export ANTHROPIC_AUTH_TOKEN=ollama   # any non-empty value; Ollama doesn't check it locally
+
+spf build "..." --config .spf/spf.config.yaml   # any chain naming a claude_code agent
+```
+
+For Ollama's cloud offering, point `ANTHROPIC_BASE_URL` at that instead and
+set `ANTHROPIC_AUTH_TOKEN` to a real Ollama Cloud API key. This is exactly
+the same environment-variable pass-through every agent already gets — no
+SPF-specific plumbing, no `provider:` config section to write.
+
 ## Retune tools
 
 Known tool names: `read`, `bash`, `edit`, `write`, `grep`, `glob` (`find` is
-accepted as an alias for `glob`). `ls` is a recognized name with **no Flue
-built-in** — bash/glob cover it, so listing it is harmless but it never
-mounts as its own tool.
+accepted as an alias for `glob`). These are canonical across BOTH backends —
+Flue maps them to its own lowercase tool functions, Claude Code maps them to
+its own capitalized names (`Read`, `Bash`, ...); a roster entry never has to
+say which. `ls` is a recognized name with **no built-in on either backend**
+— bash/glob cover it, so listing it is harmless but it never mounts as its
+own tool.
 
 ```yaml
 defaults:
@@ -82,11 +131,12 @@ Narrow by role, not by reflex:
 - Recon agents get the full read surface (`read`, `grep`, `glob`) — cheaper
   and more legible in the trace than the equivalent `bash` calls.
 
-`harness_engineering` has **no Flue analogue** and must stay empty —
-`agents.validate()` fails loudly if any entry is non-empty. (Flue's
-equivalent surface — extra tools, subagents — is added via `useTool()`/
-`useSandbox()` inside `src/core/agent_flue.ts` itself, an engine change, not
-a config one; see `authoring_chains.md`.)
+`harness_engineering` has **no analogue on any current backend** and must
+stay empty — `agents.validate()` fails loudly if any entry is non-empty.
+(Flue's equivalent surface — extra tools, subagents — is added via
+`useTool()`/`useSandbox()` inside `src/core/agent_flue.ts` itself; Claude
+Code's is an MCP server or plugin passed to `agent_cc.ts`. Either way it's
+an engine change, not a config one; see `authoring_chains.md`.)
 
 ## Add a new agent
 

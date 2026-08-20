@@ -11,8 +11,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { ConversationStreamChunk } from "@flue/runtime";
 import * as v from "valibot";
+import * as agentCc from "./agent_cc.ts";
 import * as agentFlue from "./agent_flue.ts";
 import * as paths from "./paths.ts";
 import * as permissions from "./permissions.ts";
@@ -144,9 +144,6 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
       problems.push((error as Error).message);
       continue;
     }
-    if (agent.coding_agent !== "flue") {
-      problems.push(`agent ${JSON.stringify(name)}: coding_agent ${JSON.stringify(agent.coding_agent)} is not implemented (flue only)`);
-    }
     for (const [label, ref] of [
       ["system", agent.prompt_engineering.system],
       ["user", agent.prompt_engineering.user],
@@ -157,23 +154,33 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
         problems.push(`agent ${JSON.stringify(name)}: ${label} ${(error as Error).message}`);
       }
     }
-    try {
-      agentFlue.resolveModel(agent.model);
-    } catch (error) {
-      problems.push(`agent ${JSON.stringify(name)}: ${(error as Error).message}`);
+    // Model shape depends on the backend: Flue needs provider/model-id (no
+    // catalog to check against, only the static shape); claude_code takes
+    // its own bare alias/full-name vocabulary (see agent_cc.ts), so only a
+    // non-empty check applies.
+    if (agent.coding_agent === "flue") {
+      try {
+        agentFlue.resolveModel(agent.model);
+      } catch (error) {
+        problems.push(`agent ${JSON.stringify(name)}: ${(error as Error).message}`);
+      }
+    } else if (!agent.model.trim()) {
+      problems.push(`agent ${JSON.stringify(name)}: model is empty`);
     }
-    // harness_engineering (pi -e extensions) has no Flue analogue — a
-    // subagent/skill built the same way is now useSubagent()/defineSkill()
-    // inside a custom tool, not a config path. Fail loudly rather than
-    // silently loading nothing.
+    // harness_engineering (pi -e extensions) has no analogue on any current
+    // backend — a subagent/skill built the same way is
+    // useSubagent()/defineSkill() (Flue) or an MCP server/plugin (Claude
+    // Code) inside a custom tool, not a config path. Fail loudly rather
+    // than silently loading nothing.
     if (agent.harness_engineering.length > 0) {
       problems.push(
-        `agent ${JSON.stringify(name)}: harness_engineering is not supported under Flue (${JSON.stringify(agent.harness_engineering)}) — ` +
-          `use useSubagent()/defineSkill() in a custom tool instead`,
+        `agent ${JSON.stringify(name)}: harness_engineering is not supported (${JSON.stringify(agent.harness_engineering)}) — ` +
+          `use useSubagent()/defineSkill() (flue) or an MCP server/plugin (claude_code) in a custom tool instead`,
       );
     }
+    const isKnownToolName = agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : agentFlue.isKnownToolName;
     for (const toolName of agent.tools ?? []) {
-      if (!agentFlue.isKnownToolName(toolName)) {
+      if (!isKnownToolName(toolName)) {
         problems.push(`agent ${JSON.stringify(name)}: unknown tool ${JSON.stringify(toolName)} — known: read, write, edit, bash, grep, glob, find (alias for glob), ls (dropped, covered by bash/glob)`);
       }
     }
@@ -229,7 +236,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   prompts.save(path.join(agentDir, "prompts"), "system.md", systemText);
   prompts.save(path.join(agentDir, "prompts"), "user.md", userText);
 
-  const sessionId = agentSessionId(run, agent);
+  const { session_id: sessionId, is_new: isNewSession } = agentSessionId(run, agent);
   run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
@@ -263,18 +270,20 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       model: agent.model,
       thinking: agent.thinking,
       session_id: sessionId,
+      resume: !isNewSession,
       tools: agent.tools ?? undefined,
       output_schema: call.output_type.schema,
       output_type_name: call.output_type.name,
       cwd: run.repo_root,
       flue_db_path: path.join(run.data_dir, "flue.db"),
     };
-    const result = await agentFlue.run(
-      request,
-      eventForwarder(run, phase, agent.name),
-      (pid) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`),
-      (pid) => run.tracer.processEnd(run.adw_id, pid),
-    );
+    const forward = eventForwarder(run, phase, agent.name, agent.coding_agent);
+    const onSpawn = (pid: number) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`);
+    const onExit = (pid: number) => run.tracer.processEnd(run.adw_id, pid);
+    const result =
+      agent.coding_agent === "claude_code"
+        ? await agentCc.run(request, forward, onSpawn, onExit)
+        : await agentFlue.run(request, forward, onSpawn, onExit);
     run.addUsage(result.tokens, result.cost);
     spent.merge(result.usage);
     latest = result;
@@ -408,16 +417,29 @@ function asReport(result: GateReport | string[]): GateReport {
   return report;
 }
 
-function agentSessionId(run: RunForAgents, agent: AgentConfig): string {
+/**
+ * `is_new` is Flue's own affair to ignore (its `init(agent, {id})` is
+ * unconditionally create-or-continue) but `claude_code` needs it explicitly
+ * — its CLI has no single create-or-continue flag, only `--session-id`
+ * (first contact) vs `--resume` (rejoin), so `send()` threads this through
+ * as `AgentRequest.resume`.
+ */
+function agentSessionId(run: RunForAgents, agent: AgentConfig): { session_id: string; is_new: boolean } {
   const entry = run.agent_map[agent.name];
-  if (entry && entry.model === agent.model) return entry.session_id; // rejoin the existing context window
-  return `spf-${run.adw_id}-${agent.name}-${newId(4)}`;
+  if (entry && entry.model === agent.model) return { session_id: entry.session_id, is_new: false }; // rejoin the existing context window
+  const session_id = agent.coding_agent === "claude_code" ? agentCc.newSessionId() : `spf-${run.adw_id}-${agent.name}-${newId(4)}`;
+  return { session_id, is_new: true };
 }
 
-/** One tool_call event per real tool call, with its exact args and result. */
-function eventForwarder(run: RunForAgents, phase: Phase, agentName: string) {
-  const tracker = new agentFlue.ToolCallTracker();
-  return (chunk: ConversationStreamChunk) => {
+/**
+ * One tool_call event per real tool call, with its exact args and result.
+ * Picks the tracker for whichever backend this agent runs on — each
+ * backend's own module owns the ONE fold point for its raw event shape, so
+ * this stays a plain pass-through regardless of which one it's given.
+ */
+function eventForwarder(run: RunForAgents, phase: Phase, agentName: string, codingAgent: string) {
+  const tracker = codingAgent === "claude_code" ? new agentCc.CcToolCallTracker() : new agentFlue.ToolCallTracker();
+  return (chunk: any) => {
     const record = tracker.observe(chunk);
     if (record === null) return;
     // The call's span rides the columns; duration_ms stays in the payload as

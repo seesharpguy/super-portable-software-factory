@@ -12,7 +12,8 @@ import path from "node:path";
 import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import * as permissions from "../../core/permissions.ts";
-import { isKnownToolName, resolveModel } from "../../core/agent_flue.ts";
+import * as agentCc from "../../core/agent_cc.ts";
+import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { parseCli } from "../../core/utils.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import type { SFConfig } from "../../core/data_types.ts";
@@ -93,20 +94,44 @@ export function doctorCommand(argv: string[]): number {
     check(report, "roster + suites validate", false, (error as Error).message);
   }
 
+  const usesClaudeCode = cfg.agents.some((a) => a.coding_agent === "claude_code");
+  if (usesClaudeCode) {
+    const claudeOnPath = binaryOnPath("claude");
+    let version = "";
+    if (claudeOnPath) {
+      const result = spawnSync("claude", ["--version"], { encoding: "utf-8" });
+      version = result.status === 0 ? result.stdout.trim() : "";
+    }
+    check(report, "claude CLI", claudeOnPath, claudeOnPath ? version || "on PATH, but --version failed" : "not found on PATH — required by any coding_agent: claude_code agent");
+  }
+
   for (const agent of cfg.agents) {
     const label = `agent "${agent.name}"`;
-    try {
-      const [provider] = resolveModel(agent.model);
-      const envKeys = PROVIDER_ENV_KEYS[provider];
-      if (!envKeys) {
-        check(report, `${label} provider key`, true, `provider "${provider}" not in doctor's known list — skipped, not a failure`);
-      } else {
-        const set = envKeys.find((k) => process.env[k]);
-        check(report, `${label} provider key`, Boolean(set), set ? `${set} is set` : `none of ${envKeys.join(", ")} is set`);
+    if (agent.coding_agent === "claude_code") {
+      // No provider-key hard-fail here, unlike Flue: Claude Code also
+      // supports its own `claude login`/OAuth flow, so a missing
+      // ANTHROPIC_API_KEY doesn't necessarily mean broken.
+      check(
+        report,
+        `${label} provider key`,
+        true,
+        process.env["ANTHROPIC_API_KEY"] ? "ANTHROPIC_API_KEY is set" : "ANTHROPIC_API_KEY not set — fine if authenticated via `claude login` instead",
+      );
+    } else {
+      try {
+        const [provider] = resolveModel(agent.model);
+        const envKeys = PROVIDER_ENV_KEYS[provider];
+        if (!envKeys) {
+          check(report, `${label} provider key`, true, `provider "${provider}" not in doctor's known list — skipped, not a failure`);
+        } else {
+          const set = envKeys.find((k) => process.env[k]);
+          check(report, `${label} provider key`, Boolean(set), set ? `${set} is set` : `none of ${envKeys.join(", ")} is set`);
+        }
+      } catch (error) {
+        check(report, `${label} model`, false, (error as Error).message);
       }
-    } catch (error) {
-      check(report, `${label} model`, false, (error as Error).message);
     }
+    const isKnownToolName = agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : isKnownFlueToolName;
     for (const toolName of agent.tools ?? []) {
       if (!isKnownToolName(toolName)) check(report, `${label} tool "${toolName}"`, false, "not a known tool name");
     }

@@ -21,9 +21,13 @@ the target repo. It ships:
 - an optional per-repo **`.spf/data/`** runtime home for the sqlite trace and
   session files, created on first run, always gitignored.
 
-There is no `adws/` tree to stamp, no `bun install`, no external `pi`
-binary. The coding-agent layer is **Flue** (`@flue/runtime`), an in-process
-agent harness — no subprocess, no separate CLI to have on `PATH`.
+There is no `adws/` tree to stamp, no `bun install`. The default
+coding-agent backend is **Flue** (`@flue/runtime`), an in-process agent
+harness with no subprocess and no separate CLI to have on `PATH`.
+`coding_agent: claude_code` is a second backend — it shells out to your own
+installed `claude` CLI instead, for repos that want to run agents on
+Claude Code (including pointed at a local or cloud Ollama server). See
+`roster.md`.
 
 ## Layout, once you run something
 

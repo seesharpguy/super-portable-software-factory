@@ -376,7 +376,7 @@ export type ThinkingLevel = v.InferOutput<typeof ThinkingLevelSchema>;
 
 export const AgentConfigSchema = v.object({
   name: v.string(),
-  coding_agent: v.optional(v.picklist(["flue"]), "flue"),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
   thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""), // hex swatch for this agent's lane in the UI
@@ -397,7 +397,7 @@ export const AgentConfigSchema = v.object({
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
 export const ConfigDefaultsSchema = v.object({
-  coding_agent: v.optional(v.picklist(["flue"]), "flue"),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
   thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""),
@@ -484,6 +484,12 @@ export interface AgentRequest {
   model: string; // vocabulary depends on coding_agent — see above
   thinking: ThinkingLevel;
   session_id: string; // this backend's own conversation/session id: creates or continues
+  // Flue's init(agent, {id}) is unconditionally create-or-continue, so
+  // agent_flue.ts ignores this — but Claude Code's CLI needs the caller to
+  // say explicitly which (--session-id vs --resume), since it has no
+  // "create or continue" flag of its own. True whenever agents.ts's
+  // agentSessionId() reused an existing agent_map.json entry.
+  resume: boolean;
   tools?: string[] | null;
   output_schema: v.GenericSchema<Record<string, unknown>, unknown>;
   output_type_name: string;

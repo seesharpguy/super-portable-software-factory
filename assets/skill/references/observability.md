@@ -52,9 +52,12 @@ is how full the window actually was when the agent's last turn settled —
 computed the same way as pi's own auto-compaction trigger: the last *valid*
 turn's `usage.totalTokens`, falling back to `input + output + cacheRead +
 cacheWrite`, skipping aborted/errored turns. `context_window` — the model's
-ceiling — is currently always **0**: Flue exposes no model-registry lookup
-the way pi's `~/.pi/agent/models.json` did, so the lane draws no ceiling bar
-rather than a wrong one. This is a known gap, not a bug to chase.
+ceiling — is backend-dependent: a Flue-backed agent always reports **0**
+(Flue exposes no model-registry lookup the way pi's
+`~/.pi/agent/models.json` did), while a `claude_code`-backed agent reports
+a real ceiling straight from the CLI's own result message. Either way, `0`
+means "unknown," not "no context used" — the lane draws no ceiling bar
+rather than a wrong one.
 
 **Gates record evidence, not just a verdict.** A gate returns one
 `{item, ok, note}` check per thing it looked at; `violations` are derived
@@ -105,7 +108,7 @@ gate_results (
 );
 processes (                             -- adw_id -> pid, so a stuck run can be stopped
   id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT REFERENCES sessions,
-  kind TEXT,                            -- 'adw' (the chain process) | 'agent' (reserved; Flue is in-process)
+  kind TEXT,                            -- 'adw' (the chain process) | 'agent' (a real child pid for claude_code; same as the chain's own pid for Flue, which is in-process)
   name TEXT, pid INTEGER,
   command TEXT,                         -- what the pid WAS; pids get recycled, verify before killing
   started_at TEXT, ended_at TEXT        -- ended_at NULL = believed alive
@@ -114,16 +117,17 @@ agent_sessions (                        -- the queryable mirror of agent_map.jso
   adw_id TEXT REFERENCES sessions, agent TEXT,
   coding_agent TEXT, model TEXT, color TEXT, session_id TEXT,
   context_tokens INTEGER,               -- window occupancy after the agent's last turn
-  context_window INTEGER,               -- always 0 today — see "Context is occupancy" above
+  context_window INTEGER,               -- backend-dependent; 0 = unknown — see "Context is occupancy" above
   created_at TEXT, last_used_at TEXT,
   PRIMARY KEY (adw_id, agent)
 );
 ```
 
-`processes.kind = 'agent'` rows are reserved for a future per-conversation
-distinction — since Flue runs in-process rather than as a child, there is
-currently no separate agent pid to record beyond the chain process itself;
-`spf abort <adw_id>` signals that one process.
+`processes.kind = 'agent'` rows carry the actual `claude` subprocess pid for
+a `claude_code`-backed agent — genuinely killable independently of the
+chain that spawned it. For a Flue-backed agent (in-process, no child) the
+same row carries the chain's own pid, since there's no separate process to
+record. `spf abort <adw_id>` signals every live row it finds either way.
 
 **Derived, never stored:** phase durations (`ended_at − started_at`),
 session phase-progress (query `phases` by `adw_id`), lane layout (`kind` +
