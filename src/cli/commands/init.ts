@@ -1,7 +1,8 @@
 /** `spf init` — seed a `.spf/` override directory. Everything else is inherited from the packaged defaults. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as paths from "../../core/paths.ts";
+import { ensureGitignore } from "../gitignore.ts";
 import { parseCli } from "../../core/utils.ts";
 
 const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packaged built-in defaults.
@@ -36,18 +37,11 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #   base_branch: main
 `;
 
-const GITIGNORE_ENTRIES = [".spf/data/", ".env"];
-
-function ensureGitignore(repoRoot: string): void {
-  const gitignorePath = path.join(repoRoot, ".gitignore");
-  const hadFile = existsSync(gitignorePath);
-  const existing = hadFile ? readFileSync(gitignorePath, "utf-8").split("\n") : [];
-  const missing = GITIGNORE_ENTRIES.filter((entry) => !existing.includes(entry));
-  if (missing.length === 0) return;
-  const body = hadFile ? existing.join("\n").replace(/\n*$/, "\n") + "\n" : "";
-  writeFileSync(gitignorePath, `${body}# spf runtime\n${missing.join("\n")}\n`);
-  console.log(`updated ${gitignorePath} (added ${missing.join(", ")})`);
-}
+// .spf/spf.config.yaml and .spf/prompt_engineering/ stay tracked — they're
+// shared project config, same as package.json. Only runtime/generated
+// content is ignored: session traces (data/), a hand-editable engine copy
+// (engine/, from `spf eject`), and secrets (.env).
+const GITIGNORE_ENTRIES = [".spf/data/", ".spf/engine/", ".env"];
 
 export function initCommand(argv: string[]): number {
   const { options, flags } = parseCli(argv, ["cwd"], ["force"]);
@@ -63,7 +57,7 @@ export function initCommand(argv: string[]): number {
     console.log(`wrote ${configPath}`);
   }
 
-  ensureGitignore(anchor.repo_root);
+  ensureGitignore(anchor.repo_root, GITIGNORE_ENTRIES);
   console.log(`\nnext: spf doctor   (confirm everything resolves), then spf scout "describe this repo"`);
   return 0;
 }

@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync } from "node:fs";
 import path from "node:path";
 import * as paths from "../../core/paths.ts";
+import { ensureGitignore } from "../gitignore.ts";
 import { parseCli } from "../../core/utils.ts";
 
 function copyDirRecursive(from: string, to: string): void {
@@ -54,5 +55,8 @@ export function ejectCommand(argv: string[]): number {
   );
 
   console.log(`ejected v${pkg.version}'s core/ and chains/ into ${destRoot}`);
+  // Only for the default in-repo location — an explicit --target elsewhere
+  // is the caller's own directory to manage, not necessarily this repo's.
+  if (!options["target"]) ensureGitignore(anchor.repo_root, [".spf/engine/"]);
   return 0;
 }
