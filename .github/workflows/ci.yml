@@ -43,22 +43,30 @@ jobs:
       - run: npm pack --dry-run
 
   publish:
-    name: publish (npm, provenance)
+    name: publish (npm, trusted publishing)
     runs-on: ubuntu-latest
     needs: [test, pack]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
-      id-token: write # required for --provenance
+      id-token: write # required for OIDC trusted publishing (and the provenance it generates automatically)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      # Trusted publishing needs npm >=11.5.1 — don't rely on whatever
+      # happens to ship with actions/setup-node's Node 22 at build time.
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm run build
       - run: npm run size-check
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # No NODE_AUTH_TOKEN / secrets.NPM_TOKEN: this repo's GitHub Actions
+      # workflow is registered as a Trusted Publisher on npmjs.com for
+      # @grateful8/spf (Packages -> @grateful8/spf -> Settings -> Trusted
+      # publishing), so npm exchanges this job's own OIDC token for a
+      # short-lived publish credential instead of a long-lived secret.
+      # Provenance is generated automatically by trusted publishing — no
+      # --provenance flag needed.
+      - run: npm publish --access public
