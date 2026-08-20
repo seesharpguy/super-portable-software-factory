@@ -1,5 +1,6 @@
-# Example .spf/spf.config.yaml — Claude Code backend, pointed at Ollama
-# (local or cloud) instead of Anthropic's API.
+# .spf/spf.config.yaml — Claude Code backend, pointed at Ollama (local or
+# cloud) instead of Anthropic's API. `spf init --template ts-cc` writes
+# this file as-is.
 #
 # No spf-side config makes the Ollama redirect happen: `coding_agent:
 # claude_code` shells out to your own installed `claude` CLI, and Claude

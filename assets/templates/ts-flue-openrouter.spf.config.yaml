@@ -1,5 +1,6 @@
-# Example .spf/spf.config.yaml — Flue backend (the default), routed through
-# OpenRouter to a Kimi model.
+# .spf/spf.config.yaml — Flue backend (the default), routed through
+# OpenRouter to a Kimi model. `spf init --template ts-flue-openrouter`
+# writes this file as-is.
 #
 # model: is ALWAYS provider/model-id for Flue — the string's first segment
 # names the provider, and that segment alone decides which env var gets

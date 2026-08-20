@@ -28,11 +28,12 @@ spf scout "describe this repo"      # a real, read-only run, no setup required
 ### Customizing a repo
 
 ```bash
-spf init          # seed .spf/spf.config.yaml — override only what you want to change
-spf list          # every chain this install knows, its phases, what it needs
+spf init                       # seed .spf/spf.config.yaml — override only what you want to change
+spf init --template ts-cc      # or start from a packaged, ready-to-run template instead
+spf list                       # every chain this install knows, its phases, what it needs
 ```
 
-`spf init` writes a small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field — override one model, one prompt, one quality check, and everything else stays inherited. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
+`spf init` writes a small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field — override one model, one prompt, one quality check, and everything else stays inherited. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
 
 ### Local development
 
@@ -115,6 +116,24 @@ Config defines who an agent **is**. The chain call site defines how it is **used
 ### A second backend: Claude Code
 
 Set `coding_agent: claude_code` on any agent (or in `defaults`) to run it on your own installed [Claude Code](https://claude.com/product/claude-code) CLI instead of Flue — `spf doctor` checks it's on `PATH`. Model names follow Claude Code's own vocabulary (a bare alias like `sonnet`, not `provider/model-id`); everything else — `tools`, `writes`, `thinking` — stays the same shape. Pointing a `claude_code` agent at a local or cloud [Ollama](https://ollama.com) server needs no config at all — just `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` set before you run `spf`, since Claude Code's CLI reads those itself.
+
+#### Proxy or wrapper launchers
+
+To route the `claude` command through a wrapper, proxy server, or launcher (e.g., [Ollama](https://ollama.com)), set the `SPF_CLAUDE_CMD` environment variable before running `spf`. Space-separated command chains are supported:
+
+```bash
+# Route through Ollama's launcher
+export SPF_CLAUDE_CMD="ollama launch claude"
+spf build "your prompt"
+```
+
+```bash
+# Or use a custom wrapper script
+export SPF_CLAUDE_CMD=/path/to/my-wrapper
+spf build "your prompt"
+```
+
+The command/launcher must support the full Claude Code CLI interface: `-p` for prompt, `--json-schema`, `--model`, `--session-id`/`--resume`, `--output-format stream-json`, and all other flags `agent_cc` uses. When unset, `SPF_CLAUDE_CMD` defaults to `claude` (resolved from `PATH` normally).
 
 ---
 
@@ -219,11 +238,15 @@ spf build-test "implement the plan" --adw-id a1b2c3d4
 
 ## `spf watch`
 
-Polls a GitHub repo for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
+Polls an issue tracker for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR against a code host, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
+
+The tracker (`issue_provider`) and the code host (`code_host`) are independent config choices, not one bundled "provider" — a tracker and a host are independent choices in practice (Jira issues against a Bitbucket repo is a real setup). Supported today: `issue_provider: github | jira`, `code_host: github | bitbucket` — any combination works, including Jira+GitHub or GitHub-issues+Bitbucket.
 
 ```yaml
-# .spf/spf.config.yaml
+# .spf/spf.config.yaml — GitHub issues + GitHub PRs (the default)
 watch:
+  issue_provider: github     # default
+  code_host: github          # default
   repo: owner/name
   label_prefix: spf          # polls issues labeled spf:ready
   chain: plan-build-test     # any registered chain
@@ -232,30 +255,67 @@ watch:
   concurrency: 2
 ```
 
+```yaml
+# .spf/spf.config.yaml — Jira issues + Bitbucket PRs
+watch:
+  issue_provider: jira
+  code_host: bitbucket
+  repo: workspace/repo_slug  # Bitbucket's own two-part identifier
+  label_prefix: spf          # polls Jira issues labeled spf:ready
+  chain: plan-build-test
+  base_branch: main
+  jira:
+    base_url: https://your-domain.atlassian.net
+    project_key: PROJ
+```
+
 ```bash
-export GITHUB_TOKEN=...     # classic PAT — see "GITHUB_TOKEN scope" below; spf doctor checks it's set
-spf watch init                # idempotently create/update the 5 labels below — run this first
+spf watch init                # idempotently seed tracker state (no-op for Jira — see below); run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
 spf watch --once             # one poll tick, then exit — good for cron
 spf watch --dry-run          # log intended claims/transitions, mutate nothing
 ```
 
-`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked` with a color and description each — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
+No GitHub App, no webhook, no Jira/Bitbucket app install — it's a plain REST poll against whichever combination is configured, same philosophy as the trace db's own polling contract. See [`assets/templates/`](assets/templates/) for full worked configs (also usable directly via `spf init --template <name>`), and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
 
-No GitHub App, no webhook — it's a plain REST poll, same philosophy as the trace db's own polling contract. See [`docs/examples/`](docs/examples/) for full worked configs, and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
+### GitHub (`issue_provider: github` and/or `code_host: github`)
 
-### `GITHUB_TOKEN` scope
+```bash
+export GITHUB_TOKEN=...   # classic PAT; spf doctor checks it's set
+```
 
-A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes: creating/editing labels, reading and labeling issues, posting comments, opening PRs, and reading PR/check-run status.
+`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked` labels with a color and description each — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
+
+A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes on GitHub: creating/editing labels, reading and labeling issues, posting comments, opening PRs, and reading PR/check-run status.
 
 | Target repo | Scope | Covers |
 |---|---|---|
 | Private | `repo` | Everything above, full read/write |
 | Public only | `public_repo` | The same, restricted to public repos |
 
-**Do not grant the `project` scope.** It's a separate, unrelated permission for GitHub Projects (classic/org/user boards) — `spf watch` doesn't touch Projects at all (deliberately out of scope for v1; see the label-based state machine above), so granting it would just be more access than this tool ever uses.
+**Do not grant the `project` scope.** It's a separate, unrelated permission for GitHub Projects (classic/org/user boards) — `spf watch` doesn't touch Projects at all, so granting it would just be more access than this tool ever uses.
 
 There's no dedicated "issues" or "pull requests" scope on classic PATs — GitHub bundles both into `repo`/`public_repo`, which is why that's the whole table.
+
+### Jira (`issue_provider: jira`)
+
+```bash
+export JIRA_EMAIL=you@example.com
+export JIRA_API_TOKEN=...   # id.atlassian.com -> Security -> API tokens
+```
+
+State is modeled as Jira **labels** (`<prefix>:ready`, etc.), mirroring GitHub exactly, rather than native workflow status transitions — the latter would need per-project transition-id mapping, since workflows vary by project/scheme; labels work identically everywhere with zero per-project setup. One caveat: colons are a legal Jira label character and JQL matches on them fine, but they won't show up in Jira's own label autocomplete UI — cosmetic only.
+
+`spf watch init` is a no-op here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it just reports the labels this run will use.
+
+### Bitbucket (`code_host: bitbucket`)
+
+```bash
+export BITBUCKET_EMAIL=you@example.com
+export BITBUCKET_API_TOKEN=...   # same Atlassian API token mechanism as Jira above
+```
+
+**Bitbucket Cloud app passwords are being fully removed** (brownout window closing July 28, 2026) — this project only supports the replacement, API tokens, which need the account's email alongside the token (username alone no longer works).
 
 ## What's in this repo
 

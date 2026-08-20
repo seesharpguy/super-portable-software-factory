@@ -1,11 +1,9 @@
-# Example .spf/spf.config.yaml for a Node/TypeScript project.
-#
-# Copy the pieces you want into your own .spf/spf.config.yaml — this is a
-# worked example, not something spf reads directly. `spf init` seeds a
-# starter with the same shape, commented out; this fills it in with real
-# commands so `plan-build-test`/`plan-build-test-quality`/`quality`/
-# `simple-sdlc` — every chain with a REQUIRED_SUITES entry — actually have
-# something to run instead of failing loudly at validate() time.
+# .spf/spf.config.yaml for a Node/TypeScript project — `spf init --template
+# ts` writes this file as-is; `spf init` with no --template seeds a starter
+# with the same shape, commented out. This fills it in with real commands
+# so `plan-build-test`/`plan-build-test-quality`/`quality`/`simple-sdlc` —
+# every chain with a REQUIRED_SUITES entry — actually have something to run
+# instead of failing loudly at validate() time.
 #
 # Adjust the argv to your own project: swap `npm` for `pnpm`/`yarn`, point
 # `build`/`typecheck` at whatever scripts you already have in package.json.
@@ -41,10 +39,11 @@ defaults:
 #     thinking: high
 #     writes: [src/, tests/]   # narrow what this agent may change in the repo
 
-# Optional: poll a GitHub repo's `spf:ready`-labeled issues and run a chain
-# against each — see roster.md's "Coding agent backends" section for the
-# Ollama recipe, and references/config.md for the full watch: field list.
-# Needs a GITHUB_TOKEN env var (classic PAT, repo scope).
+# Optional: poll an issue tracker's `spf:ready`-labeled issues and run a
+# chain against each — see the main README's "spf watch" section for every
+# issue_provider x code_host combination's env vars and required scopes
+# (GitHub, or Jira issues against a Bitbucket repo, or any mix).
+# Needs a GITHUB_TOKEN env var (classic PAT, repo scope) for the defaults below.
 # watch:
 #   repo: owner/name
 #   label_prefix: spf

@@ -27,6 +27,8 @@ export const ASSETS_DIR = path.join(PACKAGE_ROOT, "assets");
 export const WEB_DIR = path.join(PACKAGE_ROOT, "web");
 export const BUILTIN_CONFIG_PATH = path.join(ASSETS_DIR, "defaults", "spf.config.yaml");
 export const BUILTIN_PROMPTS_DIR = path.join(ASSETS_DIR, "prompts");
+/** `spf init --template <name>` reads `<name>.spf.config.yaml` from here. */
+export const TEMPLATES_DIR = path.join(ASSETS_DIR, "templates");
 
 export interface RepoAnchor {
   /** The invocation cwd this anchor was resolved from (already absolute). */

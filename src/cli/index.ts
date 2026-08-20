@@ -28,7 +28,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 
   spf list                                  the chain registry — names, phases, what each needs
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
-  spf init [--force]                        seed .spf/spf.config.yaml in the current repo
+  spf init [--force] [--template <name>]    seed .spf/spf.config.yaml (from a packaged template, if named)
   spf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
   spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing

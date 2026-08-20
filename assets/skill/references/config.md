@@ -100,8 +100,9 @@ quality:
 ```
 
 A full worked example, including the `defaults.coding_agent`/`watch:`
-sections: `docs/examples/node-typescript.spf.config.yaml` in the spf
-repo (or wherever this skill's own package is installed from).
+sections: `assets/templates/ts.spf.config.yaml` in the spf package (or
+`spf init --template ts` to write it straight into `.spf/spf.config.yaml`).
+`spf init` with no `--template` prints every packaged template's name.
 
 ### `agents[]`
 

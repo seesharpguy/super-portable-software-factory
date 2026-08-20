@@ -1,9 +1,32 @@
 /** `spf init` — seed a `.spf/` override directory. Everything else is inherited from the packaged defaults. */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as paths from "../../core/paths.ts";
 import { ensureGitignore } from "../gitignore.ts";
 import { parseCli } from "../../core/utils.ts";
+import { paint } from "../../core/console.ts";
+
+const TEMPLATE_SUFFIX = ".spf.config.yaml";
+
+/** Every template's short name (e.g. "ts-cc"), derived from disk rather than hand-maintained — never drifts from what's actually packaged. */
+function listTemplates(): string[] {
+  if (!existsSync(paths.TEMPLATES_DIR)) return [];
+  return readdirSync(paths.TEMPLATES_DIR)
+    .filter((f) => f.endsWith(TEMPLATE_SUFFIX))
+    .map((f) => f.slice(0, -TEMPLATE_SUFFIX.length))
+    .sort();
+}
+
+function loadTemplate(name: string): string {
+  const templatePath = path.join(paths.TEMPLATES_DIR, `${name}${TEMPLATE_SUFFIX}`);
+  if (!existsSync(templatePath)) {
+    const available = listTemplates();
+    throw new Error(
+      `unknown template ${JSON.stringify(name)} — available: ${available.length > 0 ? available.join(", ") : "(none packaged)"}`,
+    );
+  }
+  return readFileSync(templatePath, "utf-8");
+}
 
 const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packaged built-in defaults.
 # List only what you want to CHANGE; everything else (the roster, prompts,
@@ -27,14 +50,17 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #     coding_agent: claude_code   # run this agent on Claude Code instead of Flue
 #     model: sonnet               # claude_code's own alias, NOT provider/model-id
 
-# Uncomment to enable \`spf watch\` — polls GitHub issues labeled
+# Uncomment to enable \`spf watch\` — polls an issue tracker labeled
 # <label_prefix>:ready and runs \`chain\` against each in its own worktree.
-# Needs a GITHUB_TOKEN env var: a classic PAT with repo scope (or public_repo
-# for a public-only repo) — never the project scope, which is unrelated and
-# unused here. See README.md's "GITHUB_TOKEN scope" section. \`spf doctor\`
-# checks it's set.
+# issue_provider and code_host default to "github" and are independent —
+# a Jira tracker against a Bitbucket repo is just issue_provider: jira +
+# code_host: bitbucket + a watch.jira: {base_url, project_key} block. See
+# README.md's "spf watch" section for every combination's env vars and
+# required scopes. \`spf doctor\` checks whatever this resolves to.
 # watch:
-#   repo: owner/name
+#   issue_provider: github   # github | jira
+#   code_host: github        # github | bitbucket
+#   repo: owner/name          # "owner/name" (github) or "workspace/repo_slug" (bitbucket)
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
@@ -47,7 +73,7 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 const GITIGNORE_ENTRIES = [".spf/data/", ".spf/engine/", ".env"];
 
 export function initCommand(argv: string[]): number {
-  const { options, flags } = parseCli(argv, ["cwd"], ["force"]);
+  const { options, flags } = parseCli(argv, ["cwd", "template"], ["force"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
   const sfDir = path.join(anchor.repo_root, ".spf");
   mkdirSync(sfDir, { recursive: true });
@@ -56,11 +82,23 @@ export function initCommand(argv: string[]): number {
   if (existsSync(configPath) && !flags["force"]) {
     console.log(`${configPath} already exists — leaving it alone (--force to overwrite)`);
   } else {
-    writeFileSync(configPath, STARTER_CONFIG);
-    console.log(`wrote ${configPath}`);
+    const templateName = options["template"];
+    const content = templateName ? loadTemplate(templateName) : STARTER_CONFIG;
+    writeFileSync(configPath, content);
+    console.log(`wrote ${configPath}${templateName ? ` (from template "${templateName}")` : ""}`);
   }
 
   ensureGitignore(anchor.repo_root, GITIGNORE_ENTRIES);
+  const templates = listTemplates();
+  if (templates.length > 0) {
+    console.log(`templates available via --template: ${templates.join(", ")}`);
+  }
   console.log(`\nnext: spf doctor   (confirm everything resolves), then spf scout "describe this repo"`);
+  console.log(
+    paint(
+      "yellow",
+      `warning: spf ui reads .spf/data/spf.db, which doesn't exist until a run creates it — run spf scout (or any chain) at least once before spf ui.`,
+    ),
+  );
   return 0;
 }

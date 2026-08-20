@@ -1,13 +1,15 @@
 # docs
 
-Worked examples that go beyond the field-by-field reference in the
-installed skill (`references/config.md`, `roster.md` — see
-`spf install-skill`). These are real, complete configs to copy from, not
-something spf reads directly.
+Worked example configs live in [`../assets/templates/`](../assets/templates/)
+now, not `docs/examples/` — they moved there so they ship inside the
+published npm package and `spf init --template <name>` can write one
+directly, rather than being copy-from-GitHub-only reference material. Run
+`spf init` with no `--template` to see every packaged template's short
+name, or browse the files directly:
 
-- [`examples/node-typescript.spf.config.yaml`](examples/node-typescript.spf.config.yaml) — a full `quality:` suite (typecheck/lint/build/test), the `claude_code` backend, and commented-out `agents:`/`watch:` overrides. This project's own `.spf/spf.config.yaml` (using the factory on itself) is a real, live instance of the same shape.
-- [`examples/node-typescript-claude-code-ollama.spf.config.yaml`](examples/node-typescript-claude-code-ollama.spf.config.yaml) — `coding_agent: claude_code` redirected at Ollama (local or cloud) via `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, no spf-side config for the redirect itself.
-- [`examples/node-typescript-flue-openrouter-kimi.spf.config.yaml`](examples/node-typescript-flue-openrouter-kimi.spf.config.yaml) — the default Flue backend, `model:` routed through OpenRouter (`provider/model-id`, `OPENROUTER_API_KEY`).
+- [`../assets/templates/ts.spf.config.yaml`](../assets/templates/ts.spf.config.yaml) (`--template ts`) — a full `quality:` suite (typecheck/lint/build/test), the `claude_code` backend, and commented-out `agents:`/`watch:` overrides. This project's own `.spf/spf.config.yaml` (using the factory on itself) is a real, live instance of the same shape.
+- [`../assets/templates/ts-cc.spf.config.yaml`](../assets/templates/ts-cc.spf.config.yaml) (`--template ts-cc`) — `coding_agent: claude_code` redirected at Ollama (local or cloud) via `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, no spf-side config for the redirect itself.
+- [`../assets/templates/ts-flue-openrouter.spf.config.yaml`](../assets/templates/ts-flue-openrouter.spf.config.yaml) (`--template ts-flue-openrouter`) — the default Flue backend, `model:` routed through OpenRouter (`provider/model-id`, `OPENROUTER_API_KEY`).
 
 All three were verified to actually parse against spf's real config schema (`agents.loadConfig()`), not just hand-written to look plausible.
 
