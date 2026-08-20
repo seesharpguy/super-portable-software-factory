@@ -217,10 +217,34 @@ spf build-test "implement the plan" --adw-id a1b2c3d4
 
 ---
 
+## `spf watch`
+
+Polls a GitHub repo for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
+
+```yaml
+# .spf/spf.config.yaml
+watch:
+  repo: owner/name
+  label_prefix: spf          # polls issues labeled spf:ready
+  chain: plan-build-test     # any registered chain
+  base_branch: main
+  poll_ms: 60000
+  concurrency: 2
+```
+
+```bash
+export GITHUB_TOKEN=...     # classic PAT, repo scope — spf doctor checks it's set
+spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
+spf watch --once             # one poll tick, then exit — good for cron
+spf watch --dry-run          # log intended claims/transitions, mutate nothing
+```
+
+No GitHub App, no webhook — it's a plain REST poll, same philosophy as the trace db's own polling contract. See [`docs/examples/`](docs/examples/) for full worked configs, and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
+
 ## What's in this repo
 
 ```
-super-simple-software-factory/
+super-portable-software-factory/
 ├── src/
 │   ├── cli/        # the `spf` command surface
 │   ├── chains/      # the twelve starter chains + the registry
