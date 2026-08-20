@@ -81,6 +81,8 @@ export class JiraProvider implements IssueProvider {
   }
 
   private async jira<T>(path: string, init?: RequestInit): Promise<T> {
+    const debug = Boolean(process.env["SPF_JIRA_DEBUG"]);
+    if (debug) console.error(`[jira debug] ${init?.method ?? "GET"} ${this.baseUrl}${path} body=${init?.body ?? "(none)"}`);
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
@@ -95,7 +97,9 @@ export class JiraProvider implements IssueProvider {
       throw new Error(`Jira ${init?.method ?? "GET"} ${path} -> ${response.status}: ${detail.slice(0, 500)}`);
     }
     if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    const text = await response.text();
+    if (debug) console.error(`[jira debug] -> ${response.status} ${text.slice(0, 2000)}`);
+    return text ? (JSON.parse(text) as T) : (undefined as T);
   }
 
   private label(state: WatchState): string {
@@ -116,11 +120,21 @@ export class JiraProvider implements IssueProvider {
     };
   }
 
+  /**
+   * POST with the JQL in the JSON body, NOT a GET with `jql` as a query
+   * param: this endpoint's own real-world behavior (confirmed by multiple
+   * independent bug reports against it, not just this project's own
+   * testing) is to silently ignore query-string parameters and return an
+   * empty `issues` array with a 200 OK — no error, nothing to catch. A
+   * `spf watch` that builds this as a GET query string would run cleanly
+   * forever without ever claiming a single issue.
+   */
   private async searchByLabel(label: string): Promise<Issue[]> {
     const jql = `project = ${JSON.stringify(this.projectKey)} AND labels = ${JSON.stringify(label)}`;
-    const result = await this.jira<{ issues: JiraIssue[] }>(
-      `/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=100&fields=summary,description,labels`,
-    );
+    const result = await this.jira<{ issues: JiraIssue[] }>("/rest/api/3/search/jql", {
+      method: "POST",
+      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels"] }),
+    });
     return result.issues.map((i) => this.toIssue(i));
   }
 
