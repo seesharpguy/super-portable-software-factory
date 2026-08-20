@@ -1,0 +1,37 @@
+# Example .spf/spf.config.yaml — Flue backend (the default), routed through
+# OpenRouter to a Kimi model.
+#
+# model: is ALWAYS provider/model-id for Flue — the string's first segment
+# names the provider, and that segment alone decides which env var gets
+# read for credentials. This resolution belongs to Flue's own underlying
+# `pi-ai` library, not to spf: agents.validate() only checks the STRING
+# SHAPE (does it look like provider/id, via agent_flue.ts's resolveModel())
+# — never that the provider is real or that its key is actually set. A
+# wrong provider name or a missing key only surfaces at the first real
+# dispatch, not at validate() time.
+#
+# `spf doctor` has its own small, hand-maintained table of common
+# providers' env-var conventions (src/cli/commands/doctor.ts) for an
+# informational check — pi-ai's real internal provider table isn't
+# exported for spf to read, so this is best-effort, not authoritative.
+# openrouter's own entry in that table: OPENROUTER_API_KEY.
+#
+# Before running spf:
+#   export OPENROUTER_API_KEY=sk-or-...
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: lint, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    test: [test]
+    all: [typecheck, lint, build, test]
+
+defaults:
+  coding_agent: flue
+  # Check openrouter.ai/models for the exact current id — "kimi-k2.7" here
+  # matches this project's existing fictional-model-version convention
+  # (kimi-k3, gemini-3.6, gpt-5.6, claude-sonnet-5, ...), not a live catalog
+  # entry verified against a real API.
+  model: openrouter/moonshotai/kimi-k2.7

@@ -1,0 +1,42 @@
+# Example .spf/spf.config.yaml — Claude Code backend, pointed at Ollama
+# (local or cloud) instead of Anthropic's API.
+#
+# No spf-side config makes the Ollama redirect happen: `coding_agent:
+# claude_code` shells out to your own installed `claude` CLI, and Claude
+# Code's CLI itself reads ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN to
+# decide where to send requests. agent_cc.ts never special-cases this — it
+# just passes your shell's environment through unmodified to the `claude`
+# subprocess, the same way every other env var reaches an agent.
+#
+# Local Ollama, before running spf:
+#   ollama serve                          # if not already running
+#   ollama pull qwen3-coder:30b           # or whatever model you want
+#   export ANTHROPIC_BASE_URL=http://localhost:11434
+#   export ANTHROPIC_AUTH_TOKEN=ollama    # any non-empty value — local Ollama doesn't check it
+#
+# Ollama Cloud instead of a local server:
+#   export ANTHROPIC_BASE_URL=<your Ollama Cloud endpoint — see docs.ollama.com>
+#   export ANTHROPIC_AUTH_TOKEN=<a real Ollama Cloud API key>
+#
+# `spf doctor` checks that `claude` is on PATH and treats a missing
+# ANTHROPIC_API_KEY as informational (claude login is a valid alternative)
+# — it does NOT know about this redirect, so it won't tell you whether
+# ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN are actually set. Confirm those
+# yourself before a real run.
+#
+# `model:` becomes whatever model name your Ollama server actually serves
+# once redirected — not one of Claude Code's own aliases (sonnet/opus/...)
+# and not provider/model-id.
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: lint, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    test: [test]
+    all: [typecheck, lint, build, test]
+
+defaults:
+  coding_agent: claude_code
+  model: qwen3-coder:30b # swap for whatever `ollama list` shows on your machine
