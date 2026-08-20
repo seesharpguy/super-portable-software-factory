@@ -27,14 +27,29 @@ quality:
 # Optional: run agents on Claude Code instead of the default Flue backend.
 # Needs the `claude` CLI installed and authenticated (`spf doctor` checks) —
 # no separate provider API key required if you're logged in via `claude
-# login`. Remove this whole block to stay on Flue with a `provider/model-id`
-# roster instead.
+# login`. Remove this whole block (and the agents: override below) to stay
+# on Flue with a `provider/model-id` roster instead.
 defaults:
   coding_agent: claude_code
   model: sonnet # claude_code's own alias — NOT provider/model-id
 
-# Optional: retune one agent without touching the rest of the roster.
-# agents:
+# REQUIRED alongside coding_agent: claude_code above, not just an example:
+# the packaged default roster pins planner/reviewer/documenter to their own
+# explicit Flue-style provider/model-id strings, which an agent's own model
+# always wins over defaults.model — switching coding_agent globally does
+# NOT reset those three, so they'd run on Claude Code with a model id it
+# can't resolve at all ("There's an issue with the selected model...").
+# builder/scout have no model of their own in the packaged roster, so they
+# correctly inherit defaults.model above and need no override here.
+agents:
+  - name: planner
+    model: sonnet
+  - name: reviewer
+    model: sonnet
+  - name: documenter
+    model: sonnet
+
+# Optional: retune one agent further without touching the rest of the roster.
 #   - name: builder
 #     thinking: high
 #     writes: [src/, tests/]   # narrow what this agent may change in the repo

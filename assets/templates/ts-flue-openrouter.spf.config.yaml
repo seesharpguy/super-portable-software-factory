@@ -36,3 +36,18 @@ defaults:
   # (kimi-k3, gemini-3.6, gpt-5.6, claude-sonnet-5, ...), not a live catalog
   # entry verified against a real API.
   model: openrouter/moonshotai/kimi-k2.7
+
+# Not required the way the claude_code templates' agents: override is (an
+# agent's own model always wins over defaults.model, but Flue accepts any
+# provider/model-id, so the packaged roster's planner/reviewer/documenter
+# — fireworks/openai models, unrelated to OpenRouter — would still resolve
+# and run fine, just outside OPENROUTER_API_KEY's reach). Overridden here
+# anyway so every agent actually demonstrates the OpenRouter routing this
+# template is about, not just the three without their own packaged model.
+agents:
+  - name: planner
+    model: openrouter/moonshotai/kimi-k2.7
+  - name: reviewer
+    model: openrouter/moonshotai/kimi-k2.7
+  - name: documenter
+    model: openrouter/moonshotai/kimi-k2.7

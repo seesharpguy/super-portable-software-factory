@@ -49,6 +49,16 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #     model: anthropic/claude-sonnet-4-6
 #     coding_agent: claude_code   # run this agent on Claude Code instead of Flue
 #     model: sonnet               # claude_code's own alias, NOT provider/model-id
+#
+# Switching coding_agent globally, in defaults: above, instead of per-agent?
+# The packaged default roster pins planner/reviewer/documenter to their own
+# explicit Flue-style provider/model-id strings, and an agent's own model
+# always wins over defaults.model — so those three keep running on whatever
+# backend you just switched to, with a model id it can't resolve, unless
+# you override their model here too (builder/scout have no model of their
+# own in the packaged roster, so they need no override). See
+# assets/templates/ts.spf.config.yaml (or --template ts) for the full
+# working pattern.
 
 # Uncomment to enable \`spf watch\` — polls an issue tracker labeled
 # <label_prefix>:ready and runs \`chain\` against each in its own worktree.
