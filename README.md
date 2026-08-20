@@ -34,6 +34,28 @@ spf list          # every chain this install knows, its phases, what it needs
 
 `spf init` writes a small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field — override one model, one prompt, one quality check, and everything else stays inherited. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
 
+### Local development
+
+Working from a clone instead of the published package:
+
+```bash
+git clone git@github.com:seesharpguy/super-portable-software-factory.git
+cd super-portable-software-factory
+npm install
+npm run build     # builds both the CLI (dist/) and the trace visualizer SPA (web/)
+npm link          # makes `spf` resolve globally to THIS checkout
+```
+
+`npm link` beats a real `npm i -g` here: it symlinks the global `spf` bin into this checkout, so every later `npm run build` takes effect immediately, no re-linking. Run it from any repo you want to test against.
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm test            # node --test against dist/**/*.test.js (runs build:cli first)
+npm run size-check  # tarball size gate — what `npm pack` would actually publish
+```
+
+For a one-off check without touching global npm state at all, run the built CLI directly: `node dist/cli/bin.js doctor --cwd /path/to/repo`. When you're done with the linked version, `npm unlink -g @grateful8/spf` removes it.
+
 ---
 
 ## Why this exists
