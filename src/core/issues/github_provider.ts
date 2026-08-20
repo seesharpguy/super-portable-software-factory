@@ -1,7 +1,8 @@
 /**
- * GitHub REST implementation of `IssueProvider`, via Node 22's native
- * `fetch()` — deliberately not `octokit`: the full `octokit` meta-package
- * resolves to ~82MB of installed dependencies (`@octokit/app`,
+ * GitHub REST implementation of both `IssueProvider` and `CodeHostProvider`
+ * — one class, since GitHub natively is both an issue tracker and a code
+ * host — via Node 22's native `fetch()`: deliberately not `octokit`, whose
+ * full meta-package resolves to ~82MB of installed dependencies (`@octokit/app`,
  * `oauth-app`, `webhooks`, ...) for what `spf watch` actually needs, which
  * is six REST calls. `spf`'s own package stays dependency-free either way.
  *
@@ -12,7 +13,7 @@
  * makes (a repo with >100 open `<prefix>:ready` issues at once is not this
  * version's problem to solve).
  */
-import type { EnsureLabelsResult, Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "./provider.ts";
+import type { CodeHostProvider, EnsureLabelsResult, Issue, IssueProvider, PrRef, PrStatus, WatchMarker, WatchState } from "./provider.ts";
 
 const API = "https://api.github.com";
 const STATES: WatchState[] = ["ready", "working", "review", "done", "blocked"];
@@ -35,7 +36,7 @@ interface GhIssue {
   pull_request?: unknown;
 }
 
-export class GitHubProvider implements IssueProvider {
+export class GitHubProvider implements IssueProvider, CodeHostProvider {
   constructor(
     private readonly repo: string, // "owner/name"
     private readonly labelPrefix: string,
@@ -110,7 +111,7 @@ export class GitHubProvider implements IssueProvider {
 
   private toIssue(raw: GhIssue): Issue {
     return {
-      number: raw.number,
+      id: String(raw.number),
       title: raw.title,
       body: raw.body ?? "",
       labels: raw.labels.map((l) => (typeof l === "string" ? l : l.name)),
@@ -133,19 +134,19 @@ export class GitHubProvider implements IssueProvider {
   }
 
   async claim(issue: Issue): Promise<boolean> {
-    await this.gh(`/repos/${this.repo}/issues/${issue.number}/labels/${encodeURIComponent(this.label("ready"))}`, {
+    await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels/${encodeURIComponent(this.label("ready"))}`, {
       method: "DELETE",
     }).catch(() => undefined); // already gone is fine
-    await this.gh(`/repos/${this.repo}/issues/${issue.number}/labels`, {
+    await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels`, {
       method: "POST",
       body: JSON.stringify({ labels: [this.label("working")] }),
     });
-    const fresh = await this.gh<GhIssue>(`/repos/${this.repo}/issues/${issue.number}`);
+    const fresh = await this.gh<GhIssue>(`/repos/${this.repo}/issues/${issue.id}`);
     const labels = this.toIssue(fresh).labels;
     const claimed = labels.includes(this.label("working")) && !labels.includes(this.label("ready"));
     if (!claimed) {
       // Lost the race (or something else relabeled it) — put ready back so it's not stuck.
-      await this.gh(`/repos/${this.repo}/issues/${issue.number}/labels`, {
+      await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels`, {
         method: "POST",
         body: JSON.stringify({ labels: [this.label("ready")] }),
       }).catch(() => undefined);
@@ -157,12 +158,12 @@ export class GitHubProvider implements IssueProvider {
     for (const state of STATES) {
       const label = this.label(state);
       if (issue.labels.includes(label)) {
-        await this.gh(`/repos/${this.repo}/issues/${issue.number}/labels/${encodeURIComponent(label)}`, { method: "DELETE" }).catch(
+        await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels/${encodeURIComponent(label)}`, { method: "DELETE" }).catch(
           () => undefined,
         );
       }
     }
-    await this.gh(`/repos/${this.repo}/issues/${issue.number}/labels`, {
+    await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels`, {
       method: "POST",
       body: JSON.stringify({ labels: [this.label(to)] }),
     });
@@ -170,21 +171,16 @@ export class GitHubProvider implements IssueProvider {
   }
 
   async comment(issue: Issue, body: string): Promise<void> {
-    await this.gh(`/repos/${this.repo}/issues/${issue.number}/comments`, {
+    await this.gh(`/repos/${this.repo}/issues/${issue.id}/comments`, {
       method: "POST",
       body: JSON.stringify({ body }),
     });
   }
 
-  async openPr(issue: Issue, opts: { branch: string; title: string; body: string; base: string }): Promise<PrRef> {
-    // Belt-and-suspenders: ensure the PR body closes the issue even if the
-    // caller's body forgot to say so — this is how `finishReviews`-style
-    // merge polling knows an issue's work landed at all.
-    const closesTag = `Closes #${issue.number}`;
-    const body = opts.body.includes(closesTag) ? opts.body : `${opts.body}\n\n${closesTag}`;
+  async openPr(opts: { branch: string; title: string; body: string; base: string }): Promise<PrRef> {
     const pr = await this.gh<{ number: number; html_url: string }>(`/repos/${this.repo}/pulls`, {
       method: "POST",
-      body: JSON.stringify({ title: opts.title, body, head: opts.branch, base: opts.base }),
+      body: JSON.stringify({ title: opts.title, body: opts.body, head: opts.branch, base: opts.base }),
     });
     return { number: pr.number, branch: opts.branch, url: pr.html_url };
   }
@@ -213,9 +209,9 @@ export class GitHubProvider implements IssueProvider {
     return { merged: detail.merged, state: detail.state, ciStatus };
   }
 
-  private async findMarkerComment(issueNumber: number): Promise<{ id: number; marker: WatchMarker } | null> {
+  private async findMarkerComment(issueId: string): Promise<{ id: number; marker: WatchMarker } | null> {
     const comments = await this.gh<Array<{ id: number; body: string }>>(
-      `/repos/${this.repo}/issues/${issueNumber}/comments?per_page=100`,
+      `/repos/${this.repo}/issues/${issueId}/comments?per_page=100`,
     );
     let found: { id: number; marker: WatchMarker } | null = null;
     for (const c of comments) {
@@ -231,17 +227,17 @@ export class GitHubProvider implements IssueProvider {
   }
 
   async readMarker(issue: Issue): Promise<WatchMarker | null> {
-    const found = await this.findMarkerComment(issue.number);
+    const found = await this.findMarkerComment(issue.id);
     return found?.marker ?? null;
   }
 
   async writeMarker(issue: Issue, marker: WatchMarker): Promise<void> {
     const body = `<!-- spf-watch: ${JSON.stringify(marker)} -->`;
-    const existing = await this.findMarkerComment(issue.number);
+    const existing = await this.findMarkerComment(issue.id);
     if (existing) {
       await this.gh(`/repos/${this.repo}/issues/comments/${existing.id}`, { method: "PATCH", body: JSON.stringify({ body }) });
     } else {
-      await this.gh(`/repos/${this.repo}/issues/${issue.number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+      await this.gh(`/repos/${this.repo}/issues/${issue.id}/comments`, { method: "POST", body: JSON.stringify({ body }) });
     }
   }
 }

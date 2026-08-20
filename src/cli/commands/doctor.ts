@@ -163,15 +163,47 @@ export function doctorCommand(argv: string[]): number {
   }
 
   if (cfg.watch.repo.trim()) {
-    check(report, "watch.provider", cfg.watch.provider === "github", cfg.watch.provider);
-    check(
-      report,
-      "GITHUB_TOKEN",
-      Boolean(process.env["GITHUB_TOKEN"]),
-      process.env["GITHUB_TOKEN"]
-        ? "set"
-        : 'not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo); see README.md\'s "GITHUB_TOKEN scope" section',
-    );
+    check(report, "watch.issue_provider", true, cfg.watch.issue_provider);
+    check(report, "watch.code_host", true, cfg.watch.code_host);
+
+    if (cfg.watch.issue_provider === "github" || cfg.watch.code_host === "github") {
+      check(
+        report,
+        "GITHUB_TOKEN",
+        Boolean(process.env["GITHUB_TOKEN"]),
+        process.env["GITHUB_TOKEN"]
+          ? "set"
+          : 'not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo); see README.md\'s "GITHUB_TOKEN scope" section',
+      );
+    }
+    if (cfg.watch.issue_provider === "jira") {
+      check(
+        report,
+        "watch.jira",
+        Boolean(cfg.watch.jira.base_url.trim() && cfg.watch.jira.project_key.trim()),
+        cfg.watch.jira.base_url.trim() && cfg.watch.jira.project_key.trim()
+          ? `${cfg.watch.jira.base_url} (${cfg.watch.jira.project_key})`
+          : "watch.jira.base_url and watch.jira.project_key must both be set",
+      );
+      check(
+        report,
+        "JIRA_EMAIL / JIRA_API_TOKEN",
+        Boolean(process.env["JIRA_EMAIL"] && process.env["JIRA_API_TOKEN"]),
+        process.env["JIRA_EMAIL"] && process.env["JIRA_API_TOKEN"]
+          ? "set"
+          : 'not set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens); see README.md\'s "spf watch" section',
+      );
+    }
+    if (cfg.watch.code_host === "bitbucket") {
+      check(
+        report,
+        "BITBUCKET_EMAIL / BITBUCKET_API_TOKEN",
+        Boolean(process.env["BITBUCKET_EMAIL"] && process.env["BITBUCKET_API_TOKEN"]),
+        process.env["BITBUCKET_EMAIL"] && process.env["BITBUCKET_API_TOKEN"]
+          ? "set"
+          : 'not set — Bitbucket app passwords are being removed; spf watch needs an Atlassian account email plus an API token instead; see README.md\'s "spf watch" section',
+      );
+    }
     check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
   }
 

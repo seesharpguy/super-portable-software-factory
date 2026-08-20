@@ -419,28 +419,46 @@ export const ObservabilityConfigSchema = v.object({
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
 
 /**
- * `spf watch`'s configuration. `provider` is a small enum today (just
- * `"github"`) by design — adding Jira/Linear later is a new provider
- * module (`core/issues/*_provider.ts`) implementing `IssueProvider` plus
- * one more enum entry here, not a rewrite of the poll loop.
+ * `spf watch`'s configuration. `issue_provider` (the tracker) and
+ * `code_host` (where PRs open) are independent enums, not one combined
+ * `provider` — a tracker and a code host are independent choices in
+ * practice (Jira issues against a Bitbucket repo, e.g.), and `watch.ts`'s
+ * poll loop is written against `IssueProvider`/`CodeHostProvider`
+ * separately (see `core/issues/provider.ts`) precisely so any combination
+ * is just config, never a rewrite of the loop. Adding a tracker or host
+ * later is a new module (`core/issues/*_provider.ts`) plus one more enum
+ * entry here.
  *
  * `repo` has no sensible default and is validated as required at `spf
  * watch` startup, not here — an empty string parses fine (this schema has
  * no opinion on whether watch is even configured), matching the same
  * "fails loudly before anything spawns, not eagerly at parse time" pattern
- * `quality:` already uses.
+ * `quality:` already uses. Its shape depends on `code_host`: "owner/name"
+ * for github, "workspace/repo_slug" for bitbucket.
  */
-export const WatchProviderSchema = v.picklist(["github"]);
-export type WatchProvider = v.InferOutput<typeof WatchProviderSchema>;
+export const WatchIssueProviderSchema = v.picklist(["github", "jira"]);
+export type WatchIssueProviderKind = v.InferOutput<typeof WatchIssueProviderSchema>;
+
+export const WatchCodeHostSchema = v.picklist(["github", "bitbucket"]);
+export type WatchCodeHostKind = v.InferOutput<typeof WatchCodeHostSchema>;
+
+/** Only consulted when `issue_provider: jira`. Auth is `JIRA_EMAIL` + `JIRA_API_TOKEN` env vars, checked at startup like `GITHUB_TOKEN`. */
+export const WatchJiraConfigSchema = v.object({
+  base_url: v.optional(v.string(), ""), // e.g. "https://your-domain.atlassian.net"
+  project_key: v.optional(v.string(), ""), // e.g. "PROJ"
+});
+export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 
 export const WatchConfigSchema = v.object({
-  provider: v.optional(WatchProviderSchema, "github"),
-  repo: v.optional(v.string(), ""), // "owner/name"
+  issue_provider: v.optional(WatchIssueProviderSchema, "github"),
+  code_host: v.optional(WatchCodeHostSchema, "github"),
+  repo: v.optional(v.string(), ""),
   label_prefix: v.optional(v.string(), "spf"),
   chain: v.optional(v.string(), "plan-build-test"),
   base_branch: v.optional(v.string(), "main"),
   poll_ms: v.optional(v.number(), 60_000),
   concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),
+  jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
 });
 export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
 

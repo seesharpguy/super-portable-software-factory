@@ -12,7 +12,9 @@ import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import { isRepoAt, makeGit } from "../../core/git_helper.ts";
 import { GitHubProvider } from "../../core/issues/github_provider.ts";
-import type { IssueProvider } from "../../core/issues/provider.ts";
+import { JiraProvider } from "../../core/issues/jira_provider.ts";
+import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
+import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
@@ -21,28 +23,66 @@ import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
 
 /**
- * Shared by `watch` and `watch init`: resolve config and build the
- * provider, checking only what BOTH need — a supported provider, a
- * non-empty `watch.repo`, and `GITHUB_TOKEN`. `watch`'s own extra checks
- * (a real git repo, a registered chain) don't apply to seeding labels.
- * Prints its own error and returns `null` on failure — the caller just
- * needs to `return 1`.
+ * Shared by `watch` and `watch init`: resolve config into an `IssueProvider`
+ * — checking only what BOTH need. `watch`'s own extra checks (a real git
+ * repo, a registered chain) don't apply to seeding labels. Prints its own
+ * error and returns `null` on failure — the caller just needs to `return 1`.
  */
-function resolveWatchProvider(cfg: SFConfig): IssueProvider | null {
-  if (cfg.watch.provider !== "github") {
-    console.error(`watch.provider ${JSON.stringify(cfg.watch.provider)} is not supported`);
-    return null;
+function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
+  if (cfg.watch.issue_provider === "github") {
+    if (!cfg.watch.repo.trim()) {
+      console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
+      return null;
+    }
+    const token = process.env["GITHUB_TOKEN"];
+    if (!token) {
+      console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
+      return null;
+    }
+    return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
   }
+  if (cfg.watch.issue_provider === "jira") {
+    if (!cfg.watch.jira.base_url.trim() || !cfg.watch.jira.project_key.trim()) {
+      console.error(`watch.jira.base_url and watch.jira.project_key must both be set when watch.issue_provider is "jira"`);
+      return null;
+    }
+    const email = process.env["JIRA_EMAIL"];
+    const token = process.env["JIRA_API_TOKEN"];
+    if (!email || !token) {
+      console.error('JIRA_EMAIL and JIRA_API_TOKEN must both be set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens). See README.md\'s "spf watch" section.');
+      return null;
+    }
+    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token);
+  }
+  console.error(`watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} is not supported`);
+  return null;
+}
+
+/** Same shape as `resolveIssueProvider`, for `watch.code_host`. */
+function resolveCodeHostProvider(cfg: SFConfig): CodeHostProvider | null {
   if (!cfg.watch.repo.trim()) {
-    console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
+    console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section`);
     return null;
   }
-  const token = process.env["GITHUB_TOKEN"];
-  if (!token) {
-    console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
-    return null;
+  if (cfg.watch.code_host === "github") {
+    const token = process.env["GITHUB_TOKEN"];
+    if (!token) {
+      console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
+      return null;
+    }
+    return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
   }
-  return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
+  if (cfg.watch.code_host === "bitbucket") {
+    const email = process.env["BITBUCKET_EMAIL"];
+    const token = process.env["BITBUCKET_API_TOKEN"];
+    if (!email || !token) {
+      console.error('BITBUCKET_EMAIL and BITBUCKET_API_TOKEN must both be set — spf watch needs an Atlassian account email plus an API token (Bitbucket app passwords are being removed; API tokens are the replacement). See README.md\'s "spf watch" section.');
+      return null;
+    }
+    return new BitbucketProvider(cfg.watch.repo, email, token);
+  }
+  console.error(`watch.code_host ${JSON.stringify(cfg.watch.code_host)} is not supported`);
+  return null;
 }
 
 function isPidAlive(pid: number): boolean {
@@ -85,11 +125,11 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
   const anchor = paths.resolveAnchor(options["cwd"]);
   const cfg = agents.loadConfig(paths.resolveConfigPaths(anchor, options["config"]).paths);
 
-  const provider = resolveWatchProvider(cfg);
+  const provider = resolveIssueProvider(cfg);
   if (!provider) return 1;
 
   const result = await provider.ensureLabels();
-  console.log(`spf watch init: ${cfg.watch.repo} (label prefix "${cfg.watch.label_prefix}")`);
+  console.log(`spf watch init: ${cfg.watch.issue_provider} (label prefix "${cfg.watch.label_prefix}")`);
   for (const name of result.created) console.log(`  + ${name} (created)`);
   for (const name of result.updated) console.log(`  ~ ${name} (updated color/description)`);
   for (const name of result.unchanged) console.log(`  = ${name} (already correct)`);
@@ -102,8 +142,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
   const configPaths = paths.resolveConfigPaths(anchor, options["config"]).paths;
   const cfg = agents.loadConfig(configPaths);
 
-  const provider = resolveWatchProvider(cfg);
+  const provider = resolveIssueProvider(cfg);
   if (!provider) return 1;
+  const codeHost = resolveCodeHostProvider(cfg);
+  if (!codeHost) return 1;
   if (!isRepoAt(anchor.repo_root)) {
     console.error(`${anchor.repo_root} is not a git repository`);
     return 1;
@@ -147,6 +189,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
 
   const deps: WatchDeps = {
     provider,
+    codeHost,
     git,
     worktreeGit: makeGit,
     labelPrefix: cfg.watch.label_prefix,
@@ -192,7 +235,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
   process.on("SIGTERM", stop);
 
   console.log(
-    `[spf] watch     ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}${flags["dry-run"] ? "  (dry run)" : ""}`,
+    `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}${flags["dry-run"] ? "  (dry run)" : ""}`,
   );
 
   try {
