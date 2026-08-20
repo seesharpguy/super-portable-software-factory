@@ -17,7 +17,7 @@ const route = useRoute()
           <rect x="8" y="13.5" width="20" height="5" rx="2.5" fill="#c89bff" />
           <rect x="4" y="21" width="13" height="5" rx="2.5" fill="#5ad2dd" />
         </svg>
-        <span class="brand">G8 Software Factory</span>
+        <span class="brand">Super Portable Software Factory</span>
         <span class="sep">›</span>
         <a :href="hrefFor()" :class="{ current: !route.adwId }">sessions</a>
         <template v-if="route.adwId">
