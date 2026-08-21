@@ -18,8 +18,11 @@ always shows the resolved, merged result for the repo you're in.
 3. An explicit `--config <path>` replaces both — standalone, no built-in
    underneath it.
 
-`spf init` seeds step 2 with a commented starter; omitting it entirely means
-running off pure built-ins, which is a fully supported, valid state.
+`spf init` seeds step 2 — on a TTY, via an interview that asks the fields
+below and appends whatever secrets they imply to `.env`; non-interactively
+(`--yes`, `--template <name>`, or no TTY) it writes a commented starter
+instead. Omitting `.spf/spf.config.yaml` entirely means running off pure
+built-ins, which is a fully supported, valid state.
 
 ## Shape
 

@@ -14,28 +14,11 @@ import * as paths from "../../core/paths.ts";
 import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
-import { parseCli } from "../../core/utils.ts";
+import { binaryOnPath, parseCli } from "../../core/utils.ts";
+import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { findChain } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
-
-// Common providers' env var conventions — public knowledge (pi-ai's own
-// resolution table is internal, unexported, and not something to reach into
-// for this). Missing from this table just means "unknown provider, skipped
-// the key check" — never a false failure.
-const PROVIDER_ENV_KEYS: Record<string, string[]> = {
-  anthropic: ["ANTHROPIC_API_KEY"],
-  openai: ["OPENAI_API_KEY"],
-  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-  openrouter: ["OPENROUTER_API_KEY"],
-  fireworks: ["FIREWORKS_API_KEY"],
-  groq: ["GROQ_API_KEY"],
-  mistral: ["MISTRAL_API_KEY"],
-  xai: ["XAI_API_KEY"],
-  deepseek: ["DEEPSEEK_API_KEY"],
-  together: ["TOGETHER_API_KEY"],
-  cerebras: ["CEREBRAS_API_KEY"],
-};
 
 interface Report {
   ok: boolean;
@@ -45,12 +28,6 @@ interface Report {
 function check(report: Report, name: string, ok: boolean, detail: string): void {
   report.checks.push({ name, ok, detail });
   if (!ok) report.ok = false;
-}
-
-function binaryOnPath(bin: string): boolean {
-  if (path.isAbsolute(bin) || bin.includes("/")) return existsSync(bin);
-  const result = spawnSync(process.platform === "win32" ? "where" : "which", [bin], { encoding: "utf-8" });
-  return result.status === 0;
 }
 
 export function doctorCommand(argv: string[]): number {

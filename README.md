@@ -28,12 +28,15 @@ spf scout "describe this repo"      # a real, read-only run, no setup required
 ### Customizing a repo
 
 ```bash
-spf init                       # seed .spf/spf.config.yaml — override only what you want to change
+spf init                       # on a TTY: an interview — agent, model, quality checks, spf watch, secrets
+spf init --yes                 # skip the interview — seed the commented, all-defaults starter config instead
 spf init --template ts-cc      # or start from a packaged, ready-to-run template instead
 spf list                       # every chain this install knows, its phases, what it needs
 ```
 
-`spf init` writes a small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field — override one model, one prompt, one quality check, and everything else stays inherited. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
+On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code` or `flue`) and model, which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
+
+Without an interview, `spf init` writes the same small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
 
 ### Local development
 
@@ -241,6 +244,8 @@ spf build-test "implement the plan" --adw-id a1b2c3d4
 Polls an issue tracker for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR against a code host, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
 
 The tracker (`issue_provider`) and the code host (`code_host`) are independent config choices, not one bundled "provider" — a tracker and a host are independent choices in practice (Jira issues against a Bitbucket repo is a real setup). Supported today: `issue_provider: github | jira`, `code_host: github | bitbucket` — any combination works, including Jira+GitHub or GitHub-issues+Bitbucket.
+
+The easiest way into any of this is `spf init`'s interview: it asks whether to enable `spf watch`, which tracker and code host, and collects exactly the env vars that combination needs (below) straight into `.env` — no hand-editing YAML or hunting down which credential pair a given combination wants.
 
 ```yaml
 # .spf/spf.config.yaml — GitHub issues + GitHub PRs (the default)

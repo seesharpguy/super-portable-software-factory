@@ -1,8 +1,10 @@
 /**
  * Small shared helpers. Anything bigger belongs in its own module.
  *
- * Bun loads .env files automatically for anything run with `bun run`/`bun`,
- * so there is no load_dotenv() call to make here — that parity is free.
+ * `.env` loading lives in cli/index.ts's `main()`, via Node's built-in
+ * `process.loadEnvFile()` — anchored to the resolved repo root, not
+ * `process.cwd()`. Not here: this module has no anchor of its own to load
+ * relative to.
  */
 
 import { randomBytes } from "node:crypto";
@@ -53,6 +55,13 @@ export function resolvePrompt(arg: string): string {
     // not a valid path — fall through to inline text
   }
   return arg;
+}
+
+/** True when `bin` resolves on PATH (or exists, if given as an absolute/relative path). Shared by `spf doctor` and the `spf init` interview so both agree on what's installed. */
+export function binaryOnPath(bin: string): boolean {
+  if (path.isAbsolute(bin) || bin.includes("/")) return existsSync(bin);
+  const result = spawnSync(process.platform === "win32" ? "where" : "which", [bin], { encoding: "utf-8" });
+  return result.status === 0;
 }
 
 export function engineerName(): string {

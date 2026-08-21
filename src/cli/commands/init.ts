@@ -1,10 +1,27 @@
-/** `spf init` — seed a `.spf/` override directory. Everything else is inherited from the packaged defaults. */
+/**
+ * `spf init` — seed a `.spf/` override directory. Everything else is
+ * inherited from the packaged defaults.
+ *
+ * On a TTY (and without `--template`/`--yes`), this runs an interview
+ * instead of writing the all-comments starter file: it asks which coding
+ * agent, model/provider, quality checks, and (if wanted) `spf watch`
+ * tracker/host to use, collects the secrets those answers imply, and
+ * appends them to `.env` (already auto-loaded by every command — see
+ * `src/cli/index.ts`). Piped input, `--yes`, or `--template <name>` all
+ * fall through to the original non-interactive behavior unchanged — a
+ * scripted `spf init` must never hang waiting on stdin.
+ */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { stringify } from "yaml";
 import * as paths from "../../core/paths.ts";
+import * as agents from "../../core/agents.ts";
 import { ensureGitignore } from "../gitignore.ts";
 import { parseCli } from "../../core/utils.ts";
 import { paint } from "../../core/console.ts";
+import { createAsker, isInteractive, InterviewAborted } from "../ask.ts";
+import { gatherContext, runInterview } from "../interview.ts";
+import { readEnvFile, upsertEnvFile, writeEnvExample } from "../env_file.ts";
 
 const TEMPLATE_SUFFIX = ".spf.config.yaml";
 
@@ -82,20 +99,77 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 // (engine/, from `spf eject`), and secrets (.env).
 const GITIGNORE_ENTRIES = [".spf/data/", ".spf/engine/", ".env"];
 
-export function initCommand(argv: string[]): number {
-  const { options, flags } = parseCli(argv, ["cwd", "template"], ["force"]);
+const GENERATED_HEADER = `# .spf/spf.config.yaml — written by \`spf init\`'s interview, merged ON TOP of
+# spf's packaged built-in defaults. Only what you changed is here; run
+# \`spf doctor\` any time to see what's actually in effect for this repo, and
+# where each value came from. Secrets this config implies live in .env
+# (gitignored) — .env.example lists the key names only.
+`;
+
+export async function initCommand(argv: string[]): Promise<number> {
+  const { options, flags } = parseCli(argv, ["cwd", "template"], ["force", "yes"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
   const sfDir = path.join(anchor.repo_root, ".spf");
   mkdirSync(sfDir, { recursive: true });
 
   const configPath = path.join(sfDir, "spf.config.yaml");
-  if (existsSync(configPath) && !flags["force"]) {
-    console.log(`${configPath} already exists — leaving it alone (--force to overwrite)`);
+  const templateName = options["template"];
+  const interactive = !templateName && !flags["yes"] && isInteractive();
+
+  if (!interactive) {
+    if (existsSync(configPath) && !flags["force"]) {
+      console.log(`${configPath} already exists — leaving it alone (--force to overwrite)`);
+    } else {
+      const content = templateName ? loadTemplate(templateName) : STARTER_CONFIG;
+      writeFileSync(configPath, content);
+      console.log(`wrote ${configPath}${templateName ? ` (from template "${templateName}")` : ""}`);
+    }
   } else {
-    const templateName = options["template"];
-    const content = templateName ? loadTemplate(templateName) : STARTER_CONFIG;
-    writeFileSync(configPath, content);
-    console.log(`wrote ${configPath}${templateName ? ` (from template "${templateName}")` : ""}`);
+    const asker = createAsker();
+    try {
+      if (existsSync(configPath) && !flags["force"]) {
+        const overwrite = await asker.confirm(`${configPath} already exists — overwrite it?`, false);
+        if (!overwrite) {
+          console.log("leaving the existing config alone (--force to skip this prompt)");
+          asker.close();
+          ensureGitignore(anchor.repo_root, GITIGNORE_ENTRIES);
+          return 0;
+        }
+      }
+
+      const envPath = path.join(anchor.repo_root, ".env");
+      const ctx = gatherContext(anchor.repo_root, readEnvFile(envPath));
+      const result = await runInterview(asker, ctx);
+      asker.close();
+      if (!result) {
+        console.log("init cancelled — nothing written");
+        return 1;
+      }
+
+      writeFileSync(configPath, GENERATED_HEADER + stringify(result.config));
+      console.log(`wrote ${configPath}`);
+      if (Object.keys(result.env).length > 0) upsertEnvFile(anchor.repo_root, result.env);
+      writeEnvExample(anchor.repo_root, result.envExampleKeys);
+
+      // The same merge-then-validate pipeline `spf doctor` runs — catches a
+      // bad answer (e.g. a suite naming an unconfigured check) right after
+      // writing, not at the user's first real chain run. Non-fatal: the
+      // config is already written either way, and `spf doctor` gives the
+      // full picture.
+      try {
+        const cfg = agents.loadConfig([paths.BUILTIN_CONFIG_PATH, configPath]);
+        agents.validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), anchor.cwd);
+      } catch (error) {
+        console.log(paint("yellow", `warning: ${(error as Error).message}\nrun \`spf doctor\` for the full picture.`));
+      }
+    } catch (error) {
+      asker.close();
+      if (error instanceof InterviewAborted) {
+        console.log("\ninit interrupted — nothing written");
+        return 130;
+      }
+      throw error;
+    }
   }
 
   ensureGitignore(anchor.repo_root, GITIGNORE_ENTRIES);

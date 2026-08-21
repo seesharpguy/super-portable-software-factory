@@ -28,7 +28,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 
   spf list                                  the chain registry — names, phases, what each needs
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
-  spf init [--force] [--template <name>]    seed .spf/spf.config.yaml (from a packaged template, if named)
+  spf init [--force] [--yes] [--template <name>]  interview to seed .spf/spf.config.yaml + .env (--yes/--template skip the interview)
   spf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
   spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
@@ -95,7 +95,7 @@ export async function main(): Promise<void> {
         process.exitCode = listCommand();
         return;
       case "init":
-        process.exitCode = initCommand(rest);
+        process.exitCode = await initCommand(rest);
         return;
       case "install-skill":
         process.exitCode = installSkillCommand(rest);
