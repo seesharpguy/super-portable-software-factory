@@ -38,7 +38,10 @@
     "pretest": "npm run build:cli",
     "test": "node --test \"dist/**/*.test.js\"",
     "prepack": "node scripts/check-pack-ready.js",
-    "size-check": "node scripts/check-tarball-size.js"
+    "size-check": "node scripts/check-tarball-size.js",
+    "tag:major": "node scripts/tag-release.js major",
+    "tag:minor": "node scripts/tag-release.js minor",
+    "tag:patch": "node scripts/tag-release.js patch"
   },
   "dependencies": {
     "@flue/runtime": "2.0.3",
