@@ -7,6 +7,7 @@
 import path from "node:path";
 import * as agentCc from "../core/agent_cc.ts";
 import * as agentFlue from "../core/agent_flue.ts";
+import * as notify from "../core/notify/notifier.ts";
 import * as paths from "../core/paths.ts";
 import { findChain } from "../chains/index.ts";
 import { dispatchChain, usageFor } from "./commands/run.ts";
@@ -155,5 +156,8 @@ export async function main(): Promise<void> {
     // agent_cc.ts's shutdown() just kills any still-running claude children.
     await agentFlue.shutdown();
     await agentCc.shutdown();
+    // A no-op if notifications are off/unconfigured — awaits any in-flight
+    // webhook POST so a fast-exiting command doesn't drop it mid-flight.
+    await notify.flushAll();
   }
 }

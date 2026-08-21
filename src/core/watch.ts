@@ -30,6 +30,7 @@
 import path from "node:path";
 import type { GitHandle } from "./git_helper.ts";
 import type { CodeHostProvider, Issue, IssueProvider, WatchMarker } from "./issues/provider.ts";
+import type { NotifyEvent } from "./notify/channel.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
 
@@ -66,6 +67,15 @@ export interface WatchDeps {
   dryRun: boolean;
   runChain: (opts: { prompt: string; cwd: string; adwId: string }) => Promise<ChainRunResult>;
   log: (message: string) => void;
+  /**
+   * Structured push, alongside `log`'s plain string — a required field, like
+   * `log`, so a test must consciously supply one (a no-op fake is fine).
+   * Fired only at meaningful state transitions (claim, PR, done, blocked,
+   * error) — NOT at routine self-healing (an orphan resume/retry, a lost
+   * claim race, a cleanup warning), which recovers on its own and would
+   * just be noise in a channel.
+   */
+  notify: (event: NotifyEvent) => void;
 }
 
 export interface WatchRunState {
@@ -132,6 +142,13 @@ export async function reconcileOrphans(deps: WatchDeps, state: WatchRunState): P
       }
     } else {
       deps.log(`watch: ${issue.id} orphaned past ${MAX_ORPHAN_ATTEMPTS} attempts — blocked`);
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `issue ${issue.id} blocked`,
+        detail: `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned attempts.`,
+        fields: [["issue", issue.id], ["title", issue.title]],
+      });
       if (!deps.dryRun) {
         await deps.provider.transition(issue, "blocked", `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned attempts.`);
         cleanupWorktree(deps, marker);
@@ -149,12 +166,26 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
     const status = await deps.codeHost.prStatus({ number: marker.pr, branch: marker.branch ?? "", url: "" });
     if (status.merged) {
       deps.log(`watch: ${issue.id}'s PR #${marker.pr} merged — done`);
+      deps.notify({
+        kind: "issue_done",
+        level: "info",
+        title: `issue ${issue.id} done`,
+        detail: `PR #${marker.pr} merged.`,
+        fields: [["issue", issue.id], ["title", issue.title], ["pr", `#${marker.pr}`]],
+      });
       if (!deps.dryRun) {
         await deps.provider.transition(issue, "done");
         cleanupWorktree(deps, marker);
       }
     } else if (status.state === "closed") {
       deps.log(`watch: ${issue.id}'s PR #${marker.pr} closed without merging — blocked`);
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `issue ${issue.id} blocked`,
+        detail: `PR #${marker.pr} was closed without merging.`,
+        fields: [["issue", issue.id], ["title", issue.title], ["pr", `#${marker.pr}`]],
+      });
       if (!deps.dryRun) {
         await deps.provider.transition(issue, "blocked", `PR #${marker.pr} was closed without merging.`);
         cleanupWorktree(deps, marker);
@@ -189,11 +220,15 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
 
     if (!result.accepted) {
       deps.log(`watch: ${issue.id}: chain "${deps.chain}" did not succeed — blocked`);
-      await deps.provider.transition(
-        issue,
-        "blocked",
-        result.detail || `Chain "${deps.chain}" (adw_id ${adwId}) did not complete successfully. Run \`spf phases ${adwId}\` for detail.`,
-      );
+      const detail = result.detail || `Chain "${deps.chain}" (adw_id ${adwId}) did not complete successfully. Run \`spf phases ${adwId}\` for detail.`;
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `issue ${issue.id} blocked`,
+        detail,
+        fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", adwId]],
+      });
+      await deps.provider.transition(issue, "blocked", detail);
       cleanupWorktree(deps, { worktree: worktreePath, branch });
       return;
     }
@@ -201,6 +236,13 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     const wtGit = deps.worktreeGit(worktreePath);
     if (wtGit.diffFiles(`origin/${deps.baseBranch}`).length === 0) {
       deps.log(`watch: ${issue.id}: chain succeeded but committed nothing — blocked`);
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `issue ${issue.id} blocked`,
+        detail: `Chain "${deps.chain}" (adw_id ${adwId}) completed but left no committed changes.`,
+        fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", adwId]],
+      });
       await deps.provider.transition(issue, "blocked", `Chain "${deps.chain}" (adw_id ${adwId}) completed but left no committed changes.`);
       cleanupWorktree(deps, { worktree: worktreePath, branch });
       return;
@@ -221,9 +263,23 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, pr: pr.number, attempt: 0 });
     await deps.provider.transition(issue, "review");
     deps.log(`watch: ${issue.id}: opened PR #${pr.number} — review`);
+    deps.notify({
+      kind: "pr_opened",
+      level: "info",
+      title: `PR #${pr.number} opened`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
+      url: pr.url || undefined,
+    });
   } catch (error) {
     const message = (error as Error).message;
     deps.log(`watch: ${issue.id}: error: ${message}`);
+    deps.notify({
+      kind: "watch_error",
+      level: "error",
+      title: `issue ${issue.id} errored`,
+      detail: message,
+      fields: [["issue", issue.id], ["title", issue.title]],
+    });
     await deps.provider.transition(issue, "blocked", `spf watch error: ${message}`).catch(() => undefined);
     cleanupWorktree(deps, { worktree: worktreePath, branch });
   }
@@ -246,14 +302,28 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
       continue;
     }
     deps.log(`watch: claimed ${issue.id}: ${issue.title}`);
+    deps.notify({
+      kind: "issue_claimed",
+      level: "info",
+      title: `issue ${issue.id} claimed`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
+    });
     state.inflight.add(issue.id);
     runIssue(deps, issue).finally(() => state.inflight.delete(issue.id));
   }
 }
 
+function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => void {
+  return (error: unknown) => {
+    const message = (error as Error).message;
+    deps.log(`watch: ${stage} error: ${message}`);
+    deps.notify({ kind: "watch_error", level: "error", title: `watch: ${stage} error`, detail: message, fields: [] });
+  };
+}
+
 /** One poll tick: reconcile, finish, claim — each independently caught, so one phase's error never blocks the rest. */
 export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void> {
-  await reconcileOrphans(deps, state).catch((error) => deps.log(`watch: reconcileOrphans error: ${(error as Error).message}`));
-  await finishReviews(deps).catch((error) => deps.log(`watch: finishReviews error: ${(error as Error).message}`));
-  await claimNewWork(deps, state).catch((error) => deps.log(`watch: claimNewWork error: ${(error as Error).message}`));
+  await reconcileOrphans(deps, state).catch(tickErrorHandler(deps, "reconcileOrphans"));
+  await finishReviews(deps).catch(tickErrorHandler(deps, "finishReviews"));
+  await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));
 }

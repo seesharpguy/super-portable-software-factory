@@ -1,0 +1,115 @@
+/**
+ * Filter, fan-out, and lifecycle for outbound notifications. A notification
+ * must never be able to break a run: `send()` never throws and never
+ * blocks — it fires the request and tracks it in a pending set, and a
+ * failure is swallowed after logging one line (the URL itself never
+ * appears in that line, or anywhere else — see `resolveNotifier` below).
+ *
+ * `resolveNotifier` returns `null` when notifications are off or no
+ * channel resolved, so every call site uses the same `notifier?.send(...)`
+ * shape as an optional dependency, not a conditional branch.
+ */
+import type { NotifyEvent, NotificationChannel } from "./channel.ts";
+import type { NotificationsConfig, NotifyScope, SFConfig } from "../data_types.ts";
+import { SlackChannel } from "./slack_channel.ts";
+import { TeamsChannel } from "./teams_channel.ts";
+import { WebhookChannel } from "./webhook_channel.ts";
+
+/** Exported so `spf doctor` and the init interview can name the same key without duplicating this table. */
+export const DEFAULT_NOTIFY_ENV_KEY: Record<string, string> = {
+  slack: "SLACK_WEBHOOK_URL",
+  teams: "TEAMS_WEBHOOK_URL",
+  webhook: "SPF_WEBHOOK_URL",
+};
+
+/** `errors` mode only sends `level: "error"`; `all` sends everything; `off` sends nothing. */
+function scopeAllows(scope: NotifyScope, level: "info" | "error"): boolean {
+  if (scope === "off") return false;
+  if (scope === "all") return true;
+  return level === "error";
+}
+
+export class Notifier {
+  private pending = new Set<Promise<void>>();
+
+  constructor(
+    private readonly channels: Array<{ channel: NotificationChannel; scope: NotifyScope }>,
+    private readonly timeoutMs: number,
+    private readonly dryRun: boolean,
+    private readonly log: (message: string) => void = (m) => console.error(m),
+  ) {}
+
+  /** Sync, fire-and-forget — every call site is sync and must stay that way. */
+  send(event: NotifyEvent): void {
+    for (const { channel, scope } of this.channels) {
+      if (!scopeAllows(scope, event.level)) continue;
+      if (this.dryRun) {
+        this.log(`spf: would notify (${channel.label}): ${event.title}`);
+        continue;
+      }
+      const task = channel.send(event, this.timeoutMs).catch((error) => {
+        this.log(`spf: ${channel.label} notification failed: ${(error as Error).message}`);
+      });
+      this.pending.add(task);
+      task.finally(() => this.pending.delete(task));
+    }
+  }
+
+  /** Await every in-flight send — call before process exit so a slow webhook isn't dropped mid-flight. */
+  async flush(): Promise<void> {
+    await Promise.all([...this.pending]);
+  }
+}
+
+function makeChannel(kind: string, url: string, name: string): NotificationChannel | null {
+  switch (kind) {
+    case "slack":
+      return new SlackChannel(url, name);
+    case "teams":
+      return new TeamsChannel(url, name);
+    case "webhook":
+      return new WebhookChannel(url, name);
+    default:
+      return null;
+  }
+}
+
+// Every live Notifier this process created — so the CLI's shutdown path can
+// flush all of them without threading a handle through every call site,
+// matching agent_flue.shutdown()/agent_cc.shutdown()'s module-level shape.
+const LIVE: Notifier[] = [];
+
+/**
+ * Build a `Notifier` from `cfg.notifications`, or `null` if it's off or no
+ * channel resolved. A channel whose env var isn't set is skipped with one
+ * warning naming the missing key — never a hard failure, since a broken
+ * notification setup shouldn't stop the work it's supposed to report on.
+ */
+export function resolveNotifier(cfg: SFConfig, opts: { dryRun?: boolean; log?: (message: string) => void } = {}): Notifier | null {
+  const nc: NotificationsConfig = cfg.notifications;
+  if (nc.events === "off" || nc.channels.length === 0) return null;
+  const log = opts.log ?? ((m: string) => console.error(m));
+
+  const resolved: Array<{ channel: NotificationChannel; scope: NotifyScope }> = [];
+  for (const entry of nc.channels) {
+    const envKey = entry.webhook_url_env || DEFAULT_NOTIFY_ENV_KEY[entry.kind];
+    const url = process.env[envKey];
+    if (!url) {
+      log(`spf: notifications.channels[kind=${entry.kind}] is configured but ${envKey} is not set — skipping this channel`);
+      continue;
+    }
+    const channel = makeChannel(entry.kind, url, entry.name);
+    if (!channel) continue;
+    resolved.push({ channel, scope: entry.events ?? nc.events });
+  }
+  if (resolved.length === 0) return null;
+
+  const notifier = new Notifier(resolved, nc.timeout_ms, Boolean(opts.dryRun), log);
+  LIVE.push(notifier);
+  return notifier;
+}
+
+/** Await every Notifier this process has created — call once, from the CLI's shutdown path. */
+export async function flushAll(): Promise<void> {
+  await Promise.all(LIVE.map((n) => n.flush()));
+}

@@ -64,3 +64,15 @@ agents:
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
+
+# Optional: push notifications for unattended work — spf watch's daemon
+# lifecycle, and every chain run (including watch's own per-issue runs).
+# Interactive commands (doctor, list, sessions, ...) never notify. events:
+# "errors" sends only failures/blocked issues; "all" adds every milestone.
+# The webhook URL is a secret — put it in .env under the key named below,
+# never here. See the main README's "Notifications" section.
+# notifications:
+#   events: errors            # off (default) | errors | all
+#   channels:
+#     - kind: slack            # slack | teams | webhook
+#       webhook_url_env: SLACK_WEBHOOK_URL

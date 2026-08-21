@@ -12,6 +12,7 @@ import { Run } from "./runner.ts";
 import { Tracer } from "./tracer.ts";
 import type { SFConfig } from "./data_types.ts";
 import { engineerName, newId } from "./utils.ts";
+import { resolveNotifier } from "./notify/notifier.ts";
 
 /**
  * A killed run still closes its own trace.
@@ -56,6 +57,8 @@ export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string, chain
     repoRoot: anchor.repo_root,
     sfDir: anchor.spf_dir,
     dataDir: dataPaths.data_dir,
+    chainName: chainName || "adw",
+    notifier: resolveNotifier(cfg),
   });
   const scriptPath = process.argv[1] || "adw";
   tracer.sessionStart(id, run.engineer, chainName || "adw");

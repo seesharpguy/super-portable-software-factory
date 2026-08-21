@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { branchNameFor, claimNewWork, createWatchState, finishReviews, reconcileOrphans } from "../core/watch.js";
+import { branchNameFor, claimNewWork, createWatchState, finishReviews, reconcileOrphans, tick } from "../core/watch.js";
 import type { GitHandle } from "../core/git_helper.js";
 import type { ChainRunResult, WatchDeps } from "../core/watch.js";
+import type { NotifyEvent } from "../core/notify/channel.js";
 import type {
   CodeHostProvider,
   EnsureLabelsResult,
@@ -120,8 +121,15 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     dryRun: false,
     runChain: async (): Promise<ChainRunResult> => ({ accepted: true, adwId: "issue-1", detail: "" }),
     log: () => {},
+    notify: () => {},
     ...overrides,
   };
+}
+
+/** Collects every `deps.notify(...)` call, for asserting kinds/levels without a real channel. */
+function collectNotifications(): { events: NotifyEvent[]; notify: (event: NotifyEvent) => void } {
+  const events: NotifyEvent[] = [];
+  return { events, notify: (event) => events.push(event) };
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -339,4 +347,136 @@ test("finishReviews: a still-open PR leaves the issue in review", async () => {
 
   assert.equal(provider.transitions.length, 0);
   assert.equal(provider.entries.get("42")!.state, "review");
+});
+
+// ── notifications ────────────────────────────────────────────────────────────
+
+test("claim -> PR opened -> merged fires issue_claimed, pr_opened, then issue_done (all info-level)", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("50", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, { notify });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+  assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "pr_opened"]);
+  assert.ok(events.every((e) => e.level === "info"));
+
+  codeHost.prs.set(1000, { merged: true, state: "closed", ciStatus: "success" });
+  await finishReviews(deps);
+  assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "pr_opened", "issue_done"]);
+  assert.equal(events.at(-1)!.level, "info");
+});
+
+test("a rejected chain run fires issue_blocked at error level", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("51", "Flaky feature");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    notify,
+    runChain: async () => ({ accepted: false, adwId: "issue-51", detail: "build-test failed" }),
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  const blocked = events.filter((e) => e.kind === "issue_blocked");
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0]!.level, "error");
+  assert.equal(blocked[0]!.detail, "build-test failed");
+});
+
+test("an accepted run with nothing committed fires issue_blocked", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("52", "No-op request");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, { notify, worktreeGit: () => fakeGit({ diffFiles: () => [] }) });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "issue_blocked"]);
+  assert.match(events[1]!.detail ?? "", /no committed changes/);
+});
+
+test("an exception mid-runIssue fires watch_error at error level", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("53", "Explodes");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    notify,
+    runChain: async () => {
+      throw new Error("kaboom");
+    },
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  const errors = events.filter((e) => e.kind === "watch_error");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]!.level, "error");
+  assert.match(errors[0]!.detail ?? "", /kaboom/);
+});
+
+test("finishReviews: a closed-without-merging PR fires issue_blocked", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("54", "rejected", "review", { pr: 700, branch: "spf-watch/54-x" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(700, { merged: false, state: "closed", ciStatus: "failure" });
+  const { events, notify } = collectNotifications();
+
+  await finishReviews(makeDeps(provider, codeHost, { notify }));
+
+  assert.deepEqual(events.map((e) => e.kind), ["issue_blocked"]);
+  assert.equal(events[0]!.level, "error");
+});
+
+test("reconcileOrphans: giving up past the retry cap fires issue_blocked", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("55", "orphaned, no marker", "working", { attempt: 2 }); // one more push exceeds MAX_ORPHAN_ATTEMPTS (2)
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+
+  await reconcileOrphans(makeDeps(provider, codeHost, { notify }), state);
+
+  assert.deepEqual(events.map((e) => e.kind), ["issue_blocked"]);
+  assert.match(events[0]!.detail ?? "", /Gave up after 2 orphaned attempts/);
+});
+
+test("reconcileOrphans: a routine orphan resume/retry notifies nothing — only the terminal give-up does", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("56", "orphaned, resumable", "working", { pr: 800, branch: "spf-watch/56-x" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(800, { merged: false, state: "open", ciStatus: "pending" });
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+
+  await reconcileOrphans(makeDeps(provider, codeHost, { notify }), state);
+
+  assert.deepEqual(events, []);
+});
+
+test("tick: a per-stage error is caught and fires exactly one watch_error", async () => {
+  const provider = new FakeProvider();
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  provider.listEligible = async () => {
+    throw new Error("listEligible exploded");
+  };
+
+  await tick(makeDeps(provider, codeHost, { notify }), state);
+
+  assert.deepEqual(events.map((e) => e.kind), ["watch_error"]);
+  assert.match(events[0]!.detail ?? "", /listEligible exploded/);
 });

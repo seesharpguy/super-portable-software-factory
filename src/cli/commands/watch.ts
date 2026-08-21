@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
+import { resolveNotifier } from "../../core/notify/notifier.ts";
 import { isRepoAt, makeGit } from "../../core/git_helper.ts";
 import { GitHubProvider } from "../../core/issues/github_provider.ts";
 import { JiraProvider } from "../../core/issues/jira_provider.ts";
@@ -168,6 +169,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
   const worktreesDir = path.join(homedir(), ".spf", "watch", path.basename(anchor.repo_root), "worktrees");
   mkdirSync(worktreesDir, { recursive: true });
 
+  // `null` when notifications are off/unconfigured — every call below is a
+  // no-op fallback to `console.error` in that case (see notify()`s default).
+  const notifier = resolveNotifier(cfg, { dryRun: Boolean(flags["dry-run"]) });
+
   /**
    * Without this, a claimed issue's chain resolves its session/trace data
    * relative to `cwd` (the worktree, not the main repo — see
@@ -222,6 +227,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     dryRun: Boolean(flags["dry-run"]),
     runChain,
     log: (message) => console.log(message),
+    notify: (event) => notifier?.send(event),
   };
 
   const state = createWatchState();
@@ -259,6 +265,16 @@ export async function watchCommand(argv: string[]): Promise<number> {
   console.log(
     `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}${flags["dry-run"] ? "  (dry run)" : ""}`,
   );
+  deps.notify({
+    kind: "watch_started",
+    level: "info",
+    title: "watch started",
+    fields: [
+      ["repo", cfg.watch.repo],
+      ["label_prefix", cfg.watch.label_prefix],
+      ["chain", cfg.watch.chain],
+    ],
+  });
 
   try {
     for (;;) {
@@ -274,6 +290,8 @@ export async function watchCommand(argv: string[]): Promise<number> {
     }
     return 0;
   } finally {
+    deps.notify({ kind: "watch_stopped", level: "info", title: "watch stopped", fields: [["repo", cfg.watch.repo]] });
+    await notifier?.flush();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     releaseLock(lockPath);

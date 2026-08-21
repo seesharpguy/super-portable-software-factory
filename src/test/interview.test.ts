@@ -173,6 +173,136 @@ test("declining the final confirm returns null — nothing to write", async () =
   assert.equal(result, null);
 });
 
+test("notifications: declining the gate leaves config.notifications undefined", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "claude_code", "Model (Claude": "sonnet", Authentication: "login" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Send notifications": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.notifications, undefined);
+});
+
+test("notifications: accepting collects the scope, a channel, and its webhook env key", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Model (Claude": "sonnet",
+      Authentication: "login",
+      "Notify on": "all",
+      Channel: "slack",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Send notifications": true,
+      "Add another channel": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/T000/B000/XXXX" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.notifications.events, "all");
+  assert.deepEqual(config.notifications.channels, [{ kind: "slack", webhook_url_env: "SLACK_WEBHOOK_URL" }]);
+  assert.equal(result!.env.SLACK_WEBHOOK_URL, "https://hooks.slack.com/services/T000/B000/XXXX");
+  assert.ok(result!.envExampleKeys.includes("SLACK_WEBHOOK_URL"));
+
+  // The written document must still merge and validate cleanly, same
+  // pipeline `spf doctor` runs.
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.equal(cfg.notifications.events, "all");
+  assert.equal(cfg.notifications.channels[0]!.kind, "slack");
+});
+
+test("customize models per agent: declining keeps today's behavior — only the three pinned agents, all matching defaults.model", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "claude_code", "Model (Claude": "opus", Authentication: "login" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Customize models per agent": false,
+      "Send notifications": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.deepEqual(
+    config.agents.map((a: any) => a.name).sort(),
+    ["documenter", "planner", "reviewer"],
+  );
+  for (const a of config.agents) assert.equal(a.model, "opus");
+});
+
+test("customize models per agent: accepting patches the pinned three and appends builder/scout", async () => {
+  const ctx = gatherContext(dir, new Map());
+  assert.deepEqual(ctx.rosterNames.slice().sort(), ["builder", "documenter", "planner", "reviewer", "scout"]);
+  const asker = createFakeAsker({
+    select: { "backend runs": "claude_code", "Model (Claude": "sonnet", Authentication: "login" },
+    text: {
+      "  planner": "opus",
+      "  builder": "sonnet",
+      "  scout": "haiku",
+      "  reviewer": "opus",
+      "  documenter": "sonnet",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Customize models per agent": true,
+      "Send notifications": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  const byName = Object.fromEntries(config.agents.map((a: any) => [a.name, a.model]));
+  assert.deepEqual(byName, { planner: "opus", reviewer: "opus", documenter: "sonnet", builder: "sonnet", scout: "haiku" });
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir); // throws on any problem
+  assert.equal(cfg.agents.find((a) => a.name === "scout")!.model, "haiku");
+});
+
 test("an existing .env value is offered back as the default when a secret is left blank", async () => {
   const ctx = gatherContext(dir, new Map([["GITHUB_TOKEN", "ghp_existingvalue"]]));
   const asker = createFakeAsker({

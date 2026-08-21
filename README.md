@@ -34,7 +34,7 @@ spf init --template ts-cc      # or start from a packaged, ready-to-run template
 spf list                       # every chain this install knows, its phases, what it needs
 ```
 
-On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code` or `flue`) and model, which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
+On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code` or `flue`) and model (optionally customized per agent instead of one model for the whole roster), which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host, and whether to push notifications to Slack/Teams/a webhook — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
 
 Without an interview, `spf init` writes the same small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
 
@@ -321,6 +321,56 @@ export BITBUCKET_API_TOKEN=...   # same Atlassian API token mechanism as Jira ab
 ```
 
 **Bitbucket Cloud app passwords are being fully removed** (brownout window closing July 28, 2026) — this project only supports the replacement, API tokens, which need the account's email alongside the token (username alone no longer works).
+
+## Notifications
+
+Optional, off by default: push a curated set of milestones to Slack,
+Microsoft Teams, or a generic webhook. It's scoped to **unattended work**:
+`spf watch`'s daemon lifecycle, and every chain run (`spf <chain>` / `spf
+run`, including watch's own per-issue runs). Interactive commands — `doctor`,
+`list`, `sessions`, `phases`, `events`, `init`, `ui`, `migrate`, `eject`,
+`abort`, `version` — never notify; you're already looking at the terminal
+for those.
+
+```yaml
+# .spf/spf.config.yaml
+notifications:
+  events: errors            # off (default) | errors | all
+  channels:
+    - kind: slack            # slack | teams | webhook
+      webhook_url_env: SLACK_WEBHOOK_URL   # optional; this is the default for slack
+```
+
+`events` is the whole filter: `errors` sends only failed runs/phases, blocked
+issues, and watch errors; `all` adds every milestone — run started/finished,
+issue claimed, PR opened, issue done. A channel's own `events` overrides the
+top-level scope for just that channel. `spf doctor` reports whether each
+configured channel's env var is set.
+
+The webhook URL is a secret and lives only in `.env` — `webhook_url_env`
+names the key, never the URL itself, matching `GITHUB_TOKEN`/
+`JIRA_API_TOKEN`. Defaults per kind: `SLACK_WEBHOOK_URL`, `TEAMS_WEBHOOK_URL`,
+`SPF_WEBHOOK_URL`. `spf init`'s interview asks for this section and collects
+the URL straight into `.env`, same as every other credential.
+
+Getting each channel's URL:
+
+- **Slack** — [Sending messages using Incoming Webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks): create a Slack app, enable Incoming Webhooks, "Add New Webhook to Workspace".
+- **Microsoft Teams** — [Send messages in Teams using incoming webhooks](https://support.microsoft.com/en-us/office/post-a-workflow-when-a-webhook-request-is-received-in-microsoft-teams-8ae491c7-0394-4861-ba59-055e33f75498): in the target channel, add a Workflows webhook template (search for one along the lines of "Post to a channel when a webhook request is received" / "Send webhook alerts to a channel" — Microsoft's own naming here has shifted between revisions) and copy the generated URL. This is the *only* supported path now — the old Office 365 connector webhook has been retired by Microsoft.
+- **webhook** — any endpoint that accepts a JSON POST of the event: Discord,
+  n8n, Zapier, a homegrown receiver.
+
+Delivery never blocks or fails a run: an unconfigured/misconfigured channel
+is skipped with one warning, and a failed POST logs one line and is
+swallowed — never changes a run's exit code. One thing worth knowing under
+`events: all`: `spf watch` runs its per-issue chains in-process, so a failed
+issue produces **two** notifications for the same failure — `run_failed`
+(keyed to the chain's own `adw_id`, e.g. `issue-142`) from the chain-run
+side, and `issue_blocked` (keyed to the issue) from watch itself. Both are
+genuinely informative, just worth expecting.
+
+Full field reference: `spf install-skill`'s installed skill
+(`references/config.md`).
 
 ## What's in this repo
 

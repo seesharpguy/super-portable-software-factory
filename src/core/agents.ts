@@ -70,13 +70,16 @@ function mergeAgentLists(base: any[], override: any[]): any[] {
   return merged;
 }
 
-/** `defaults`/`observability`/`quality` merge key-by-key; `agents` merges by name. */
+/** `defaults`/`observability`/`quality`/`watch`/`notifications` merge key-by-key; `agents` merges by name. */
 function mergeRawConfig(base: Record<string, any>, override: Record<string, any>): Record<string, any> {
   return {
     defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
     observability: { ...(base.observability || {}), ...(override.observability || {}) },
     quality: { ...(base.quality || {}), ...(override.quality || {}) },
     watch: { ...(base.watch || {}), ...(override.watch || {}) },
+    // channels is a whole-array replace on override, same as quality.checks —
+    // you don't want an override's channels appended to the built-in's.
+    notifications: { ...(base.notifications || {}), ...(override.notifications || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }

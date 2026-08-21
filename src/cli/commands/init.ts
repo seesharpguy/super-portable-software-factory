@@ -91,6 +91,20 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
+
+# Uncomment to push notifications for unattended work — spf watch's daemon
+# lifecycle, and every chain run (spf <chain> / spf run, including watch's
+# own per-issue runs). Interactive commands (doctor, list, sessions, ...)
+# never notify — you're already looking at the terminal for those. events:
+# "errors" sends only failures/blocked issues; "all" adds every milestone
+# (run started, issue claimed, PR opened, ...). The URL is a secret and
+# lives only in .env — never in this file. See README.md's "Notifications"
+# section for how to get each webhook URL.
+# notifications:
+#   events: errors            # off (default) | errors | all
+#   channels:
+#     - kind: slack            # slack | teams | webhook
+#       webhook_url_env: SLACK_WEBHOOK_URL   # default for slack; TEAMS_WEBHOOK_URL / SPF_WEBHOOK_URL for the others
 `;
 
 // .spf/spf.config.yaml and .spf/prompt_engineering/ stay tracked — they're

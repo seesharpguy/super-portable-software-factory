@@ -12,9 +12,10 @@ always shows the resolved, merged result for the repo you're in.
 1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
 2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
-   field by field (`defaults`/`observability`/`quality` merge key-by-key;
-   `agents` merges by `name`: a matching name patches that entry, a new name
-   appends).
+   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`
+   merge key-by-key — `notifications.channels` replaces wholesale, same as
+   `quality.checks`; `agents` merges by `name`: a matching name patches that
+   entry, a new name appends).
 3. An explicit `--config <path>` replaces both — standalone, no built-in
    underneath it.
 
@@ -106,6 +107,49 @@ A full worked example, including the `defaults.coding_agent`/`watch:`
 sections: `assets/templates/ts.spf.config.yaml` in the spf package (or
 `spf init --template ts` to write it straight into `.spf/spf.config.yaml`).
 `spf init` with no `--template` prints every packaged template's name.
+
+### `notifications`
+
+Optional outbound push for unattended work — `spf watch`'s daemon lifecycle,
+and every chain run (`spf <chain>` / `spf run`, including watch's own
+per-issue runs). Interactive commands (`doctor`, `list`, `sessions`,
+`phases`, `events`, `init`, `ui`, `migrate`, `eject`, `abort`, `version`)
+never notify — you're already looking at the terminal for those. Off by
+default; adding it is entirely additive.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `events` | `"off"` \| `"errors"` \| `"all"` | The whole filter. `off` (default): nothing. `errors`: only failed runs/phases, blocked issues, watch errors. `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus errors. |
+| `timeout_ms` | int | Per-request timeout for a channel's HTTP POST. Default `5000`. |
+| `channels[]` | array | See below. |
+
+`channels[].kind`: `"slack"` \| `"teams"` \| `"webhook"`. `channels[].events`
+overrides `events` for just that channel (unset = inherit). `webhook_url_env`
+names the `.env` key holding the secret URL — never the URL itself, matching
+`GITHUB_TOKEN`/`JIRA_API_TOKEN`. Empty/omitted uses the kind's own default:
+`SLACK_WEBHOOK_URL`, `TEAMS_WEBHOOK_URL`, `SPF_WEBHOOK_URL`. `name` is a
+cosmetic label for warning lines when you have two channels of the same
+kind.
+
+```yaml
+notifications:
+  events: errors
+  channels:
+    - kind: slack
+      webhook_url_env: SLACK_WEBHOOK_URL   # optional; this is the default for slack
+    - kind: teams
+      events: all                           # per-channel override
+    - kind: webhook
+      webhook_url_env: OPS_WEBHOOK_URL
+      name: ops-bus
+```
+
+Delivery never blocks or fails a run: a channel with an unset env var is
+skipped with one warning at startup (`spf doctor` reports the same thing as
+a check); a failed POST logs one line and is swallowed, never changing the
+run's exit code. See the main README's "Notifications" section for how to
+get each channel's webhook URL, and `spf init`'s interview, which asks for
+this section and collects the URL straight into `.env`.
 
 ### `agents[]`
 

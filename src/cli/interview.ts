@@ -18,6 +18,9 @@ import { binaryOnPath } from "../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../core/providers.ts";
 import { resolveModel } from "../core/agent_flue.ts";
 import { ThinkingLevelSchema } from "../core/data_types.ts";
+import { loadConfig } from "../core/agents.ts";
+import { BUILTIN_CONFIG_PATH } from "../core/paths.ts";
+import { DEFAULT_NOTIFY_ENV_KEY } from "../core/notify/notifier.ts";
 import { CHAINS } from "../chains/index.ts";
 import type { Asker } from "./ask.ts";
 
@@ -32,6 +35,8 @@ export interface DetectedContext {
   claudeOnPath: boolean;
   /** Whatever's already in `.env` — shown masked so a re-run can offer "keep current" instead of asking blind. */
   existingEnv: Map<string, string>;
+  /** The packaged roster's agent names (planner, builder, scout, reviewer, documenter today) — read from the built-in config so a 6th agent added there needs no interview change. */
+  rosterNames: string[];
 }
 
 function gitConfigValue(repoRoot: string, key: string): string | undefined {
@@ -56,6 +61,15 @@ function readScripts(repoRoot: string): Record<string, string> {
   }
 }
 
+/** Best-effort — a corrupt/missing built-in config falls back to the three names the auto-override already knows about, rather than failing the whole interview. */
+function readRosterNames(): string[] {
+  try {
+    return loadConfig([BUILTIN_CONFIG_PATH]).agents.map((a) => a.name);
+  } catch {
+    return ["planner", "builder", "scout", "reviewer", "documenter"];
+  }
+}
+
 export function gatherContext(repoRoot: string, existingEnv: Map<string, string> = new Map()): DetectedContext {
   const remote = spawnSync("git", ["config", "--get", "remote.origin.url"], { cwd: repoRoot, encoding: "utf-8" });
   const branch = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot, encoding: "utf-8" });
@@ -67,6 +81,7 @@ export function gatherContext(repoRoot: string, existingEnv: Map<string, string>
     scripts: readScripts(repoRoot),
     claudeOnPath: binaryOnPath("claude"),
     existingEnv,
+    rosterNames: readRosterNames(),
   };
 }
 
@@ -113,7 +128,10 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     if (!ctx.claudeOnPath) {
       asker.note("warning: `claude` was not found on PATH — install it (or set a launch command below) before running spf.");
     }
-    const launchCommand = await asker.text("Launch command for the `claude` CLI (space-separated; SPF_CLAUDE_CMD)", { default: "claude" });
+    const launchCommand = await asker.text(
+      'Launch command for the `claude` CLI — e.g. "ollama launch claude" to route through a wrapper (SPF_CLAUDE_CMD)',
+      { default: "claude" },
+    );
     if (launchCommand !== "claude") env["SPF_CLAUDE_CMD"] = launchCommand;
 
     const model = await asker.select(
@@ -185,6 +203,32 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     const key = await asker.secret(envKey, { current: ctx.existingEnv.get(envKey) });
     if (key) env[envKey] = key;
     envExampleKeys.push(envKey);
+  }
+
+  // Declined (the default): today's behavior exactly — on claude_code, the
+  // three-agent auto-pin above stands unchanged; on flue, no agents: block
+  // at all. Accepted: ask every roster agent's model, defaulting to the one
+  // chosen above, and patch/append its override — `mergeAgentLists`
+  // (agents.ts:63-71) shallow-patches by name, so re-setting `model` on an
+  // already-pinned entry (claude_code's planner/reviewer/documenter) is
+  // exactly the right shape, no `prompt_engineering` needed (interview.ts's
+  // review-section comment explains why that's fine).
+  const customizeModels = await asker.confirm("Customize models per agent?", false);
+  if (customizeModels) {
+    asker.heading("Per-agent models");
+    for (const name of ctx.rosterNames) {
+      const answer = await asker.text(`  ${name}`, { default: String(defaults.model) });
+      if (codingAgent === "flue") {
+        try {
+          resolveModel(answer);
+        } catch (error) {
+          asker.note(`warning: ${(error as Error).message}`);
+        }
+      }
+      const existing = agentOverrides.find((a) => a.name === name);
+      if (existing) existing.model = answer;
+      else agentOverrides.push({ name, model: answer });
+    }
   }
 
   // ── 2. quality checks ──────────────────────────────────────────────────────
@@ -278,7 +322,51 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     }
   }
 
-  // ── 4. advanced (gated) ─────────────────────────────────────────────────────
+  // ── 4. notifications ─────────────────────────────────────────────────────────
+  asker.heading("Notifications");
+  const enableNotify = await asker.confirm("Send notifications to Slack, Teams, or a webhook?", false);
+  let notifications: Record<string, unknown> | null = null;
+  if (enableNotify) {
+    const events = await asker.select(
+      "Notify on",
+      [
+        { value: "errors", label: "errors — failed runs, blocked issues, watch errors" },
+        { value: "all", label: "all — every milestone (claimed, PR opened, done, ...) plus errors" },
+      ],
+      "errors",
+    );
+    const channels: Record<string, unknown>[] = [];
+    for (;;) {
+      const kind = await asker.select(
+        "Channel",
+        [
+          { value: "slack", label: "Slack — Incoming Webhook" },
+          { value: "teams", label: "Microsoft Teams — Workflows webhook" },
+          { value: "webhook", label: "generic webhook — POSTs the raw event as JSON" },
+        ],
+        "slack",
+      );
+      const envKey = DEFAULT_NOTIFY_ENV_KEY[kind];
+      if (kind === "slack") {
+        asker.note("Slack app -> Incoming Webhooks -> Add New Webhook to Workspace.");
+        asker.note("Docs: https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks");
+      } else if (kind === "teams") {
+        asker.note("In the target channel, add a Workflows webhook template (search for one like \"Post to a channel when a webhook request is received\"). The old Office 365 connector webhooks are retired — this is the only path now.");
+        asker.note("Docs: https://support.microsoft.com/en-us/office/post-a-workflow-when-a-webhook-request-is-received-in-microsoft-teams-8ae491c7-0394-4861-ba59-055e33f75498");
+      } else {
+        asker.note("Any endpoint that accepts a JSON POST — Discord, n8n, Zapier, your own.");
+      }
+      const url = await asker.secret(envKey, { current: ctx.existingEnv.get(envKey) });
+      if (url) env[envKey] = url;
+      envExampleKeys.push(envKey);
+      channels.push({ kind, webhook_url_env: envKey });
+      const another = await asker.confirm("Add another channel?", false);
+      if (!another) break;
+    }
+    notifications = { events, channels };
+  }
+
+  // ── 5. advanced (gated) ─────────────────────────────────────────────────────
   const wantAdvanced = await asker.confirm("\nConfigure advanced settings (thinking level, tools, protected files, data dir, poll intervals, ...)?", false);
   if (wantAdvanced) {
     asker.heading("Advanced");
@@ -313,9 +401,14 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       const debug = await asker.confirm("Enable SPF_JIRA_DEBUG (request/response logging)?", false);
       if (debug) env["SPF_JIRA_DEBUG"] = "1";
     }
+
+    if (notifications) {
+      const timeoutMs = await asker.text("notifications.timeout_ms", { default: "5000" });
+      if (timeoutMs !== "5000") notifications.timeout_ms = Number(timeoutMs);
+    }
   }
 
-  // ── 5. review + confirm ─────────────────────────────────────────────────────
+  // ── 6. review + confirm ─────────────────────────────────────────────────────
   const observability = defaults["__observability__"] as Record<string, unknown> | undefined;
   delete defaults["__observability__"];
   const quality = defaults["__quality__"] as { checks: unknown[]; suites: Record<string, string[]> } | undefined;
@@ -326,6 +419,7 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
   if (quality) config.quality = quality;
   if (watch) config.watch = watch;
   if (observability) config.observability = observability;
+  if (notifications) config.notifications = notifications;
 
   // No schema validation here on purpose: `config.agents` overrides are
   // intentionally PARTIAL (name + model only, no prompt_engineering) — valid

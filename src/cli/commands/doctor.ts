@@ -13,6 +13,7 @@ import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
+import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
@@ -182,6 +183,18 @@ export function doctorCommand(argv: string[]): number {
       );
     }
     check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
+  }
+
+  if (cfg.notifications.events !== "off") {
+    check(report, "notifications.events", true, cfg.notifications.events);
+    if (cfg.notifications.channels.length === 0) {
+      check(report, "notifications.channels", false, `notifications.events is ${JSON.stringify(cfg.notifications.events)} but no channels are configured`);
+    }
+    for (const ch of cfg.notifications.channels) {
+      const envKey = ch.webhook_url_env || DEFAULT_NOTIFY_ENV_KEY[ch.kind];
+      const label = ch.name ? `${ch.kind} (${ch.name})` : ch.kind;
+      check(report, `notifications: ${label}`, Boolean(process.env[envKey]), process.env[envKey] ? `${envKey} set` : `${envKey} is not set`);
+    }
   }
 
   return finish(report, flags["json"]);

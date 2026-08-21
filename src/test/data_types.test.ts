@@ -10,6 +10,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as v from "valibot";
 import { toJsonSchema } from "@valibot/to-json-schema";
 import {
@@ -18,6 +21,7 @@ import {
   ChangesOutput,
   DocumentOutput,
   GenericOutput,
+  NotificationsConfigSchema,
   PhaseParamsSchema,
   PlanOutput,
   ReviewOutput,
@@ -25,6 +29,7 @@ import {
   VerifyOutput,
   makePhaseParams,
 } from "../core/data_types.js";
+import { loadConfig } from "../core/agents.js";
 
 test("writes: three-state semantics — absent, null, and [] all mean something different", () => {
   const base = { name: "builder", prompt_engineering: { system: "s.md", user: "u.md" } };
@@ -75,4 +80,45 @@ test("every envelope type still converts to JSON Schema (the sf_report tool wiri
 
 test("PhaseParamsSchema itself (the one schema WITH a rawTransform) correctly refuses JSON Schema conversion", () => {
   assert.throws(() => toJsonSchema(PhaseParamsSchema), /raw_transform/);
+});
+
+test("NotificationsConfigSchema defaults to off, no channels", () => {
+  const parsed = v.parse(NotificationsConfigSchema, {});
+  assert.equal(parsed.events, "off");
+  assert.equal(parsed.timeout_ms, 5_000);
+  assert.deepEqual(parsed.channels, []);
+});
+
+test("a channel's own `events` overrides the top-level scope; unset inherits it", () => {
+  const parsed = v.parse(NotificationsConfigSchema, {
+    events: "errors",
+    channels: [{ kind: "slack" }, { kind: "teams", events: "all" }],
+  });
+  assert.equal(parsed.channels[0]!.events, undefined, "unset per-channel scope stays undefined, not defaulted to the top-level value — the caller inherits at read time");
+  assert.equal(parsed.channels[1]!.events, "all");
+});
+
+test("notifications survives loadConfig's merge — key-by-key like observability/quality, channels replaced wholesale on override", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-notify-merge-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "notifications:\n  events: off\n  channels:\n    - {kind: webhook, webhook_url_env: BASE_HOOK}\n",
+    );
+    writeFileSync(
+      override,
+      "notifications:\n  events: all\n  channels:\n    - {kind: slack, webhook_url_env: SLACK_WEBHOOK_URL}\n",
+    );
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.notifications.events, "all", "events: key-by-key, override wins");
+    assert.deepEqual(
+      cfg.notifications.channels.map((c) => c.kind),
+      ["slack"],
+      "channels: a whole-array replace, not an append — same semantics as quality.checks",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -9,6 +9,11 @@
 
 import type { EnvelopeBase, EventRecord, GateReport, Phase } from "./data_types.ts";
 import { makeEventRecord } from "./data_types.ts";
+import type { NotifyEvent } from "./notify/channel.ts";
+
+interface Notifier {
+  send(event: NotifyEvent): void;
+}
 
 const KIND_COLOR: Record<string, string> = { engineer: "cyan", agent: "magenta", code: "yellow" };
 const MAX_LINE = 160; // dynamic text (summaries, violations, errors) is clipped
@@ -60,7 +65,14 @@ export class Console {
   private results: string[] = []; // phase statuses, for the summary
   private finished = false; // the summary panel prints once
 
-  constructor(private tracer: Tracer, private adwId: string) {}
+  constructor(
+    private tracer: Tracer,
+    private adwId: string,
+    /** `null` when notifications are off — every call site below guards with `?.`. */
+    private notifier: Notifier | null = null,
+    /** The CLI chain name (`"plan-build-test"`), for a notification's title — see session.ts. */
+    private chainName: string = "adw",
+  ) {}
 
   // ── the one helper: print AND trace, always together ────────────────────
   private emit(line: string, level: string = "info"): void {
@@ -79,6 +91,15 @@ export class Console {
   // ── session ─────────────────────────────────────────────────────────────
   sessionStarted(adwId: string, engineer: string): void {
     this.emit(`${paint("bold cyan", "adw_id:")} ${paint("bold", adwId)}   ${paint("dim", "engineer")} ${engineer}`);
+    this.notifier?.send({
+      kind: "run_started",
+      level: "info",
+      title: `run started — ${this.chainName}`,
+      fields: [
+        ["adw_id", adwId],
+        ["engineer", engineer],
+      ],
+    });
   }
 
   sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string): void {
@@ -107,6 +128,17 @@ export class Console {
         payload: { message: plain, level: ok ? "info" : "error" },
       }),
     );
+    this.notifier?.send({
+      kind: ok ? "run_finished" : "run_failed",
+      level: ok ? "info" : "error",
+      title: `run ${ok ? "finished" : "failed"} — ${this.chainName}`,
+      fields: [
+        ["adw_id", this.adwId],
+        ["phases", `${passed}/${this.results.length}`],
+        ["tokens", tokens.toLocaleString()],
+        ["cost", `$${cost.toFixed(4)}`],
+      ],
+    });
   }
 
   // ── phases ──────────────────────────────────────────────────────────────
@@ -128,6 +160,19 @@ export class Console {
     let line = `  ${ok ? paint("green", "✓") : paint("red", "✗")} ${phase.params.name} ${paint("dim", `${seconds.toFixed(1)}s`)}`;
     if (!ok && phase.error) line += `  ${paint("red", clip(phase.error))}`;
     this.emit(line, ok ? "info" : "error");
+    if (!ok) {
+      this.notifier?.send({
+        kind: "phase_failed",
+        level: "error",
+        title: `phase failed — ${phase.params.name}`,
+        detail: phase.error ?? undefined,
+        fields: [
+          ["adw_id", this.adwId],
+          ["chain", this.chainName],
+          ["owner", phase.params.owner],
+        ],
+      });
+    }
     this.phaseId = "";
     this.phaseName = "";
   }
@@ -151,6 +196,15 @@ export class Console {
       `  ${paint("yellow", "⟳")} ${name} retry ${attempt}/${limit} ${paint("dim", `— same session · ${clip(reason)}`)}`,
       "warn",
     );
+    // info-level: routine self-healing, same as watch's own untracked
+    // orphan retries — visible under `events: all`, silent under `errors`.
+    this.notifier?.send({
+      kind: "phase_retry",
+      level: "info",
+      title: `retry ${attempt}/${limit} — ${name}`,
+      detail: reason,
+      fields: [["adw_id", this.adwId]],
+    });
   }
 
   // ── verification ────────────────────────────────────────────────────────

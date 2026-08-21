@@ -17,6 +17,7 @@ import { Console } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import { makeEventRecord, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
 import { ensureDir, nowIso } from "./utils.ts";
+import type { Notifier } from "./notify/notifier.ts";
 
 interface AgentMapEntry {
   session_id: string;
@@ -67,6 +68,10 @@ export interface RunInit {
   sfDir: string | null;
   /** Absolute. Resolved once, upstream, by paths.resolveDataPaths(). */
   dataDir: string;
+  /** The CLI chain name, for a notification's title — see session.ts. */
+  chainName?: string;
+  /** `null`/omitted when notifications are off (the default) or no channel resolved. */
+  notifier?: Notifier | null;
 }
 
 export class Run {
@@ -74,6 +79,8 @@ export class Run {
   adw_id: string;
   tracer: Tracer;
   console: Console;
+  /** `null` when notifications are off — `run.notify?.send(...)` at any future call site. */
+  notify: Notifier | null;
   engineer: string;
   phases: Phase[] = [];
   tokens = 0;
@@ -95,7 +102,8 @@ export class Run {
     this.cfg = init.cfg;
     this.adw_id = init.adwId;
     this.tracer = init.tracer;
-    this.console = new Console(init.tracer, init.adwId);
+    this.notify = init.notifier ?? null;
+    this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw");
     this.engineer = init.engineer;
     this.seq = init.tracer.maxPhaseSeq(init.adwId);
     this.repo_root = init.repoRoot;

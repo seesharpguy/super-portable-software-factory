@@ -462,12 +462,50 @@ export const WatchConfigSchema = v.object({
 });
 export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
 
+/**
+ * Optional outbound push for unattended work (`spf watch`, any chain run) —
+ * everything else (`spf doctor`, `list`, `sessions`, ...) is interactive, so
+ * it stays console-only on purpose; see `core/notify/notifier.ts`.
+ *
+ * `events` is the whole filter: "off" sends nothing, "errors" sends only
+ * NotifyEvents whose `level` is "error", "all" sends every curated
+ * milestone. A channel's own `events` overrides the top-level scope for
+ * just that channel (e.g. Slack gets everything, Teams gets errors only).
+ *
+ * `webhook_url_env` names the .env key holding the secret URL — never the
+ * URL itself, matching GITHUB_TOKEN/JIRA_API_TOKEN. Empty = the kind's own
+ * default key (see core/notify/notifier.ts's DEFAULT_ENV_KEY).
+ */
+export const NotifyScopeSchema = v.picklist(["off", "errors", "all"]);
+export type NotifyScope = v.InferOutput<typeof NotifyScopeSchema>;
+
+export const NotifyChannelKindSchema = v.picklist(["slack", "teams", "webhook"]);
+export type NotifyChannelKind = v.InferOutput<typeof NotifyChannelKindSchema>;
+
+export const NotifyChannelSchema = v.object({
+  kind: NotifyChannelKindSchema,
+  webhook_url_env: v.optional(v.string(), ""),
+  events: v.optional(v.nullable(NotifyScopeSchema)),
+  // Shown in warning lines / message footers to tell two channels of the
+  // same kind apart (e.g. two webhook: entries) — cosmetic only.
+  name: v.optional(v.string(), ""),
+});
+export type NotifyChannel = v.InferOutput<typeof NotifyChannelSchema>;
+
+export const NotificationsConfigSchema = v.object({
+  events: v.optional(NotifyScopeSchema, "off"),
+  timeout_ms: v.optional(v.number(), 5_000),
+  channels: v.optional(v.array(NotifyChannelSchema), () => []),
+});
+export type NotificationsConfig = v.InferOutput<typeof NotificationsConfigSchema>;
+
 export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
   agents: v.optional(v.array(AgentConfigSchema), () => []),
   quality: v.optional(QualityConfigSchema, () => v.parse(QualityConfigSchema, {})),
   watch: v.optional(WatchConfigSchema, () => v.parse(WatchConfigSchema, {})),
+  notifications: v.optional(NotificationsConfigSchema, () => v.parse(NotificationsConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
