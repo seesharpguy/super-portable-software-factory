@@ -16,7 +16,7 @@ import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type WatchDeps } from "../../core/watch.ts";
-import { findChain } from "../../chains/index.ts";
+import { findChain, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import type { SFConfig } from "../../core/data_types.ts";
 import { SfDb } from "../../ui/server/db.ts";
@@ -191,8 +191,8 @@ export async function watchCommand(argv: string[]): Promise<number> {
 
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
     const chainDef = findChain(cfg.watch.chain)!; // checked above
-    const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd };
-    const code = await chainDef.run(ctx);
+    const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd, chain_name: chainDef.name };
+    const code = await runChainDef(chainDef, ctx);
     if (code === 0) return { accepted: true, adwId: opts.adwId, detail: "" };
 
     let detail = `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`;

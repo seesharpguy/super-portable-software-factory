@@ -155,7 +155,9 @@ startup, before anything spawns:
    `authoring_chains.md`. The user prompt's `## Report` section must show
    exactly that JSON shape.
 
-Then name the agent in a chain's `REQUIRED_AGENTS` and call it.
+Then use it as a step's `owner` (`steps.build()`, `steps.plan()`, ...) or write
+a new step naming it — see `authoring_chains.md`. A chain's `requiredAgents` is
+derived from its step list, not hand-maintained.
 
 ## Write permissions — `writes` and `protected_files`
 

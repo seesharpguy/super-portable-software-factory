@@ -37,8 +37,13 @@ function finalizeWhenKilled(run: Run): void {
  * process happened to start; it is an explicit decision, threaded down from
  * the CLI/chain context. Defaults to `process.cwd()` only for direct callers
  * (tests, scratch scripts) that have no anchor of their own to pass.
+ *
+ * `chainName` is the CLI name (`"plan-build-test"`, not a module basename) —
+ * every chain is a composed step list now, not its own file, so there is no
+ * longer a `process.argv[1]` basename that means anything. Direct callers
+ * that have no chain of their own fall back to `"adw"`.
  */
-export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string): Run {
+export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string, chainName?: string): Run {
   const id = adwId || newId(8);
   const anchor = paths.resolveAnchor(cwd);
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
@@ -53,8 +58,7 @@ export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string): Run 
     dataDir: dataPaths.data_dir,
   });
   const scriptPath = process.argv[1] || "adw";
-  const adwName = path.basename(scriptPath, path.extname(scriptPath));
-  tracer.sessionStart(id, run.engineer, adwName);
+  tracer.sessionStart(id, run.engineer, chainName || "adw");
   // This process is the run. Record it before any phase opens, so a run that
   // hangs in its first agent call is still killable by adw_id.
   tracer.processStart(id, "adw", "", process.pid ?? -1, [path.basename(scriptPath), ...process.argv.slice(2)].join(" "));

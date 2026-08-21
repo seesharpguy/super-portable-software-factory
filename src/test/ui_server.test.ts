@@ -32,7 +32,7 @@ before(async () => {
 
   const dbPath = join(dir, "spf.db");
   const tracer = new Tracer(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
-  tracer.sessionStart(ADW_ID, "tester", "adw_quality");
+  tracer.sessionStart(ADW_ID, "tester", "quality");
   const phase = {
     phase_id: `${ADW_ID}_01_request`,
     adw_id: ADW_ID,

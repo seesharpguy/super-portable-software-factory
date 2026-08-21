@@ -206,6 +206,17 @@ export function runQuality(run: RunLike): QualityResult {
 }
 
 /**
+ * Log a deterministic block's verdict — the same shape every chain uses.
+ *
+ * Every quality/test phase in every chain reported this same summary by
+ * hand; one copy here instead of one per chain.
+ */
+export function record(ph: { log: (payload: Record<string, unknown>) => void }, result: QualityResult): void {
+  const passed = result.checks.filter((c) => c.passed).length;
+  ph.log({ passed: result.passed, checks: `${passed}/${result.checks.length}`, artifacts: result.artifacts.join(", ") });
+}
+
+/**
  * Wrap a deterministic result so an agent can be handed it directly.
  *
  * Agents hand each other typed envelopes; code blocks return QualityResult.

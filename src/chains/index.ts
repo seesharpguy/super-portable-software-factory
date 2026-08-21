@@ -2,128 +2,108 @@
  * The chain registry — the one place a CLI-facing short name maps to a
  * chain module. `spf list` reads this; `spf <name>`/`spf run <name>` dispatch
  * through it. Replaces guessing a module filename from the CLI argument.
+ *
+ * Every chain but `simple-sdlc` is a flat `steps` list composed from
+ * `./steps.ts`'s primitives — no module of its own, and no hand-written
+ * `phases`/`requiredAgents`/`requiredSuites` to keep in sync with what
+ * actually runs; those are derived from the step list itself.
+ * `simple-sdlc`'s three-commit, pinned-baseline shape is still imperative —
+ * see `./simple_sdlc.ts` — via the `run` escape hatch below.
  */
 import type { ChainContext } from "./context.ts";
-import * as adwPrompt from "./adw_prompt.ts";
-import * as adwScout from "./adw_scout.ts";
-import * as adwPlan from "./adw_plan.ts";
-import * as adwBuild from "./adw_build.ts";
-import * as adwPlanBuild from "./adw_plan_build.ts";
-import * as adwBuildTest from "./adw_build_test.ts";
-import * as adwPlanBuildTest from "./adw_plan_build_test.ts";
-import * as adwPlanBuildTestQuality from "./adw_plan_build_test_quality.ts";
-import * as adwBuildReview from "./adw_build_review.ts";
-import * as adwQuality from "./adw_quality.ts";
-import * as adwDocument from "./adw_document.ts";
-import * as adwSimpleSdlc from "./adw_simple_sdlc.ts";
+import * as steps from "./steps.ts";
+import * as simpleSdlc from "./simple_sdlc.ts";
 
 export interface ChainDefinition {
   /** The name typed on the CLI: `spf <name> "..."`. */
   name: string;
   describe: string;
   phases: string;
-  /** Static for most chains; adw_prompt's depends on --agent, so it's a function there. */
+  /** Static for most chains; prompt's depends on --agent, so it's a function there. */
   requiredAgents: string[] | ((options: Record<string, string>) => string[]);
   requiredSuites: string[];
-  run: (ctx: ChainContext, options?: Record<string, string>) => Promise<number>;
+  /** The declarative path — a flat step list, run by runChain() via steps.runSteps(). */
+  steps?: steps.Step[];
+  /** The imperative escape hatch for a chain too shaped by its own logic to be a flat list (simple-sdlc). */
+  run?: (ctx: ChainContext, options?: Record<string, string>) => Promise<number>;
+}
+
+/** Build a step-based ChainDefinition, deriving phases/requiredAgents/requiredSuites from its steps. */
+function stepChain(name: string, describe: string, list: steps.Step[]): ChainDefinition {
+  return {
+    name,
+    describe,
+    phases: steps.derivePhases(list),
+    requiredAgents: steps.deriveRequiredAgents(list),
+    requiredSuites: steps.deriveRequiredSuites(list),
+    steps: list,
+  };
 }
 
 export const CHAINS: ChainDefinition[] = [
-  {
-    name: "prompt",
-    describe: "one agent, one prompt, traced end to end — --agent <name> picks who (default: builder)",
-    phases: "engineer(request) -> <agent>",
-    requiredAgents: (options) => [options["agent"] ?? "builder"],
-    requiredSuites: [],
-    run: adwPrompt.main,
-  },
-  {
-    name: "scout",
-    describe: "read-only recon; nothing changes",
-    phases: "engineer(request) -> scout",
-    requiredAgents: adwScout.REQUIRED_AGENTS,
-    requiredSuites: adwScout.REQUIRED_SUITES,
-    run: adwScout.main,
-  },
-  {
-    name: "plan",
-    describe: "turn a request into an implementable plan",
-    phases: "engineer(request) -> planner",
-    requiredAgents: adwPlan.REQUIRED_AGENTS,
-    requiredSuites: adwPlan.REQUIRED_SUITES,
-    run: adwPlan.main,
-  },
-  {
-    name: "build",
-    describe: "implement an existing plan",
-    phases: "engineer(request) -> builder",
-    requiredAgents: adwBuild.REQUIRED_AGENTS,
-    requiredSuites: adwBuild.REQUIRED_SUITES,
-    run: adwBuild.main,
-  },
-  {
-    name: "plan-build",
-    describe: "small, well-understood work — plan, build, commit",
-    phases: "engineer(request) -> planner -> builder -> git(commit)",
-    requiredAgents: adwPlanBuild.REQUIRED_AGENTS,
-    requiredSuites: adwPlanBuild.REQUIRED_SUITES,
-    run: adwPlanBuild.main,
-  },
-  {
-    name: "build-test",
-    describe: "there is a suite to satisfy — build, test, bounded fix loop",
-    phases: "engineer(request) -> builder -> code(test) [-> builder(fix) -> code(test) ...]",
-    requiredAgents: adwBuildTest.REQUIRED_AGENTS,
-    requiredSuites: adwBuildTest.REQUIRED_SUITES,
-    run: adwBuildTest.main,
-  },
-  {
-    name: "plan-build-test",
-    describe: "the standard chain — plan, build, test, commit",
-    phases: "engineer(request) -> planner -> builder -> code(test) [-> fix loop] -> git(commit)",
-    requiredAgents: adwPlanBuildTest.REQUIRED_AGENTS,
-    requiredSuites: adwPlanBuildTest.REQUIRED_SUITES,
-    run: adwPlanBuildTest.main,
-  },
-  {
-    name: "plan-build-test-quality",
-    describe: "the repo has quality commands worth enforcing beyond tests — same, plus lint/typecheck/build gates",
-    phases: "engineer(request) -> planner -> builder -> code(quality:all) [-> fix loop] -> git(commit)",
-    requiredAgents: adwPlanBuildTestQuality.REQUIRED_AGENTS,
-    requiredSuites: adwPlanBuildTestQuality.REQUIRED_SUITES,
-    run: adwPlanBuildTestQuality.main,
-  },
-  {
-    name: "build-review",
-    describe: "\"is this what was asked for\" matters more than \"does it run\"",
-    phases: "engineer(request) -> builder -> reviewer [-> revise loop]",
-    requiredAgents: adwBuildReview.REQUIRED_AGENTS,
-    requiredSuites: adwBuildReview.REQUIRED_SUITES,
-    run: adwBuildReview.main,
-  },
-  {
-    name: "quality",
-    describe: "lint, typecheck, build — no agents at all",
-    phases: "engineer(request) -> code(quality:all)",
-    requiredAgents: adwQuality.REQUIRED_AGENTS,
-    requiredSuites: adwQuality.REQUIRED_SUITES,
-    run: adwQuality.main,
-  },
-  {
-    name: "document",
-    describe: "write up the work that was just done, from the diff",
-    phases: "engineer(request) -> code(changes) -> documenter",
-    requiredAgents: adwDocument.REQUIRED_AGENTS,
-    requiredSuites: adwDocument.REQUIRED_SUITES,
-    run: adwDocument.main,
-  },
+  stepChain("prompt", "one agent, one prompt, traced end to end — --agent <name> picks who (default: builder)", [
+    steps.request(),
+    steps.promptOnly(),
+  ]),
+
+  stepChain("scout", "read-only recon; nothing changes", [steps.request(), steps.scout()]),
+
+  stepChain("plan", "turn a request into an implementable plan", [steps.request(), steps.plan()]),
+
+  stepChain("build", "implement an existing plan", [steps.request(), steps.build({ fromPlan: false, retries: 1 })]),
+
+  stepChain("plan-build", "small, well-understood work — plan, build, commit", [
+    steps.request(),
+    steps.plan(),
+    steps.build(),
+    steps.commit(),
+  ]),
+
+  stepChain("build-test", "there is a suite to satisfy — build, test, bounded fix loop", [
+    steps.request(),
+    steps.build({ fromPlan: false }),
+    steps.fixLoop({ suite: "test" }),
+  ]),
+
+  stepChain("plan-build-test", "the standard chain — plan, build, test, commit", [
+    steps.request(),
+    steps.plan(),
+    steps.build(),
+    steps.fixLoop({ suite: "test" }),
+    steps.commit({ onlyIfAccepted: true }),
+  ]),
+
+  stepChain("plan-build-test-quality", "the repo has quality commands worth enforcing beyond tests — same, plus lint/typecheck/build gates", [
+    steps.request(),
+    steps.plan(),
+    steps.build(),
+    steps.fixLoop({ suite: "all" }),
+    steps.commit({ onlyIfAccepted: true }),
+  ]),
+
+  stepChain("build-review", '"is this what was asked for" matters more than "does it run"', [
+    steps.request(),
+    steps.build({ fromPlan: false }),
+    steps.reviseLoop(),
+  ]),
+
+  stepChain("quality", "lint, typecheck, build — no agents at all", [
+    steps.request({ description: "Capture why quality verification was requested" }),
+    steps.qualityCheck({ suite: "all" }),
+  ]),
+
+  stepChain("document", "write up the work that was just done, from the diff", [steps.request(), steps.changes(), steps.document()]),
+
   {
     name: "simple-sdlc",
     describe: "the work is real and its shape is not obvious — plan, build, test, review, document; 3 commits",
-    phases: "engineer(request) -> planner -> builder -> code(test) -> reviewer -> code(changes) -> documenter",
-    requiredAgents: adwSimpleSdlc.REQUIRED_AGENTS,
-    requiredSuites: adwSimpleSdlc.REQUIRED_SUITES,
-    run: adwSimpleSdlc.main,
+    phases:
+      "engineer(request) -> planner -> git(commit_plan) -> builder -> code(test) [-> builder(fix) -> code(test) ...] " +
+      "-> reviewer [-> builder(revise) -> reviewer ...] -> code(retest, if revised) -> git(commit_build) " +
+      "-> code(changes) -> documenter -> git(commit_docs)",
+    requiredAgents: simpleSdlc.REQUIRED_AGENTS,
+    requiredSuites: simpleSdlc.REQUIRED_SUITES,
+    run: simpleSdlc.main,
   },
 ];
 
@@ -133,4 +113,16 @@ export function findChain(name: string): ChainDefinition | undefined {
 
 export function resolveRequiredAgents(chain: ChainDefinition, options: Record<string, string>): string[] {
   return typeof chain.requiredAgents === "function" ? chain.requiredAgents(options) : chain.requiredAgents;
+}
+
+/**
+ * Run a chain, whichever path it defines: `run` (the imperative escape
+ * hatch) if it has one, otherwise `steps` through the shared driver. Both
+ * CLI dispatch sites (`spf <chain>` and `spf watch`) go through this, never
+ * `chain.run(...)` directly — the whole reason to route through here is that
+ * a `steps`-only chain has no `run` to call.
+ */
+export async function runChain(chain: ChainDefinition, ctx: ChainContext, options: Record<string, string> = {}): Promise<number> {
+  if (chain.run) return chain.run(ctx, options);
+  return steps.runSteps(ctx, resolveRequiredAgents(chain, options), chain.requiredSuites, chain.steps!, options);
 }

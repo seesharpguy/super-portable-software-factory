@@ -16,4 +16,6 @@ export interface ChainContext {
   adw_id: string | null;
   /** Absolute. The anchor session.ensure() resolves repo_root and data_dir from. */
   cwd: string;
+  /** The CLI name (`"plan-build-test"`), for session.ensure()'s trace record — see core/session.ts. */
+  chain_name: string;
 }

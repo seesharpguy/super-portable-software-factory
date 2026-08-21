@@ -1,7 +1,7 @@
 /** Shared by both `spf <chain> "..."` and `spf run <chain> "..."` — same dispatch. */
 import * as paths from "../../core/paths.ts";
 import { parseCli, resolvePrompt } from "../../core/utils.ts";
-import type { ChainDefinition } from "../../chains/index.ts";
+import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 
 const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base"];
@@ -23,11 +23,12 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
     config_paths: paths.resolveConfigPaths(anchor, options["config"]).paths,
     adw_id: options["adw-id"] ?? null,
     cwd: anchor.cwd,
+    chain_name: chain.name,
   };
 
   const chainOptions: Record<string, string> = {};
   if (options["agent"] !== undefined) chainOptions["agent"] = options["agent"];
   if (options["base"] !== undefined) chainOptions["base"] = options["base"];
 
-  return chain.run(ctx, chainOptions);
+  return runChain(chain, ctx, chainOptions);
 }

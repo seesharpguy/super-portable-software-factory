@@ -15,7 +15,7 @@ import { newId, nowIso } from "./utils.ts";
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
   adw_id        TEXT PRIMARY KEY,
-  adw_name      TEXT,                -- ADW script(s) run, e.g. "adw_plan + adw_build_test"
+  adw_name      TEXT,                -- chain(s) run, e.g. "plan + build-test"
   request       TEXT,
   status        TEXT,
   engineer      TEXT,

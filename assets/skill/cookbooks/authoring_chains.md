@@ -1,17 +1,19 @@
 # Authoring Chains
 
-Creating a new chain, extending an existing one, and adding the engine
-primitives a chain needs (an output type, a gate) are one skill with three
-doors. All three live in `src/` inside the SPF package itself — there is no
-per-repo copy to edit. If you need to change engine behavior for a specific
-target repo without forking the package, that's `spf eject` (prints the path
-to the installed package's `src/` for you to copy and load from your own
-`.spf/` — engine-level changes are the one thing `.spf/` config can't express).
+Composing a new chain, extending an existing one, and adding the engine
+primitives a chain needs (an output type, a gate, a step) are one skill with
+three doors. All three live in `src/` inside the SPF package itself — there
+is no per-repo copy to edit. If you need to change engine behavior for a
+specific target repo without forking the package, that's `spf eject` (prints
+the path to the installed package's `src/` for you to copy and load from your
+own `.spf/` — engine-level changes are the one thing `.spf/` config can't
+express).
 
 ## Step 1 — design the chain before writing code
 
 Lay out the phases as a table: name, kind, owner, output type (if `agent`),
-gates. This is the same table `spf list` will end up describing.
+gates. This is the same table `spf list` will end up describing (derived from
+the step list itself — see Step 2 — so it can't drift from what actually runs).
 
 | Phase | Kind | Owner | Output type | Gates |
 |---|---|---|---|---|
@@ -34,62 +36,52 @@ gates. This is the same table `spf list` will end up describing.
   (`quality.runSuite`, `changes.capture`, `run.git.commitAll`). If a human
   could write the exact steps down without judgment, it's `code`.
 
-## Step 2 — write the chain module
+## Step 2 — compose the chain from steps
 
-A chain is a module exporting `REQUIRED_AGENTS`, `REQUIRED_SUITES`, and
-`main(ctx: ChainContext): Promise<number>`. No shebang, no `import.meta.main`
-block — the CLI's chain registry (`src/chains/index.ts`) calls `main()`
-directly, and `dist/cli/bin.js` is the only entry point that ever runs.
+Almost every chain is a flat array of **steps** — named primitives from
+`src/chains/steps.ts`, each one a `run.phase(...)` call (or a small bounded
+group of them, for the two loops). There is no module to write and nothing to
+register anywhere else: a `CHAINS` entry built with `stepChain()` *is* the
+registration, in `src/chains/index.ts`.
 
 ```ts
-/**
- * ADW <Name> — <one sentence: what this chain is for and when to pick it>.
- *
- * Phases: engineer(request) -> scout -> planner -> builder -> code(test) -> git(commit)
- */
-import * as agents from "../core/agents.ts";
-import * as gates from "../core/gates.ts";
-import * as quality from "../core/quality.ts";
-import * as session from "../core/session.ts";
-import { BuildOutput, PlanOutput, makeAgentCall, makePhaseParams } from "../core/data_types.ts";
-import type { ChainContext } from "./context.ts";
-
-export const REQUIRED_AGENTS = ["planner", "builder"];
-export const REQUIRED_SUITES: string[] = ["test"]; // [] if this chain runs no quality suite
-
-export async function main(ctx: ChainContext): Promise<number> {
-  const { prompt, config_paths, adw_id, cwd } = ctx;
-  const cfg = agents.loadConfig(config_paths);
-  agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_SUITES, cwd);
-  const run = session.ensure(cfg, adw_id, cwd);
-
-  await run.phase(
-    makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }),
-    async (ph) => { ph.log({ input: prompt }); },
-  );
-
-  const plan = await run.phase(
-    makePhaseParams({ name: "plan", kind: "agent", owner: "planner", description: "Turn the request into an implementable plan" }),
-    (ph) => ph.call(makeAgentCall({ output_type: PlanOutput, prompt, gates: [gates.artifactsExist] })),
-  );
-
-  const build = await run.phase(
-    makePhaseParams({ name: "build", kind: "agent", owner: "builder", description: "Implement the plan" }),
-    (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt, previous: plan, gates: [gates.diffMatchesClaims] })),
-  );
-
-  await run.phase(
-    makePhaseParams({ name: "commit", kind: "code", owner: "git", description: "Commit the implementation" }),
-    async () => run.git.commitAll(build.commit_message || `spf: ${prompt.slice(0, 72)}`),
-  );
-
-  return run.finish();
-}
+stepChain("plan-build-test", "the standard chain — plan, build, test, commit", [
+  steps.request(),
+  steps.plan(),
+  steps.build(),
+  steps.fixLoop({ suite: "test" }),
+  steps.commit({ onlyIfAccepted: true }),
+]),
 ```
 
-Then register it in `src/chains/index.ts`'s `CHAINS` array (name, describe,
-phases string, `requiredAgents`/`requiredSuites`, `run`) — that's what makes
-it show up in `spf list` and dispatchable as `spf <name>`.
+`stepChain()` derives `phases` (the `spf list` display string),
+`requiredAgents`, and `requiredSuites` from the step list itself — nothing to
+keep in sync by hand. The available steps:
+
+| Step | What it replaces | Notes |
+|---|---|---|
+| `request({description?, logBaseline?})` | the opening `engineer(request)` phase | every chain starts with this |
+| `plan()` | a `planner` phase producing `PlanOutput` | — |
+| `build({fromPlan?, retries?})` | a `builder` phase producing `BuildOutput` | `fromPlan` only changes the phase's description |
+| `scout()` | a `scout` phase producing `ScoutOutput` | read-only |
+| `promptOnly()` | the `prompt` chain's one step | owner comes from `--agent`, default `builder` |
+| `qualityCheck({suite})` | one deterministic quality/test phase | never fails its own phase — see below |
+| `fixLoop({suite, max?, owner?})` | a bounded check→fix loop | owns its own iteration and phase naming (`test_1`, `fix_1`, ...) |
+| `reviseLoop({max?})` | a bounded review→revise loop | same idea, for `reviewer`/`builder` |
+| `changes({base?})` | a `git diff`-against-a-base code phase | feeds `document()` |
+| `document()` | a `documenter` phase | requires a preceding `changes()` |
+| `commit({onlyIfAccepted?})` | a `git commit` code phase | commits whatever the last agent step produced |
+
+**Why the loops are steps, not a `for` you write in the chain.** `fixLoop`
+and `reviseLoop` own their bounded iteration internally, so a chain's step
+list is always flat — no loop or conditional syntax at the composition
+layer. This is also what keeps a future declarative (YAML) chain tractable:
+it only ever needs to name steps and pass them tuning params.
+
+Steps read and write a shared `ChainState` (`prompt`, `options`, `previous` —
+the last agent envelope, `accepted`/`reason` for `run.finish()`, etc.) so a
+step never has to be told what the step before it produced; it just reads
+`state.previous`.
 
 **Before you ship it:** run it against a scratch repo (`spf <name> "..." --cwd
 /tmp/scratch-repo`), then `spf phases <adw_id>` and `spf events <adw_id>` to
@@ -98,47 +90,67 @@ expect, and open one `envelope.json` under
 `.spf/data/sessions/<adw_id>/<agent>/` to confirm it matches the type you
 declared.
 
+### When a chain doesn't fit the step vocabulary
+
+`simple-sdlc` (`src/chains/simple_sdlc.ts`) is the one exception: three
+commits, a pinned baseline, and a conditional retest don't collapse into a
+flat list. A chain like that is still a module exporting `REQUIRED_AGENTS`,
+`REQUIRED_SUITES`, and `main(ctx: ChainContext): Promise<number>`, registered
+in `CHAINS` with a `run:` field instead of `steps:`. Reuse
+`steps.startRun`/`commitEnvelope`/`logChangeset` and `quality.record` rather
+than re-copying them — read `simple_sdlc.ts` before reaching for this escape
+hatch; it is meant for the rare chain whose control flow genuinely doesn't
+reduce to a list, not a shortcut around learning the step vocabulary.
+
 ## Step 3 — add a phase to an existing chain
 
-Insert a `run.phase(...)` block in sequence; nothing else in the chain needs
-to change unless the new phase's output feeds a later one (thread it through
-as a local variable, the way `plan`/`build` are threaded above).
+Most of the time this means adding, removing, or reordering an entry in a
+`stepChain(...)` array in `src/chains/index.ts` — nothing else needs to
+change unless the new step's output feeds a later one (it will, automatically,
+if it writes to `state.previous`/`state.changeset`/etc., since every step
+reads from the same shared state).
 
-Removing a phase: delete the block; check nothing downstream reads its
-return value, and check `REQUIRED_AGENTS`/`REQUIRED_SUITES` no longer needs
-whatever only that phase used.
+If no existing step does what you need, write one in `src/chains/steps.ts`:
+a function returning a `Step` (a `(run, state) => Promise<void>`), doing one
+`run.phase(...)` call (or a small bounded group, if it's loop-shaped like
+`fixLoop`/`reviseLoop`). Declare what it needs via the optional
+`requiredAgents`/`requiredSuites`/`label` properties so
+`deriveRequiredAgents`/`deriveRequiredSuites`/`derivePhases` pick it up
+automatically — `makeStep(fn, meta)` attaches these for you.
 
-## Step 4 — add a bounded fix loop
+## Step 4 — the bounded fix loop, if you need a different shape than `fixLoop()` provides
 
-The pattern every quality-gated chain uses — run a check, and if it fails,
-loop the builder back in with the failure as `previous`, bounded so a chain
-can't spin forever:
+`steps.fixLoop({suite, max, owner})` already covers the common case — a
+known check, and if it fails, the builder repairs it, bounded so a chain
+can't spin forever, never leaving an unverified fix on the last iteration.
+Reach for it first. If you need a genuinely different shape (a different
+envelope type feeding the fix, say), its body in `src/chains/steps.ts` is the
+reference implementation to start from:
 
 ```ts
-const MAX_FIX_LOOPS = 3;
-let test: QualityResult | null = null;
-for (let i = 1; i <= MAX_FIX_LOOPS; i++) {
-  test = await run.phase(
+for (let i = 1; i <= max; i++) {
+  const result = await run.phase(
     makePhaseParams({ name: `test_${i}`, kind: "code", owner: "quality", description: "Run the suite" }),
-    async (ph) => { const result = quality.runTests(run); ph.log({ passed: result.passed }); return result; },
+    async (ph) => { const r = quality.runTests(run); quality.record(ph, r); return r; },
   );
-  if (test.passed) break;
-  await run.phase(
+  if (result.passed) break;
+  if (i === max) break; // never leave an unverified fix on the table
+  state.previous = await run.phase(
     makePhaseParams({ name: `fix_${i}`, kind: "agent", owner: "builder", retries: 1, description: "Repair what the suite reported" }),
-    (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt, previous: quality.asEnvelope(test!, "tests"), gates: [gates.diffMatchesClaims] })),
+    (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: quality.asEnvelope(result, "tests"), gates: [gates.diffMatchesClaims] })),
   );
 }
-return run.finish(test !== null && test.passed, `the suite still failed after ${MAX_FIX_LOOPS} fix attempt(s)`);
 ```
 
 A failing suite does **not** fail its own phase — the runner did its job,
 the *code under test* is what failed. It's `run.finish()`'s job, at the end,
-to decide whether the whole run is accepted.
+to decide whether the whole run is accepted — which is why a step sets
+`state.accepted`/`state.reason` rather than throwing.
 
 ## Adding an engine primitive
 
-These live in `src/core/`, not in a chain. Chains stay thin: sequencing
-only, no business logic.
+These live in `src/core/`, not in a chain or a step. Chains and steps stay
+thin: sequencing only, no business logic.
 
 ### Adding an output type
 
@@ -153,7 +165,7 @@ export const MyOutput = envelopeType("MyOutput", {
 export type MyOutputT = v.InferOutput<typeof MyOutput.schema>;
 ```
 
-Then the two other legs of the synced triad: the calling chain's
+Then the two other legs of the synced triad: the calling step's
 `output_type: MyOutput`, and the agent's `user.md` `## Report` section
 showing the exact JSON shape. All three must move together — see
 `references/handoff.md`.

@@ -1,5 +1,5 @@
 /**
- * ADW Simple SDLC — plan, build, test, review, document, committing as it goes.
+ * Simple SDLC — plan, build, test, review, document, committing as it goes.
  *
  * Usage:
  *   spf simple-sdlc "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4]
@@ -36,14 +36,20 @@
  * The documenter measures against the commit this run STARTED from, not against
  * `main`, because by then the run has moved `main` itself. That baseline is
  * pinned before the first commit phase and printed in the request phase.
+ *
+ * This is the one chain still shaped by hand rather than by a `steps` list —
+ * three commits, a pinned baseline, and a conditional retest don't collapse
+ * cleanly into the flat, loop-free vocabulary `./steps.ts` provides for every
+ * other chain. It still reuses that module's shared helpers (`startRun`,
+ * `commitEnvelope`, `logChangeset`) rather than keeping its own copies.
  */
 
-import * as agents from "../core/agents.ts";
 import * as changes from "../core/changes.ts";
 import * as gates from "../core/gates.ts";
 import * as quality from "../core/quality.ts";
-import * as session from "../core/session.ts";
+import { DOCUMENT_NOTES } from "../core/prompts.ts";
 import type { ChainContext } from "./context.ts";
+import { commitEnvelope, logChangeset, startRun } from "./steps.ts";
 import {
   BuildOutput,
   DocumentOutput,
@@ -53,38 +59,18 @@ import {
   makeChangeCapture,
   makePhaseParams,
   type BuildOutputT,
-  type EnvelopeBase,
   type QualityResult,
   type ReviewOutputT,
 } from "../core/data_types.ts";
-import type { PhaseHandle } from "../core/runner.ts";
-import type { Run } from "../core/runner.ts";
 
 export const REQUIRED_AGENTS = ["planner", "builder", "reviewer", "documenter"];
 export const REQUIRED_SUITES: string[] = ["test"];
 const MAX_FIX_LOOPS = 3;
 const MAX_REVISION_LOOPS = 2;
 
-const DOCUMENT_NOTES =
-  "Read diff_path in full before writing. Document only what the diff shows, then copy the write-up into app_docs/ as your task describes.";
-
-/** Commit what the preceding phase produced, in that agent's own words. */
-function commit(run: Run, ph: PhaseHandle, envelope: EnvelopeBase & { commit_message?: string }): void {
-  const message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
-  ph.log({ sha: run.git.commitAll(message), message });
-}
-
-/** Log a deterministic block's verdict — the same shape every ADW uses. */
-function record(ph: PhaseHandle, result: QualityResult): void {
-  const passed = result.checks.filter((c) => c.passed).length;
-  ph.log({ passed: result.passed, checks: `${passed}/${result.checks.length}`, artifacts: result.artifacts.join(", ") });
-}
-
 export async function main(ctx: ChainContext): Promise<number> {
-  const { prompt, config_paths, adw_id, cwd } = ctx;
-  const cfg = agents.loadConfig(config_paths);
-  agents.validate(cfg, REQUIRED_AGENTS, REQUIRED_SUITES, cwd);
-  const run = session.ensure(cfg, adw_id, cwd);
+  const { prompt } = ctx;
+  const run = startRun(ctx, REQUIRED_AGENTS, REQUIRED_SUITES);
   const baseline = run.git.rev("HEAD"); // pinned before this run commits anything
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
@@ -98,7 +84,7 @@ export async function main(ctx: ChainContext): Promise<number> {
 
   await run.phase(
     makePhaseParams({ name: "commit_plan", kind: "code", owner: "git", description: "Put the spec on record before any code exists to blur it" }),
-    async (ph) => commit(run, ph, plan),
+    async (ph) => commitEnvelope(run, ph, plan),
   );
 
   let build: BuildOutputT = await run.phase(
@@ -117,12 +103,13 @@ export async function main(ctx: ChainContext): Promise<number> {
       }),
       async (ph) => {
         const result = quality.runTests(run);
-        record(ph, result);
+        quality.record(ph, result);
         return result;
       },
     );
 
     if (test.passed) break;
+    if (i === MAX_FIX_LOOPS) break; // never leave an unverified fix on the table
 
     build = await run.phase(
       makePhaseParams({
@@ -167,7 +154,7 @@ export async function main(ctx: ChainContext): Promise<number> {
       }),
       async (ph) => {
         const result = quality.runTests(run);
-        record(ph, result);
+        quality.record(ph, result);
         return result;
       },
     );
@@ -180,20 +167,14 @@ export async function main(ctx: ChainContext): Promise<number> {
   if (verified) {
     await run.phase(
       makePhaseParams({ name: "commit_build", kind: "code", owner: "git", description: "Land the code only now: green suite, approved review" }),
-      async (ph) => commit(run, ph, build),
+      async (ph) => commitEnvelope(run, ph, build),
     );
 
     const changeset = await run.phase(
       makePhaseParams({ name: "changes", kind: "code", owner: "git", description: "Diff the whole run against its pinned baseline, for the documenter" }),
       async (ph) => {
         const result = changes.capture(run, makeChangeCapture({ base: baseline }));
-        ph.log({
-          base: `${result.base.label} @ ${result.base.commit.slice(0, 7)}`,
-          reason: result.base.reason,
-          files: result.files.length + result.untracked.length,
-          lines: `+${result.insertions} -${result.deletions}`,
-          diff: result.diff_path,
-        });
+        logChangeset(ph, result);
         if (result.empty) {
           throw new Error(`nothing changed since ${result.base.label} (${result.base.reason}) — there is nothing to document.`);
         }
@@ -216,7 +197,7 @@ export async function main(ctx: ChainContext): Promise<number> {
 
     await run.phase(
       makePhaseParams({ name: "commit_docs", kind: "code", owner: "git", description: "Ship the write-up in its own commit, beside the code it describes" }),
-      async (ph) => commit(run, ph, document),
+      async (ph) => commitEnvelope(run, ph, document),
     );
   }
 
