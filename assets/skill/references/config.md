@@ -12,7 +12,7 @@ always shows the resolved, merged result for the repo you're in.
 1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
 2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
-   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`
+   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`
    merge key-by-key — `notifications.channels` replaces wholesale, same as
    `quality.checks`; `agents` merges by `name`: a matching name patches that
    entry, a new name appends).
@@ -83,6 +83,11 @@ agents:
 |---|---|---|
 | `db` | path | The trace sqlite db. Default `.spf/data/spf.db`. |
 | `poll_ms` | int | UI live-poll cadence. Default `500`. |
+| `otel.endpoint` | string | OTLP/HTTP collector endpoint (e.g., `https://your-host/v1/traces`). Omit to disable OTel export. |
+| `otel.headers` | object | Optional HTTP headers (e.g., auth tokens). Each value is a string. |
+| `otel.service_name` | string | Optional service name in exported spans. Default `spf`. |
+
+**No ambient env activation**: OTEL export requires explicit `observability.otel` config — the `OTEL_EXPORTER_OTLP_ENDPOINT` shell variable is never consulted. An unrelated shell env variable must not become a data-egress switch.
 
 ### `quality`
 
@@ -191,6 +196,33 @@ a check); a failed POST logs one line and is swallowed, never changing the
 run's exit code. See the main README's "Notifications" section for how to
 get each channel's webhook URL, and `spf init`'s interview, which asks for
 this section and collects the URL straight into `.env`.
+
+### `review`
+
+The human sign-off gate in front of `simple-sdlc`'s `commit_build` phase —
+the one place in this codebase an AI reviewer's `approved` flag alone would
+otherwise gate a commit (`build-review` has no commit step, and no other
+chain runs a reviewer at all). See the main README's "Isolation" section for
+the full behavior; this is just the two knobs.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `require_human_signoff` | bool | `false` (default, this release): an unattended run (`spf watch`, CI, no TTY) proceeds on the reviewer's verdict alone, with a loud warning printed and traced every time. `true`: an unattended run instead fails the phase closed — rerun attended, or route the work through `spf watch`, whose own human gate is the PR merge. Never affects an attended run's prompt, which is always shown either way. |
+| `signoff_timeout_seconds` | number ≥1 | Bounds the attended confirm prompt. Default `300`. Not required to be an integer — `1.5` parses and becomes a 1500ms timer. Expiry resolves to the prompt's own default — **not accepted**, same as if the answer had been "no" — never an unbounded `stdin` read inside `run.phase()`. |
+
+```yaml
+review:
+  require_human_signoff: false   # this release's default — see above
+  signoff_timeout_seconds: 300
+```
+
+The confirm prompt's own default is always `false` — never `review.approved`,
+so an AI's own verdict can never auto-approve itself by way of an unanswered
+default. A `Signed-off-by:` trailer is appended to the commit only on a
+recorded explicit "yes," built from `git config user.name`/`user.email` at
+the repo (never `ENGINEER_NAME`/`$USER`, which are spoofable and fall back to
+the literal string `"engineer"`) — an unattended run's AI-only commit never
+carries one, because nobody said yes to attest to.
 
 ### `agents[]`
 

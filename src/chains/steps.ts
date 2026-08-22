@@ -72,6 +72,7 @@ import {
 import type { ChangeSet } from "../core/data_types.ts";
 import { Run, type PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
+import type { CommitterIdentity } from "../core/git_helper.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -157,9 +158,70 @@ export function startRun(ctx: ChainContext, requiredAgents: string[], requiredSu
   return run;
 }
 
-/** Commit an envelope in its own author's words — the message-fallback four chains repeated. */
-export function commitEnvelope(run: Run, ph: PhaseHandle, envelope: EnvelopeBase & { commit_message?: string }): void {
-  const message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
+/** A trailer line: `Key: value...`, one per line, no blank lines inside the block. */
+const TRAILER_LINE = /^[A-Za-z][A-Za-z0-9-]*: .+$/;
+
+/**
+ * Append `trailer` as a proper trailer: joined into the message's existing
+ * trailer block (its LAST paragraph, if every line there is already
+ * `Key: value` shaped) or, failing that, appended after a blank line of its
+ * own — never glued onto prose with no separation. `commitEnvelope` builds
+ * its message from agent-authored free text, so this cannot assume the
+ * message already ends cleanly.
+ *
+ * A single paragraph is never treated as a trailer block, even when it
+ * happens to be `Key: value` shaped — a lone paragraph is the commit's
+ * SUBJECT line, and every conventional-commit subject (`feat: add X`,
+ * `fix: handle Y`) matches that shape. Joining onto it directly (no blank
+ * line) would glue the trailer onto the subject itself — invisible to git
+ * as a trailer at all (`git interpret-trailers` requires the trailer block
+ * to be its own paragraph, separated from the subject by a blank line).
+ * Only a message that ALREADY has a body — at least two paragraphs — can
+ * have an existing trailer block to join.
+ */
+function appendTrailer(message: string, trailer: string): string {
+  const trimmed = message.replace(/\s+$/, "");
+  if (!trimmed) return trailer;
+  const paragraphs = trimmed.split(/\n[ \t]*\n/);
+  const last = paragraphs[paragraphs.length - 1];
+  const lastLines = last.split("\n").map((l) => l.trim()).filter(Boolean);
+  const isTrailerBlock = paragraphs.length > 1 && lastLines.length > 0 && lastLines.every((l) => TRAILER_LINE.test(l));
+  if (isTrailerBlock) {
+    paragraphs[paragraphs.length - 1] = `${last}\n${trailer}`;
+    return paragraphs.join("\n\n");
+  }
+  return `${trimmed}\n\n${trailer}`;
+}
+
+/**
+ * Commit an envelope in its own author's words — the message-fallback four
+ * chains repeated.
+ *
+ * `signoff`, when passed, MUST be a human's own recorded explicit "yes" —
+ * see `chains/simple_sdlc.ts`'s `decideSignoff`, the only caller that ever
+ * passes one. It is appended as a real `Signed-off-by:` trailer (blank-line
+ * separated, or joined into an existing trailer block — see
+ * `appendTrailer`). Every other caller (every chain built from `./steps.ts`'s
+ * own `commit()`, plus `simple_sdlc`'s `commit_plan`/`commit_docs`) passes
+ * nothing, because nothing gates those commits on an AI verdict — the
+ * `fixLoop` chains gate on tests, which is the philosophy working. Omitted
+ * -> no trailer, ever: a trailer that lies launders an AI verdict into a git
+ * attestation.
+ */
+export function commitEnvelope(
+  run: Run,
+  ph: PhaseHandle,
+  envelope: EnvelopeBase & { commit_message?: string },
+  signoff?: CommitterIdentity | null,
+): void {
+  let message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
+  if (signoff) {
+    const trailerLine = `Signed-off-by: ${signoff.name} <${signoff.email}>`;
+    // An agent that already wrote its own sign-off line (verbatim) does not
+    // get a second, duplicate one.
+    const alreadyPresent = message.split("\n").some((line) => line.trim() === trailerLine);
+    if (!alreadyPresent) message = appendTrailer(message, trailerLine);
+  }
   ph.log({ sha: run.git.commitAll(message), message });
 }
 

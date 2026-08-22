@@ -2,14 +2,31 @@
  * Tracer: every event lands in JSONL and SQLite AS IT HAPPENS.
  *
  * Files are the raw record; spf.db is the queryable mirror the UI polls.
- * No push transport — the flow is always: agents -> sqlite -> web ui.
  * WAL mode so the UI can read while ADW processes write.
+ *
+ * No push transport in the CONTROL flow — that is always, still, and only:
+ * agents -> sqlite -> web ui. SQLite is the source of truth; nothing
+ * downstream of it can affect a phase, a gate, or a run outcome.
+ *
+ * The one amendment: when (and only when) `observability.otel` is configured,
+ * each write method below ends with a single fan-out line to an optional
+ * OtelExporter — a lossy, allowlisted PROJECTION of what was just written,
+ * pushed to an OTLP endpoint fire-and-forget. It is deliberately NOT a second
+ * record: it never blocks, never throws into a caller (see `fanOut`), drops
+ * spans under backpressure, and carries only the allowlisted subset of fields
+ * (never `EventRecord.payload`, never the request text, never envelope
+ * contents — `core/otel.ts`'s header has the full list and the reasons).
+ * Methods whose data is entirely outside that allowlist —
+ * `sessionRequest` (the operator's prompt), `envelopeRow` (agent output),
+ * `processStart`/`processEnd` (pids) — have NO fan-out line on purpose. Do not
+ * add one.
  */
 
 import { Database } from "./sqlite.ts";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { AgentConfig, EventRecord, GateReport, Phase } from "./data_types.ts";
+import type { OtelExporter } from "./otel.ts";
 import { newId, nowIso } from "./utils.ts";
 
 const SCHEMA = `
@@ -102,8 +119,11 @@ export class Tracer {
   db: Database;
   dbPath: string;
   eventsJsonl: string;
+  /** `null` unless `observability.otel` is configured — see the header. */
+  otel: OtelExporter | null;
 
-  constructor(dbPath: string, eventsJsonl: string) {
+  constructor(dbPath: string, eventsJsonl: string, otel?: OtelExporter | null) {
+    this.otel = otel ?? null;
     mkdirSync(path.dirname(dbPath), { recursive: true });
     this.dbPath = dbPath;
     this.eventsJsonl = eventsJsonl;
@@ -125,6 +145,26 @@ export class Tracer {
       if (!columns.has(column)) {
         this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
       }
+    }
+  }
+
+  /**
+   * The ONE door to the optional otel projection, and the only reason a fan-out
+   * line is safe to put at the end of a synchronous write method: it is a
+   * no-op when unconfigured, and it swallows everything. An exporter bug, a
+   * malformed span, an exhausted queue — none of it may ever surface as a
+   * failed phase, because export is not allowed to dispose of anything. The
+   * exporter's own methods are synchronous enqueues; the network happens later,
+   * on an unref'd timer.
+   */
+  private fanOut(action: (otel: OtelExporter) => void): void {
+    if (!this.otel) return;
+    try {
+      action(this.otel);
+    } catch {
+      // Deliberately silent: a logged line per event on a hot path would be
+      // its own failure mode, and otel.ts already logs its own send failures
+      // exactly once.
     }
   }
 
@@ -151,27 +191,33 @@ export class Tracer {
         record.started_at || ts,
         record.ended_at ?? null,
       );
+    this.fanOut((otel) => otel.recordEvent(record, eventId, ts)); // otel projection — see fanOut
     return eventId;
   }
 
   // ── sessions ────────────────────────────────────────────────────────────
   sessionStart(adwId: string, engineer: string, adwName?: string | null): void {
+    const startedAt = nowIso();
     this.db
       .query(
         `INSERT INTO sessions (adw_id, status, engineer, started_at) VALUES (?,?,?,?)
          ON CONFLICT(adw_id) DO UPDATE SET status='running'`,
       )
-      .run(adwId, "running", engineer, nowIso());
-    if (!adwName) return;
-    // A joined session chains ADWs — record each distinct one, in run order.
-    const row = this.db.query("SELECT adw_name FROM sessions WHERE adw_id=?").get(adwId) as
-      | { adw_name: string | null }
-      | undefined;
-    const names = row?.adw_name ? row.adw_name.split(" + ") : [];
-    if (!names.includes(adwName)) {
-      names.push(adwName);
-      this.db.query("UPDATE sessions SET adw_name=? WHERE adw_id=?").run(names.join(" + "), adwId);
+      .run(adwId, "running", engineer, startedAt);
+    if (adwName) {
+      // A joined session chains ADWs — record each distinct one, in run order.
+      const row = this.db.query("SELECT adw_name FROM sessions WHERE adw_id=?").get(adwId) as
+        | { adw_name: string | null }
+        | undefined;
+      const names = row?.adw_name ? row.adw_name.split(" + ") : [];
+      if (!names.includes(adwName)) {
+        names.push(adwName);
+        this.db.query("UPDATE sessions SET adw_name=? WHERE adw_id=?").run(names.join(" + "), adwId);
+      }
     }
+    // otel projection: the run's clock only. `engineer` is a person's name —
+    // outside the allowlist, and not a measure of anything.
+    this.fanOut((otel) => otel.recordSessionStart(startedAt));
   }
 
   sessionRequest(adwId: string, request: string): void {
@@ -183,6 +229,7 @@ export class Tracer {
       .query("UPDATE sessions SET status=?, ended_at=? WHERE adw_id=?")
       .run(ok ? "success" : "fail", nowIso(), adwId);
     this.processesEndAll(adwId); // nothing of this run is alive any more
+    this.fanOut((otel) => otel.recordSessionFinish(ok)); // otel projection: emits the root run span, once
   }
 
   sessionAddUsage(adwId: string, tokens: number, cost: number): void {
@@ -265,6 +312,9 @@ export class Tracer {
         phase.started_at ?? null,
         phase.ended_at ?? null,
       );
+    // otel projection: a no-op on the start-of-phase upsert (no ended_at yet) —
+    // phase spans are emitted at phase END only. `phase.error` never crosses.
+    this.fanOut((otel) => otel.recordPhase(phase));
   }
 
   // ── envelopes / gates / agent sessions ──────────────────────────────────
@@ -294,6 +344,10 @@ export class Tracer {
         JSON.stringify(report.checks),
         nowIso(),
       );
+    // otel projection: gate name + verdict + violation COUNT as a span event on
+    // the phase span. The violation and check TEXT stays here in SQLite — it
+    // quotes the agent's claim and the repo's files.
+    this.fanOut((otel) => otel.recordGate(phase, gate, report, attempt));
   }
 
   /**
@@ -323,5 +377,10 @@ export class Tracer {
          last_used_at=excluded.last_used_at`,
       )
       .run(adwId, agent.name, agent.coding_agent, agent.model, agent.color, sessionId, contextTokens, contextWindow, ts, ts);
+    // otel projection: the TYPED source of an agent's model + backend for its
+    // span (agents.ts writes this row before the agent_end event, which is what
+    // lets otel.ts avoid reading the agent_start payload at all). `sessionId`
+    // is not exported — it is a coding-agent handle, not a measure.
+    this.fanOut((otel) => otel.recordAgentSession(agent));
   }
 }

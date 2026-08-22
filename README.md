@@ -169,9 +169,11 @@ Two things worth knowing before pointing a full roster at local models: tool-cal
 
 Agent isolation in SPF is enforced **after the fact**, not upfront. This matters because the `tools:` capability list is not a sandbox — a `bash` tool can run `git checkout` to discard changes, and a `write` tool can reach any path, regardless of the allowlist you write. So permission is verified the way every other claim in this system is: the working tree is fingerprinted before an agent runs, then compared after. If the agent touched anything outside its `writes:` allowlist (or a `protected_files:` path it wasn't given access to), the phase fails and anything the agent *introduced* outside its allowlist is rolled back. What it cannot undo, it names: a file that was already dirty before the agent ran is left alone rather than discarded, and uncommitted work the agent reverted cannot be restored. And because the check is post-hoc and tree-scoped, nothing outside the working tree is in scope at all — a push, a network call, a write above `repo_root`. When running an agent on the claude_code backend, SPF spawns it with `--permission-mode bypassPermissions --dangerously-skip-permissions` because the backend has no need to enforce — SPF will enforce in code instead, within those bounds.
 
-Today, `spf watch`'s PR-merge is the only human accountability checkpoint: the daemon opens a PR for each automated run, and a human approves the merge. For any other workflow, this enforcement is the backbone of letting a bounded agent proposal survive code's inspection without a human having to read it in between — but it is bounded, not a sandbox, and the scope above is what a reviewer should actually rely on.
+For unattended work, `spf watch`'s PR-merge is the only human accountability checkpoint: the daemon opens a PR for each automated run, and a human approves the merge. For any other workflow, this enforcement is the backbone of letting a bounded agent proposal survive code's inspection without a human having to read it in between — but it is bounded, not a sandbox, and the scope above is what a reviewer should actually rely on. (Attended `simple-sdlc` runs get a second checkpoint of their own — see below.)
 
 See `core/permissions.ts` for the implementation — the snapshot/compare logic, not the config terms.
+
+`simple-sdlc`'s `commit_build` phase is the one place in this codebase where an AI reviewer's `approved` flag alone would otherwise gate a commit — everywhere else the reviewer either doesn't run (`plan-build-test`, ...) or nothing commits on its verdict (`build-review` has no commit step). Run attended, that phase asks before committing — default **no**, never `review.approved` itself, bounded by `review.signoff_timeout_seconds` (default 300s; expiry answers no) — and only an explicit, recorded "yes" ever earns a `Signed-off-by:` trailer, built from `git config user.name`/`user.email` at the repo, never an env var. Run unattended (`spf watch`, CI), there is nobody to ask: `spf watch`'s own human gate is the PR merge above, informed by the reviewer's digest in the PR body, and the phase either proceeds on the AI verdict alone with a loud warning (`review.require_human_signoff: false`, this release's default — fail-open until `spf watch` itself becomes signoff-aware) or fails closed and asks you to rerun attended (`require_human_signoff: true`). See `assets/skill/references/config.md`'s `review` section for the two knobs, and [`assets/skill/cookbooks/ocr_reviewer.md`](assets/skill/cookbooks/ocr_reviewer.md) if you want the reviewer to fold a third-party review tool's findings into its own verdict as one more piece of evidence.
 
 ---
 
@@ -509,6 +511,34 @@ genuinely informative, just worth expecting.
 
 Full field reference: `spf install-skill`'s installed skill
 (`references/config.md`).
+
+## Observability
+
+Every run produces a complete trace: all events, phases, agent calls, and tool invocations stream into SQLite as they happen. The local trace stays the source of truth — prompts, envelopes, tool arguments, and your source code never leave the machine. Token counts and costs ride alongside.
+
+```bash
+spf ui                           # browser-based visualizer over the trace
+spf events <adw_id> --follow    # live event stream, tailable
+```
+
+The default export is SQLite only (`.spf/data/spf.db`). Optionally, you can export **spans only** (phase/agent/tool timing and allowlisted metadata) to an OpenTelemetry collector for integration with a trace UI or observability platform:
+
+```yaml
+observability:
+  db: .spf/data/spf.db
+  poll_ms: 500
+  otel:
+    endpoint: https://your-otel-collector/v1/traces
+    service_name: spf                    # optional; default "spf"
+    headers:                             # optional; e.g. auth headers
+      Authorization: Bearer ...
+```
+
+OTEL export is **explicit config only** — an unrelated shell variable cannot become a data-egress switch. OTEL is strictly a spans-only export: each phase is a span with child spans for agent calls and tool calls, annotated with phase status, agent model, token/cost counts, and gate results. This export never blocks a run: if the collector is slow or unreachable, SPF continues normally and logs a single line per run when export fails (not one per batch), and reports the number of dropped spans on the final flush as `spf.otel.dropped_spans` for the backend to surface. The complete trace stays in SQLite regardless.
+
+**Attribute allowlist**: only phase name/kind/owner/status, chain name, adw_id, agent name/model/coding_agent, gate name + passed + violation count, token counts and cost, and durations. Prompts, envelopes, tool arguments, and your source code never leave — that guarantee is enforced in code, not just in documentation.
+
+See `assets/skill/references/config.md`'s `observability` section for the full field reference.
 
 ## What's in this repo
 

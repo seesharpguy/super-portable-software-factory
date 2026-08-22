@@ -14,6 +14,7 @@ import * as paths from "../../core/paths.ts";
 import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
+import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
@@ -59,6 +60,42 @@ async function probeGet(url: string): Promise<ProbeResult> {
     return { ok: true, status: res.status };
   } catch (error) {
     return { ok: false, error: (error as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * An EMPTY OTLP trace batch, POSTed exactly the way `core/otel.ts` posts a
+ * real one (same URL, same configured headers) — `{"resourceSpans":[]}` is
+ * valid OTLP that records nothing, so this probe cannot create a phantom trace
+ * in the operator's backend. Never throws: an unreachable collector is a
+ * finding to print, not a doctor crash. A 4xx is still a useful answer (the
+ * host is up; the path or the auth header is wrong), so the status is reported
+ * rather than collapsed into ok/not-ok.
+ */
+async function probeOtel(url: string, headers: Record<string, string> | undefined): Promise<ProbeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(headers ?? {}) },
+      body: JSON.stringify({ resourceSpans: [] }),
+      signal: controller.signal,
+    });
+    return { ok: true, status: res.status };
+  } catch (error) {
+    // undici collapses every connection-level failure to "fetch failed" and
+    // puts the actual reason (DNS, ECONNREFUSED, a TLS error — each with a
+    // different fix) on `error.cause`. Fold it in before redacting so `spf
+    // doctor`, whose whole job is telling the operator what's wrong, can.
+    const err = error as Error & { cause?: { message?: string; code?: string } };
+    const cause = err.cause;
+    const detail = cause ? ` (${cause.code ?? cause.message ?? String(cause)})` : "";
+    // redact(): a fetch failure routinely embeds the URL it attempted, and the
+    // endpoint may carry userinfo — the same rule the exporter's own log obeys.
+    return { ok: false, error: redact(`${err.message}${detail}`, [url, ...Object.values(headers ?? {})]) };
   } finally {
     clearTimeout(timer);
   }
@@ -508,6 +545,42 @@ export async function doctorCommand(argv: string[]): Promise<number> {
         cfg.watch.issue_provider === "github"
           ? "github supports issue authoring (createIssue/sub-issues)"
           : `watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — the refine lane needs "github" (Jira issue authoring isn't implemented yet)`,
+      );
+    }
+  }
+
+  // OTel span export: informational in every direction. It is off unless
+  // `observability.otel` exists (no env var can turn it on — see
+  // core/otel.ts), and when it IS on, an unreachable collector must never fail
+  // `spf doctor` any more than it fails a run: export is a lossy projection of
+  // a trace SQLite already holds. What doctor adds is visibility — "configured
+  // but nothing is listening" is otherwise a single redacted log line inside a
+  // run nobody re-reads.
+  if (cfg.observability.otel) {
+    const url = resolveTracesUrl(cfg.observability.otel.endpoint);
+    const insecure = url.startsWith("http://") && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/)/.test(url);
+    check(
+      report,
+      "observability.otel",
+      true,
+      // endpointLabel() drops any userinfo and query string — both are places
+      // a token gets smuggled into a URL, and doctor's output gets pasted into
+      // issues. Header VALUES are never printed at all, only their key names.
+      `span export -> ${endpointLabel(url)} (service_name: ${cfg.observability.otel.service_name}` +
+        `${cfg.observability.otel.headers ? `, headers: ${Object.keys(cfg.observability.otel.headers).join(", ")}` : ""})` +
+        (insecure ? " — WARNING: plain http to a non-loopback host sends this telemetry in cleartext" : ""),
+      insecure ? "warn" : "info",
+    );
+    if (!flags["no-probe"]) {
+      const result = await probeOtel(url, cfg.observability.otel.headers);
+      check(
+        report,
+        "observability.otel reachability",
+        true, // informational/warning only — same rule as the base-URL probes above
+        result.ok
+          ? `reachable: POST ${endpointLabel(url)} (empty batch) -> HTTP ${result.status}${result.status >= 400 ? " — reachable but rejecting; check the path (/v1/traces) and headers" : ""}`
+          : `unreachable: POST ${endpointLabel(url)} -> ${result.error}`,
+        result.ok && result.status < 400 ? "info" : "warn",
       );
     }
   }

@@ -123,6 +123,14 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #   channels:
 #     - kind: slack            # slack | teams | webhook
 #       webhook_url_env: SLACK_WEBHOOK_URL   # default for slack; TEAMS_WEBHOOK_URL / SPF_WEBHOOK_URL for the others
+
+# Uncomment to change the human sign-off gate in front of simple-sdlc's
+# commit_build phase — the one place an AI reviewer's approved flag alone
+# can gate a commit. See assets/skill/references/config.md's "review"
+# section for the full behavior.
+# review:
+#   require_human_signoff: false   # true = an unattended simple-sdlc run fails closed instead of committing on the reviewer's verdict alone
+#   signoff_timeout_seconds: 300
 `;
 
 // .spf/spf.config.yaml and .spf/prompt_engineering/ stay tracked — they're

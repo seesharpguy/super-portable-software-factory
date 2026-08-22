@@ -41,9 +41,8 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
     // A real TTY (isInteractive(), from cli/ask.ts) is the one case an
     // agent step could plausibly block on a human — everything else (a CI
     // run, a piped `spf <chain>`, spf watch's own dispatch) is unattended.
-    // Nothing reads this yet; it exists so a future gate/prompt-shaping
-    // decision has a single source of truth instead of each site re-deriving
-    // "am I attended" its own way.
+    // Read by `simple_sdlc.ts`'s sign-off phase (`isInteractive() &&
+    // !ctx.unattended`, folded into `canPrompt`) — see `decideSignoff`.
     unattended: !isInteractive(),
     // `undefined` for every built-in chain (ChainDefinition.source is only
     // ever set for a chain loaded from `.spf/chains/*.yaml` — see

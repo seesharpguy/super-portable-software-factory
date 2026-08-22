@@ -25,6 +25,7 @@ import {
   NotificationsConfigSchema,
   PhaseParamsSchema,
   PlanOutput,
+  ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
   VerifyOutput,
@@ -119,6 +120,90 @@ test("notifications survives loadConfig's merge — key-by-key like observabilit
       ["slack"],
       "channels: a whole-array replace, not an append — same semantics as quality.checks",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ReviewConfigSchema: defaults to require_human_signoff=false, signoff_timeout_seconds=300", () => {
+  const parsed = v.parse(ReviewConfigSchema, {});
+  assert.equal(parsed.require_human_signoff, false, "this release fails OPEN by default — see the schema's own doc comment");
+  assert.equal(parsed.signoff_timeout_seconds, 300);
+});
+
+// The silent-drop trap: mergeRawConfig (core/agents.ts) is a FIXED-SHAPE
+// object literal, so a `review:` key in a real config file that isn't named
+// on both sides of that literal is dropped before SFConfigSchema ever sees
+// it — parsing would then succeed anyway, quietly, on the schema default.
+// This is adversarial history on this branch, not a hypothetical: it is
+// exactly the bug `observability`/`notifications` already guard against, and
+// `review` gets the same guard the day it is added.
+test("review survives loadConfig's merge — the silent-drop trap mergeRawConfig's fixed-shape literal sets, for a single config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-review-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, "review:\n  require_human_signoff: true\n  signoff_timeout_seconds: 45\n");
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.review.require_human_signoff, true, "a review: value from a real config file must reach SFConfig, not be dropped by mergeRawConfig's object literal");
+    assert.equal(cfg.review.signoff_timeout_seconds, 45);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review merges key-by-key across two layered config files, like observability/notifications", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-review-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "review:\n  require_human_signoff: false\n  signoff_timeout_seconds: 120\n");
+    writeFileSync(override, "review:\n  require_human_signoff: true\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.review.require_human_signoff, true, "override wins for the key it names");
+    assert.equal(cfg.review.signoff_timeout_seconds, 120, "unset in the override -> the base's value survives, key-by-key, not a whole-block replace");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// observability.otel is the one nested OBJECT under a top-level key that
+// mergeRawConfig spreads field-by-field, so its merge semantics differ from its
+// siblings' and are worth pinning: `otel:` is replaced as a WHOLE OBJECT by an
+// override that names it (you never want a half-merged endpoint/headers pair —
+// that is how an auth token gets POSTed to the wrong collector), while
+// `observability`'s other keys still merge key-by-key around it. Also the
+// activation contract: absent by default, so no repo starts exporting because
+// it upgraded.
+test("observability.otel survives loadConfig's merge — absent by default, whole-object replace on override", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-otel-merge-test-"));
+  try {
+    const bare = join(dir, "bare.yaml");
+    writeFileSync(bare, "observability:\n  poll_ms: 250\n");
+    assert.equal(loadConfig([bare]).observability.otel, undefined, "no otel: block -> export stays off, the default for every repo");
+
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "observability:\n  poll_ms: 250\n  otel:\n    endpoint: http://base-collector:4318/v1/traces\n    headers: {authorization: base-token}\n    service_name: base\n",
+    );
+    writeFileSync(override, "observability:\n  otel:\n    endpoint: http://override-collector:4318/v1/traces\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.observability.poll_ms, 250, "observability's other keys still merge key-by-key around otel");
+    assert.equal(cfg.observability.otel?.endpoint, "http://override-collector:4318/v1/traces");
+    assert.equal(cfg.observability.otel?.headers, undefined, "whole-object replace: the base's auth header does NOT follow the override's endpoint");
+    assert.equal(cfg.observability.otel?.service_name, "spf", "and the base's service_name doesn't either — the schema default applies");
+
+    // A single config file must reach SFConfig at all — the silent-drop trap
+    // mergeRawConfig's fixed-shape object literal sets for any new key.
+    const single = join(dir, "single.yaml");
+    writeFileSync(single, "observability:\n  otel:\n    endpoint: https://collector.example.com/v1/traces\n");
+    assert.equal(loadConfig([single]).observability.otel?.endpoint, "https://collector.example.com/v1/traces");
+
+    // A typo fails at config load, not as a silent per-run export failure.
+    const bad = join(dir, "bad.yaml");
+    writeFileSync(bad, "observability:\n  otel:\n    endpoint: not-a-url\n");
+    assert.throws(() => loadConfig([bad]), /invalid config/, "endpoint is URL-validated");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

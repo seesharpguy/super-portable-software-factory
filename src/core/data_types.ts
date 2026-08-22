@@ -451,9 +451,38 @@ export const ConfigDefaultsSchema = v.object({
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
+/**
+ * OpenTelemetry span export — OFF unless this block exists, and `endpoint` is
+ * required BY THIS SCHEMA rather than defaulted, because presence of the block
+ * IS the activation switch. No ambient environment variable can turn export on
+ * (notably NOT `OTEL_EXPORTER_OTLP_ENDPOINT`): an unrelated shell variable must
+ * never become a data-egress switch. See `core/otel.ts`'s header for the full
+ * set of constraints, including the attribute allowlist that keeps repo source
+ * code (tool args, prompts, envelopes, the request text) off the wire.
+ *
+ * `endpoint` is URL-validated so a typo fails at config load rather than as a
+ * silent per-run export failure. Either the full OTLP traces path
+ * (`https://collector:4318/v1/traces`) or a bare origin (`/v1/traces` is
+ * appended — see `resolveTracesUrl`). `headers` is where a collector's auth
+ * token goes; its VALUES are treated as secrets and never logged.
+ */
+export const OTelConfigSchema = v.object({
+  endpoint: v.pipe(v.string(), v.url()),
+  headers: v.optional(v.record(v.string(), v.string()), undefined),
+  service_name: v.optional(v.string(), "spf"),
+});
+export type OTelConfig = v.InferOutput<typeof OTelConfigSchema>;
+
 export const ObservabilityConfigSchema = v.object({
   db: v.optional(v.string(), ".spf/data/spf.db"),
   poll_ms: v.optional(v.number(), 500),
+  // Absent by default. `agents.ts`'s mergeRawConfig spreads `observability`
+  // field-by-field, so this nested object merges as a WHOLE-OBJECT replace on
+  // override — an override that sets `otel:` replaces the base's entirely,
+  // which is the semantics you want for an endpoint + its headers (a
+  // half-merged pair of the two would send tokens to the wrong collector).
+  // Pinned by a merge-survival test in src/test/data_types.test.ts.
+  otel: v.optional(OTelConfigSchema),
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
 
@@ -574,6 +603,35 @@ export const NotificationsConfigSchema = v.object({
 });
 export type NotificationsConfig = v.InferOutput<typeof NotificationsConfigSchema>;
 
+/**
+ * `simple_sdlc`'s human-signoff gate — see the ACCEPTED ADVERSARIAL
+ * AMENDMENTS on the review-accountability thread. `simple_sdlc.ts`'s
+ * `commit_build` predicate is the ONLY place in this codebase where an AI
+ * reviewer's `approved` flag gates a commit; `decideSignoff` (same file)
+ * turns that PROPOSAL into a human's DISPOSAL wherever a human is at the
+ * keyboard, and reads these two knobs when there isn't one.
+ *
+ * `require_human_signoff` defaults to FALSE for this release, deliberately:
+ * flipping it to fail-closed-by-default would break every unattended
+ * `simple-sdlc` run (`spf watch`, CI) the day this shipped, before `spf
+ * watch` itself is signoff-aware (its own human gate today is the PR merge,
+ * now informed by the reviewer digest — see `cli/commands/watch.ts`). An
+ * unattended run instead proceeds on the AI verdict alone with a LOUD
+ * one-time warning (`decideSignoff`'s `AI_ONLY_SIGNOFF_WARNING`) until that
+ * changes. Set `true` and an unattended run fails the phase CLOSED instead —
+ * see `decideSignoff`'s fail-closed branch — rather than silently
+ * auto-approving because nobody typed at a prompt that was never shown.
+ *
+ * `signoff_timeout_seconds` bounds the interactive prompt itself: expiry
+ * means NOT accepted (the confirm's own default), never an unbounded stdin
+ * read inside `run.phase()` — see `cli/ask.ts`'s `confirm(..., {timeoutMs})`.
+ */
+export const ReviewConfigSchema = v.object({
+  require_human_signoff: v.optional(v.boolean(), false),
+  signoff_timeout_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 300),
+});
+export type ReviewConfig = v.InferOutput<typeof ReviewConfigSchema>;
+
 export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
@@ -581,6 +639,7 @@ export const SFConfigSchema = v.object({
   quality: v.optional(QualityConfigSchema, () => v.parse(QualityConfigSchema, {})),
   watch: v.optional(WatchConfigSchema, () => v.parse(WatchConfigSchema, {})),
   notifications: v.optional(NotificationsConfigSchema, () => v.parse(NotificationsConfigSchema, {})),
+  review: v.optional(ReviewConfigSchema, () => v.parse(ReviewConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
