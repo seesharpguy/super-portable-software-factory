@@ -47,6 +47,17 @@ export interface ChainRunResult {
   adwId: string;
   /** Shown to the engineer via a `blocked` comment on a failed/no-op run. */
   detail: string;
+  /**
+   * A short, already-sanitized/truncated digest of the reviewer's verdict
+   * (approved/blocking/findings), read back best-effort from the sessions DB
+   * — see `cli/commands/watch.ts`'s `runChain`. `undefined` when the chain
+   * that ran has no reviewer step, or the DB read/parse failed; `runIssue`
+   * below falls back to `reviewRequired` to tell those two apart in the PR
+   * body and `pr_opened` notification.
+   */
+  reviewSummary?: string;
+  /** Whether the chain that ran declares a "reviewer" in its `requiredAgents` — distinguishes "reviewer approved" from "nothing reviewed this change" when `reviewSummary` is absent. */
+  reviewRequired?: boolean;
 }
 
 /** One issue the refine lane created — enough for `finishSpec`'s summary comment and the marker's idempotency record. */
@@ -383,6 +394,15 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     }
 
     wtGit.push("origin", branch);
+    // The human merging this PR sees whatever the reviewer found — or, if
+    // nothing reviewed this change at all, is told that plainly rather than
+    // left to assume a silent approval. `reviewSummary` is already
+    // sanitized/truncated by the caller (see runChain's own doc comment).
+    const reviewLine = result.reviewSummary
+      ? result.reviewSummary
+      : result.reviewRequired
+        ? "Reviewer ran, but no verdict could be read back from the session data."
+        : `Nothing reviewed this change — chain \`${deps.chain}\` has no reviewer step.`;
     // No cross-linking magic keyword here on purpose (a code host paired
     // with a different tracker has no "Closes #n" convention to hook into
     // — see provider.ts) — the issue id in the title/body is plain text
@@ -391,7 +411,7 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     const pr = await deps.codeHost.openPr({
       branch,
       title: `${issue.title} (${issue.id})`,
-      body: `Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${adwId}\`, issue ${issue.id}.`,
+      body: `Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${adwId}\`, issue ${issue.id}.\n\n${reviewLine}`,
       base: deps.baseBranch,
     });
     await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, pr: pr.number, attempt: 0 });
@@ -401,7 +421,13 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
       kind: "pr_opened",
       level: "info",
       title: `PR #${pr.number} opened`,
-      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
+      detail: reviewLine,
+      fields: [
+        ["issue", issue.id],
+        ["title", issue.title],
+        ["chain", deps.chain],
+        ["review", result.reviewSummary ? "reviewed" : result.reviewRequired ? "reviewer ran, no verdict" : "not reviewed"],
+      ],
       url: pr.url || undefined,
     });
   } catch (error) {

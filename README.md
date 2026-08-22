@@ -142,6 +142,16 @@ The command/launcher must support the full Claude Code CLI interface: `-p` for p
 
 ---
 
+## Isolation: post-hoc, not a sandbox
+
+Agent isolation in SPF is enforced **after the fact**, not upfront. This matters because the `tools:` capability list is not a sandbox — a `bash` tool can run `git checkout` to discard changes, and a `write` tool can reach any path, regardless of the allowlist you write. So permission is verified the way every other claim in this system is: the working tree is fingerprinted before an agent runs, then compared after. If the agent touched anything outside its `writes:` allowlist (or a `protected_files:` path it wasn't given access to), the phase fails and anything the agent *introduced* outside its allowlist is rolled back. What it cannot undo, it names: a file that was already dirty before the agent ran is left alone rather than discarded, and uncommitted work the agent reverted cannot be restored. And because the check is post-hoc and tree-scoped, nothing outside the working tree is in scope at all — a push, a network call, a write above `repo_root`. When running an agent on the claude_code backend, SPF spawns it with `--permission-mode bypassPermissions --dangerously-skip-permissions` because the backend has no need to enforce — SPF will enforce in code instead, within those bounds.
+
+Today, `spf watch`'s PR-merge is the only human accountability checkpoint: the daemon opens a PR for each automated run, and a human approves the merge. For any other workflow, this enforcement is the backbone of letting a bounded agent proposal survive code's inspection without a human having to read it in between — but it is bounded, not a sandbox, and the scope above is what a reviewer should actually rely on.
+
+See `core/permissions.ts` for the implementation — the snapshot/compare logic, not the config terms.
+
+---
+
 ## Phases: three lanes, one primitive
 
 Every run is a sequence of phases, and every phase is the same async scope no matter who owns it.
@@ -214,7 +224,7 @@ Files stay the raw record (`envelope.json`, `agent_map.json`, Flue's own convers
 
 ```bash
 spf list                                              # every chain, its phases, what it needs
-spf <chain> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4] [--cwd <dir>]
+spf <chain> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4] [--cwd <dir>] [--suite <name>]
 ```
 
 | Chain | Phases | Reach for it when |
@@ -231,6 +241,8 @@ spf <chain> "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id a1b2c3d4
 | `plan-build-test-quality` | same, plus lint/typecheck/build gates | the repo has quality commands worth enforcing |
 | `document` | code(git diff), documenter | write up what just shipped |
 | `simple-sdlc` | plan, build, test, review, document | the work is real and its shape is not obvious |
+
+A chain with a compiled-in quality suite (`build-test`, `plan-build-test`, `plan-build-test-quality`, `quality`) accepts `--suite <name>` to override it for one run — `spf list` marks which chains this applies to with `(--suite overrides)`. `simple-sdlc`'s suite is not overridable this way; passing `--suite` to it is rejected rather than silently ignored.
 
 `--adw-id` is optional everywhere. Omit it and a fresh id is minted and printed. Supply it and the run joins that session — same session directory, each agent **resumes its existing context window** instead of starting cold. That's how you chain runs:
 

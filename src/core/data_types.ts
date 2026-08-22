@@ -423,6 +423,15 @@ export const AgentConfigSchema = v.object({
   //   [...]     -> only these. A trailing "/" means a directory prefix; a "*"
   //                makes it a glob; anything else is an exact path.
   writes: v.optional(v.nullable(v.array(v.string()))),
+  // Opt-in env allowlist for this agent's subprocess/sandbox environment.
+  // undefined/null (the default) -> unrestricted: the full operator
+  // environment is passed through, byte-identical to before this field
+  // existed — same three-state shape as `writes` above, so `null` (the
+  // spelling config.md teaches for "unrestricted") parses instead of
+  // rejecting. Set -> only these keys, plus the baseline
+  // (PATH/HOME/USER/LANG/TERM/TMPDIR) that agent_flue.ts's local() sandbox
+  // would keep anyway.
+  env_allowlist: v.optional(v.nullable(v.array(v.string()))),
 });
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
@@ -577,12 +586,27 @@ export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
 // ── Tracing ──────────────────────────────────────────────────────────────────
 
+/** The full set of event kinds any tracer.event()/makeEventRecord() call site emits — kept in sync with src/ui/shared/types.ts's EventType. */
+export const EVENT_RECORD_TYPES = [
+  "phase_start",
+  "agent_start",
+  "tool_call",
+  "handoff",
+  "gate_pass",
+  "gate_fail",
+  "log",
+  "agent_end",
+  "phase_end",
+  "error",
+] as const;
+export const EventRecordTypeSchema = v.picklist(EVENT_RECORD_TYPES);
+export type EventRecordType = v.InferOutput<typeof EventRecordTypeSchema>;
+
 /** One traced event, always logged against adw_id + phase. */
 export interface EventRecord {
   adw_id: string;
   phase_id: string;
-  // phase_start | agent_start | tool_call | handoff | gate_pass | gate_fail | log | agent_end | phase_end | error
-  type: string;
+  type: EventRecordType;
   name: string;
   payload: Record<string, unknown>;
   parent_id: string;
@@ -594,7 +618,7 @@ export interface EventRecord {
   ended_at?: string | null;
 }
 
-export function makeEventRecord(input: Partial<EventRecord> & { adw_id: string; type: string }): EventRecord {
+export function makeEventRecord(input: Partial<EventRecord> & { adw_id: string; type: EventRecordType }): EventRecord {
   return {
     phase_id: "",
     name: "",
@@ -644,6 +668,12 @@ export interface AgentRequest {
   output_type_name: string;
   cwd: string; // set from run.repo_root — the codebase root agents work in
   flue_db_path: string; // Flue-specific: its own conversation store, consulted only by agent_flue.ts
+  // Set only when the agent config carries an env_allowlist — the filtered
+  // env to hand the backend's subprocess/sandbox. undefined (the common
+  // case) means "pass the operator's own environment through unfiltered",
+  // which both agent_cc.ts and agent_flue.ts implement as `request.env ??
+  // operatorEnv()`.
+  env?: Record<string, string>;
 }
 
 /**

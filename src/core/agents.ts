@@ -29,9 +29,33 @@ import {
   type Phase,
   type SFConfig,
 } from "./data_types.ts";
-import { newId } from "./utils.ts";
+import { newId, operatorEnv } from "./utils.ts";
 
 const JSON_FIX_ATTEMPTS = 2; // continue-with-correction attempts for malformed JSON
+
+// Kept alongside agent_flue.ts's own comment on this same list — `local()`'s
+// sandbox keeps these regardless of any `env` override, so an allowlist that
+// omitted them would silently lose them there but not on agent_cc.ts's plain
+// `spawn()`. Folding them in here keeps both backends' filtered env identical.
+const ENV_BASELINE_KEYS = ["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR"];
+
+/**
+ * `undefined` (no `env_allowlist` configured — the default) means "don't
+ * filter at all"; both backends treat that as `request.env ?? operatorEnv()`,
+ * i.e. today's unfiltered behavior, byte-identical. Configured, this filters
+ * the operator's own environment down to the named keys plus the baseline
+ * `local()` would keep anyway.
+ */
+export function agentEnv(agent: AgentConfig): Record<string, string> | undefined {
+  if (!agent.env_allowlist) return undefined;
+  const operator = operatorEnv();
+  const keep = new Set([...ENV_BASELINE_KEYS, ...agent.env_allowlist]);
+  const env: Record<string, string> = {};
+  for (const key of keep) {
+    if (operator[key] !== undefined) env[key] = operator[key];
+  }
+  return env;
+}
 
 export class GateFailure extends Error {}
 
@@ -103,7 +127,7 @@ export function loadConfig(configPaths: string[]): SFConfig {
   }
   const defaults = raw.defaults || {};
   for (const agent of raw.agents || []) {
-    for (const key of ["coding_agent", "model", "thinking", "color", "tools", "writes"]) {
+    for (const key of ["coding_agent", "model", "thinking", "color", "tools", "writes", "env_allowlist"]) {
       if (key in defaults && !(key in agent)) agent[key] = defaults[key];
     }
     if (!("harness_engineering" in agent)) agent.harness_engineering = defaults.harness_engineering || [];
@@ -280,6 +304,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       output_type_name: call.output_type.name,
       cwd: run.repo_root,
       flue_db_path: path.join(run.data_dir, "flue.db"),
+      env: agentEnv(agent),
     };
     const forward = eventForwarder(run, phase, agent.name, agent.coding_agent);
     const onSpawn = (pid: number) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`);

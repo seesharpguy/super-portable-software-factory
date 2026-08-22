@@ -270,7 +270,7 @@ export async function run(
   const cmdSpec = process.env.SPF_CLAUDE_CMD || "claude";
   const [cmd, ...cmdArgs] = cmdSpec.split(/\s+/);
   const fullArgs = [...cmdArgs, ...args];
-  const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: operatorEnv() });
+  const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: request.env ?? operatorEnv() });
   // The prompt travels as a positional argv element, not stdin — closing it
   // immediately avoids a real, observed ~3s "no stdin data received" stall
   // where `claude` otherwise waits to see whether anything is piped in.

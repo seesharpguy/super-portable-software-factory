@@ -72,6 +72,8 @@ agents:
 | `color` | hex string | Lane color fallback for agents that don't set their own. |
 | `harness_engineering` | string[] | **Must stay `[]`** — no analogue on any current backend; a non-empty entry fails validate(). |
 | `tools` | string[] \| null | Roster-wide allowlist. Unset/null = every built-in tool usable. |
+| `writes` | string[] \| null | Roster-wide write allowlist, back-filled onto any agent that doesn't set its own — see `writes` under `agents[]` below for the three-state semantics. |
+| `env_allowlist` | string[] \| null | Roster-wide env allowlist, back-filled the same way as `writes`. Unset/null = every agent gets the full operator environment (see `env_allowlist` under `agents[]`). |
 | `protected_files` | string[] | Paths no agent may touch unless named in its own `writes`. Default `[".spf/", "spf.config.yaml"]`. |
 | `data_dir` | path | Runtime home, repo-relative. Default `.spf/data`. |
 
@@ -200,6 +202,7 @@ this section and collects the URL straight into `.env`.
 | `coding_agent`, `model`, `thinking`, `color`, `harness_engineering` | no | Override the matching `defaults` key. |
 | `tools` | no | Allowlist. Omitting it means all tools usable. A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. `undefined`/`null` = unrestricted (still barred from `protected_files`); `[]` = no repo writes; a list = only those paths (trailing `/` = directory prefix, `*` = one path segment, `**` = crosses segments, anything else = exact path). |
+| `env_allowlist` | no | Opt-in filter on the environment handed to this agent's subprocess/sandbox. `undefined` (default) = the full operator environment, unchanged. A list = only those keys, plus the baseline (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`) either backend keeps regardless. |
 
 Output types are deliberately absent from config: an entry defines who an
 agent *is*; the call site defines how it's *used*.

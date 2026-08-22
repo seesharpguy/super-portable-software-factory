@@ -25,6 +25,22 @@ import type {
   WatchMarker,
   WatchState,
 } from "../core/issues/provider.js";
+import { escapeForMarkup, formatReviewDigest, truncateDigest } from "../cli/commands/watch.js";
+import type { ReviewOutputT } from "../core/data_types.js";
+
+/** A minimal, schema-shaped ReviewOutputT — only the fields formatReviewDigest reads. */
+function reviewOutput(overrides: Partial<ReviewOutputT> = {}): ReviewOutputT {
+  return {
+    status: "success",
+    summary: "",
+    artifacts: [],
+    notes_for_next_agent: "",
+    approved: false,
+    findings: [],
+    blocking: [],
+    ...overrides,
+  };
+}
 
 interface FakeEntry {
   issue: Issue;
@@ -78,12 +94,12 @@ class FakeProvider implements IssueProvider {
 /** In-memory fake `CodeHostProvider` — separate from `FakeProvider`, mirroring the real split. */
 class FakeCodeHost implements CodeHostProvider {
   prs = new Map<number, PrStatus>();
-  openedPrs: Array<{ title: string; branch: string }> = [];
+  openedPrs: Array<{ title: string; branch: string; body: string }> = [];
   nextPrNumber = 1000;
 
-  async openPr(opts: { branch: string; title: string }): Promise<PrRef> {
+  async openPr(opts: { branch: string; title: string; body: string }): Promise<PrRef> {
     const number = this.nextPrNumber++;
-    this.openedPrs.push({ title: opts.title, branch: opts.branch });
+    this.openedPrs.push({ title: opts.title, branch: opts.branch, body: opts.body });
     this.prs.set(number, { merged: false, state: "open", ciStatus: "pending" });
     return { number, branch: opts.branch, url: `https://example.invalid/pr/${number}` };
   }
@@ -484,6 +500,71 @@ test("reconcileOrphans: a routine orphan resume/retry notifies nothing — only 
   assert.deepEqual(events, []);
 });
 
+// ── the review digest threaded into the PR + pr_opened notification ────────
+
+test("claimNewWork: a reviewSummary from runChain lands in the PR body and the pr_opened event's detail/fields", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("60", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    notify,
+    runChain: async (opts) => ({
+      accepted: true,
+      adwId: opts.adwId,
+      detail: "",
+      reviewRequired: true,
+      reviewSummary: "Reviewer verdict: changes requested.\nBlocking:\n- add a test",
+    }),
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.match(codeHost.openedPrs[0]!.body, /Automated by `spf watch`/);
+  assert.match(codeHost.openedPrs[0]!.body, /Reviewer verdict: changes requested\.\nBlocking:\n- add a test/);
+  const prOpened = events.find((e) => e.kind === "pr_opened")!;
+  assert.equal(prOpened.detail, "Reviewer verdict: changes requested.\nBlocking:\n- add a test");
+  assert.deepEqual(prOpened.fields.find(([k]) => k === "review"), ["review", "reviewed"]);
+});
+
+test("claimNewWork: a reviewer-required chain with no readable verdict says so, distinctly from no reviewer at all", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("61", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    notify,
+    runChain: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", reviewRequired: true }),
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.match(codeHost.openedPrs[0]!.body, /no verdict could be read back/);
+  const prOpened = events.find((e) => e.kind === "pr_opened")!;
+  assert.deepEqual(prOpened.fields.find(([k]) => k === "review"), ["review", "reviewer ran, no verdict"]);
+});
+
+test("claimNewWork: a chain with no reviewer step says nothing reviewed this change", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("62", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  // makeDeps' default runChain returns neither reviewRequired nor reviewSummary.
+  const deps = makeDeps(provider, codeHost, { notify });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.match(codeHost.openedPrs[0]!.body, /Nothing reviewed this change — chain `plan-build-test` has no reviewer step\./);
+  const prOpened = events.find((e) => e.kind === "pr_opened")!;
+  assert.deepEqual(prOpened.fields.find(([k]) => k === "review"), ["review", "not reviewed"]);
+});
+
 // ── the refine lane ──────────────────────────────────────────────────────
 
 test("refineBranchNameFor: same sanitizer as branchNameFor, different prefix", () => {
@@ -673,6 +754,67 @@ test("claim -> refine -> published fires issue_claimed then spec_refined, both i
 
   assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "spec_refined"]);
   assert.ok(events.every((e) => e.level === "info"));
+});
+
+// ── escapeForMarkup / truncateDigest / formatReviewDigest ───────────────────
+// These three are what actually assembles the digest — the tests above only
+// exercise core/watch.ts's three-way reviewLine selection via a stubbed
+// runChain, so none of them ever call into these. Slack/GitHub markup
+// escaping is the one security-relevant behavior spec item B calls out by
+// name (a reviewer's findings are LLM-authored, hence untrusted), so it needs
+// direct coverage.
+
+test("escapeForMarkup: a Slack link-forgery attempt is neutralized, and & is escaped without double-escaping", () => {
+  const escaped = escapeForMarkup("<https://evil.example/|click here> & enjoy");
+  assert.equal(escaped, "&lt;https://evil.example/|click here&gt; &amp; enjoy");
+  assert.ok(!escaped.includes("<") && !escaped.includes(">"), "no raw angle bracket must survive — that's what prevents a forged Slack mrkdwn link");
+});
+
+test("formatReviewDigest: an approved review's met findings are the actual signal, and are surfaced (not silently dropped)", () => {
+  const review = reviewOutput({
+    approved: true,
+    findings: [
+      { requirement: "endpoint returns 200", met: true, evidence: "curl output attached" },
+      { requirement: "handles missing auth header", met: true, evidence: "" },
+      { requirement: "logs the request id", met: true, evidence: "trace shows request_id field" },
+    ],
+    blocking: [],
+  });
+  const digest = formatReviewDigest(review);
+  assert.match(digest, /^Reviewer verdict: approved\./);
+  assert.match(digest, /Verified 3 requirement\(s\):/);
+  assert.match(digest, /- endpoint returns 200 — curl output attached/);
+  assert.match(digest, /- handles missing auth header/);
+  assert.match(digest, /- logs the request id — trace shows request_id field/);
+});
+
+test("formatReviewDigest: blocking items and unmet findings are escaped before being joined in", () => {
+  const review = reviewOutput({
+    approved: false,
+    blocking: ["contains a <https://evil.example/|forged link> & needs fixing"],
+    findings: [{ requirement: "auth check <script>", met: false, evidence: "not implemented & untested" }],
+  });
+  const digest = formatReviewDigest(review);
+  assert.match(digest, /^Reviewer verdict: changes requested\./);
+  assert.match(digest, /- contains a &lt;https:\/\/evil\.example\/\|forged link&gt; &amp; needs fixing/);
+  assert.match(digest, /- auth check &lt;script&gt; — not implemented &amp; untested/);
+  assert.ok(!digest.includes("<script>") && !digest.includes("<https"), "raw markup from an unmet finding must not survive into the digest");
+});
+
+test("truncateDigest: a digest over the cap is cut at exactly the codepoint boundary, without splitting a surrogate pair", () => {
+  // An astral-plane emoji (2 UTF-16 code units, 1 codepoint) placed exactly
+  // at the 1200th codepoint — a naive `.slice(0, 1200)` on UTF-16 units would
+  // land mid-pair and emit a lone, invalid surrogate instead of the emoji.
+  const emoji = "\u{1F600}"; // grinning face, codepoint #1200
+  const filler = "a".repeat(1199); // codepoints #1-1199
+  const text = filler + emoji + "more text that must be cut off entirely";
+
+  const result = truncateDigest(text);
+  assert.equal(result, filler + emoji + "…", "must keep exactly 1200 whole codepoints (the emoji intact) then the ellipsis");
+  assert.ok(result.endsWith("…"), "a truncated digest must end with the ellipsis marker");
+
+  const short = "short digest, well under the cap";
+  assert.equal(truncateDigest(short), short, "text under the cap must pass through unchanged, with no ellipsis appended");
 });
 
 test("tick: a per-stage error is caught and fires exactly one watch_error", async () => {
