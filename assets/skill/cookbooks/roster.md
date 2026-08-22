@@ -72,10 +72,13 @@ agents:
     tools: [read, edit, bash]  # same canonical names either way — see "Retune tools" below
 ```
 
-`claude_code` shells out to your own installed `claude` CLI (`spf doctor`
-checks it's on `PATH`) — it needs no separate npm install, since SPF never
-depends on it directly. A missing `ANTHROPIC_API_KEY` is informational, not
-a hard failure: Claude Code also supports its own `claude login` flow.
+`claude_code` shells out to your own installed `claude` CLI — it needs no
+separate npm install, since SPF never depends on it directly. `spf doctor`
+checks whatever `SPF_CLAUDE_CMD`'s first token resolves to on `PATH` (see
+below for routing through a wrapper or launcher), falling back to the
+literal `claude` when `SPF_CLAUDE_CMD` is unset. A missing `ANTHROPIC_API_KEY`
+is informational, not a hard failure: Claude Code also supports its own
+`claude login` flow.
 
 **Pointing a `claude_code` agent at Ollama** — local or cloud — needs no
 config at all, just environment variables set before you run `spf` (Claude
@@ -93,6 +96,14 @@ For Ollama's cloud offering, point `ANTHROPIC_BASE_URL` at that instead and
 set `ANTHROPIC_AUTH_TOKEN` to a real Ollama Cloud API key. This is exactly
 the same environment-variable pass-through every agent already gets — no
 SPF-specific plumbing, no `provider:` config section to write.
+
+There's a second, different way to reach Ollama through `claude_code`: route
+the `claude` command itself through `ollama launch claude` via
+`SPF_CLAUDE_CMD`, instead of pointing `ANTHROPIC_BASE_URL` at Ollama's
+OpenAI-compatible surface. That launcher form needs its own `--model <tag>`
+flag (from `ollama list`) in the command string, since SPF always spawns
+headless — see README.md's "Proxy or wrapper launchers" section for the
+full command and why `--model` is mandatory there, not optional.
 
 ## Retune tools
 

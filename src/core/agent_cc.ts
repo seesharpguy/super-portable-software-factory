@@ -11,9 +11,48 @@
  * a wrapper, proxy server, or launcher (e.g., Ollama), set `SPF_CLAUDE_CMD`
  * before running spf. Space-separated command chains are supported:
  *   - `SPF_CLAUDE_CMD="claude"` (default)
- *   - `SPF_CLAUDE_CMD="ollama launch claude"` (Ollama launcher)
+ *   - `SPF_CLAUDE_CMD="ollama launch claude --model <tag>"` (Ollama launcher —
+ *     the `--model` is `ollama launch`'s OWN flag, and is mandatory in
+ *     headless mode; see below)
  * The command/launcher must support the full Claude Code CLI interface.
  * When unset, defaults to `claude`.
+ *
+ * Wrapper contract for the flags this module appends (`-p`, `--json-schema`,
+ * `--model`, ...): a wrapper token chain is spawned as `[...cmdTokens,
+ * ...args]`, so a plain passthrough shim needs nothing special, and a
+ * cmdSpec that already contains its own literal `--` is left completely
+ * alone — `args` lands after it exactly as written. `ollama launch <cmd>
+ * [flags...]` is the one documented shape that does NOT self-supply that
+ * separator: it uses cobra flag parsing, which treats anything typed after
+ * `launch <cmd>` as ITS OWN flags unless a literal `--` says otherwise —
+ * spike-verified live: `SPF_CLAUDE_CMD="ollama launch claude"` alone dies
+ * with `unknown shorthand flag: 'p' in -p` before `claude` ever starts
+ * (scratchpad/ollama-spike/probe2-claudecode-ollama/run3_ollama_launch_claude.log).
+ *
+ * The `--` insertion below fixes THAT failure, but is NOT by itself
+ * sufficient to reach `claude` — it only trades one error for the next one.
+ * `ollama launch` also requires its OWN `--model <tag>` flag, typed BEFORE
+ * the `--` separator, whenever it's run headless: with no model flag it
+ * falls back to an interactive model picker, and SPF always spawns with
+ * piped (non-interactive) stdio, so that picker can never run. Spike-verified
+ * live: `--` alone (no `--model` anywhere) dies one step later with `Error:
+ * model selection requires an interactive terminal; use --model to run in
+ * headless mode` (.../run4_ollama_launch_claude_dashdash.log) — that log IS
+ * the "just add `--`" experiment, and it fails. Putting `--model <tag>`
+ * AFTER the separator doesn't help either: at that point it's parsed as
+ * `claude`'s own `--model`, not `ollama launch`'s, so `ollama launch` still
+ * sees no model and still fails the same way. Only supplying `ollama
+ * launch`'s `--model` BEFORE the separator succeeds end-to-end
+ * (.../run5_ollama_launch_claude_full.log). So the operator's `SPF_CLAUDE_CMD`
+ * itself must read `ollama launch claude --model <tag>` (tag from `ollama
+ * list`) — this module can insert the `--`, but cannot supply the model tag
+ * on the operator's behalf; `doctor.ts` hard-fails a `SPF_CLAUDE_CMD` that
+ * omits it, since this is a static, deterministic misconfiguration.
+ *
+ * This module special-cases exactly the `ollama launch ...` token shape
+ * (with no `--` already present) and inserts the separator automatically at
+ * that position — never for any other wrapper, and never a second `--` if
+ * the operator already wrote one themselves.
  *
  * Every flag below was verified against a REAL local run of this exact
  * machine's `claude` CLI (v2.1.237) before being written — not assumed from
@@ -268,8 +307,16 @@ export async function run(
   ];
 
   const cmdSpec = process.env.SPF_CLAUDE_CMD || "claude";
-  const [cmd, ...cmdArgs] = cmdSpec.split(/\s+/);
-  const fullArgs = [...cmdArgs, ...args];
+  const cmdTokens = cmdSpec.split(/\s+/).filter(Boolean);
+  const [cmd, ...cmdArgs] = cmdTokens;
+  // See the module doc comment for why `ollama launch ...` (and ONLY that
+  // shape) gets an auto-inserted `--`: cobra flag parsing otherwise consumes
+  // `args`' own flags (e.g. `-p`) as `ollama launch`'s, before `claude` is
+  // ever reached. Any cmdSpec that already contains a literal `--` token is
+  // left completely alone — `args` is appended after it exactly as written,
+  // never a second separator.
+  const needsOllamaLaunchSeparator = cmdTokens[0] === "ollama" && cmdTokens[1] === "launch" && !cmdArgs.includes("--");
+  const fullArgs = needsOllamaLaunchSeparator ? [...cmdArgs, "--", ...args] : [...cmdArgs, ...args];
   const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: request.env ?? operatorEnv() });
   // The prompt travels as a positional argv element, not stdin — closing it
   // immediately avoids a real, observed ~3s "no stdin data received" stall

@@ -108,7 +108,7 @@ export async function main(): Promise<void> {
         process.exitCode = ejectCommand(rest);
         return;
       case "doctor":
-        process.exitCode = doctorCommand(rest);
+        process.exitCode = await doctorCommand(rest);
         return;
       case "ui":
         process.exitCode = await uiCommand(rest);

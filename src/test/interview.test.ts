@@ -125,11 +125,11 @@ test("flue + openrouter: no pinned-agent overrides needed, provider key collecte
   assert.ok(!("watch" in config));
 });
 
-test("flue + ollama: keyless provider skips the API-key prompt entirely", async () => {
+test("flue + ollama: keyless provider skips the API-key prompt, but still asks for OLLAMA_BASE_URL", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({
     select: { "backend runs": "flue", Provider: "ollama" },
-    text: { "Model id": "llama3" },
+    text: { "Model id": "llama3" }, // deliberately no "OLLAMA_BASE_URL" entry — the fake asker falls back to its default
     confirm: {
       'Add a "typecheck"': false,
       'Add a "lint"': false,
@@ -149,8 +149,43 @@ test("flue + ollama: keyless provider skips the API-key prompt entirely", async 
   const config = result!.config as any;
   assert.equal(config.defaults.coding_agent, "flue");
   assert.equal(config.defaults.model, "ollama/llama3");
-  assert.deepEqual(result!.env, {}, "no API key to write for a keyless provider");
-  assert.deepEqual(result!.envExampleKeys, [], "no key name to record for a keyless provider");
+  assert.deepEqual(result!.env, { OLLAMA_BASE_URL: "http://localhost:11434/v1" }, "no API key, but the base URL prompt's default is written");
+  assert.deepEqual(result!.envExampleKeys, ["OLLAMA_BASE_URL"], "OLLAMA_BASE_URL is the only key name to record for a keyless provider");
+  // Unlike the openrouter case above, ollama DOES need the pinned-roster
+  // fix: planner/reviewer/documenter pin their own fireworks/gemini/openai
+  // model strings in the packaged roster, which would otherwise always win
+  // over defaults.model and leave three agents needing keys this interview
+  // never asked for.
+  assert.deepEqual(
+    config.agents,
+    [
+      { name: "planner", model: "ollama/llama3" },
+      { name: "reviewer", model: "ollama/llama3" },
+      { name: "documenter", model: "ollama/llama3" },
+    ],
+    "planner/reviewer/documenter are pinned to the chosen ollama model, same fix as the claude_code branch",
+  );
+});
+
+test("flue + ollama: a custom OLLAMA_BASE_URL answer is written verbatim", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "flue", Provider: "ollama" },
+    text: { "Model id": "llama3", OLLAMA_BASE_URL: "http://gpu-box.local:11434/v1" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  assert.equal(result!.env.OLLAMA_BASE_URL, "http://gpu-box.local:11434/v1");
 });
 
 test("watch(jira/bitbucket): collects exactly JIRA_* + BITBUCKET_*, never GITHUB_TOKEN", async () => {
