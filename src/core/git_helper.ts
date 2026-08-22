@@ -11,6 +11,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 function git(args: string[], cwd: string): string {
@@ -218,4 +219,225 @@ export function makeGit(repoRoot: string): GitHandle {
       run(["push", "-u", remote, branch]);
     },
   };
+}
+
+// ── run worktrees ────────────────────────────────────────────────────────────
+//
+// One RUN, one working tree. This is the mechanism `spf watch` proved: N
+// chains running CONCURRENTLY IN ONE PROCESS, each with its own git worktree,
+// its own adw_id, its own Run, all sharing the main repo's data dir (and
+// therefore one WAL SQLite) through a symlink. Lifted here so the next
+// caller that wants isolated sibling runs — `core/fanout.ts`'s best-of-N —
+// gets the same shape instead of a second, subtly-different copy.
+//
+// THE UNIT OF ISOLATION IS THE RUN, NEVER AN AGENT CALL. Each worktree is
+// handed to a NEW Run whose `repo_root` is bound to it once, in the Run
+// constructor, so `gates.resolveClaim`, `permissions.snapshot/enforce`, the
+// quality checks and `changes.capture` all judge the tree the agents actually
+// wrote in. A per-call cwd swap would leave those anchored to the main repo
+// and hand out green gates on unverified work; a `SandboxHandle`/cwd-threading
+// design was evaluated for exactly this and REJECTED. Do not reintroduce it.
+//
+// WHAT THIS IS NOT: it is not a refactor target for `core/watch.ts`. Watch's
+// build lane creates a worktree in `runIssue` and removes it much later, from
+// a completely different call site (`finishReviews`, once the PR merges or
+// closes) — its worktree deliberately OUTLIVES the chain run so a human can
+// look at the tree behind an open PR. A scoped create/run/cleanup helper
+// cannot express that, so watch keeps its own inlined calls (`worktreeAdd` +
+// `linkDataDir` + `cleanupWorktree`) and this is the same shape, not a shared
+// implementation. `createRunWorktree`/`removeRunWorktree` below are the
+// granular pair for that split lifetime; `withRunWorktree` is the scoped form
+// for a caller whose worktree really does die with the callback.
+//
+// POLICY STAYS WITH THE CALLER, deliberately: this module knows nothing about
+// `homedir()`, `.spf/data`, or symlinks. The caller passes an absolute
+// `worktreesDir` and an injected `linkDataDir` callback (see
+// `cli/commands/watch.ts`'s own for why that symlink is load-bearing: without
+// it a run's traces land in a throwaway `.spf/data` inside the worktree and
+// vanish with it).
+
+export interface RunWorktreeSpec {
+  /** Absolute path of the worktree's working directory. */
+  path: string;
+  /** The branch created at `path`. Deleting it requires removing the worktree first. */
+  branch: string;
+}
+
+export interface RunWorktreeOptions {
+  /** Absolute. OUTSIDE the repo — a worktree inside it would be walked by the repo's own tooling. */
+  worktreesDir: string;
+  /** Created by `git worktree add -b`, so it must NOT already exist (see the cleanup-first note below). */
+  branch: string;
+  /** Branch name only (`"main"`), not a remote ref — the remote prefix is applied by `resolveStartPoint`. */
+  baseBranch: string;
+  /** Default "origin". */
+  remote?: string;
+  /**
+   * Default true: fetch `remote/baseBranch` before branching, so a long-lived
+   * process doesn't fork every run off a stale base. Unlike watch's inlined
+   * `git.fetch(...)`, a FAILED fetch here is not fatal — see `resolveStartPoint`.
+   */
+  fetchBase?: boolean;
+  /** Overrides the whole base resolution — an explicit ref (sha, tag, local branch) to branch from. */
+  startPoint?: string;
+  /** Wire `<worktree>/.spf/data` to the MAIN repo's data dir. Injected, never done here — see the section comment. */
+  linkDataDir?: (worktreePath: string) => void;
+  /** Bound to the MAIN repo root. Injected so a unit test needs no real repo; defaults to `makeGit(repoRoot)`. */
+  git?: GitHandle;
+  log?: (message: string) => void;
+}
+
+/**
+ * Where the base of a new run worktree comes from.
+ *
+ * A fetch failure is logged, not thrown: `spf fanout` is a local, interactive
+ * command that must still work on a repo with no remote, offline, or behind a
+ * proxy — and `refExists` below then falls back to the LOCAL base branch,
+ * which is the honest answer in all three cases. (Watch differs on purpose:
+ * a daemon that silently starts branching off a stale local base for hours is
+ * worse than a loud failure, so it keeps its unguarded `git.fetch`.)
+ */
+function resolveStartPoint(git: GitHandle, opts: RunWorktreeOptions): string {
+  if (opts.startPoint) return opts.startPoint;
+  const remote = opts.remote ?? "origin";
+  if (opts.fetchBase !== false) {
+    try {
+      git.fetch(remote, opts.baseBranch);
+    } catch (error) {
+      // First line only: `git fetch`'s own error is the underlying command's
+      // full multiline stderr, and an offline/local-only repo hits this on
+      // EVERY attempt — five lines of "'origin' does not appear to be a git
+      // repository" repeated N times drowns out everything else fan-out prints.
+      const firstLine = (error as Error).message.split("\n")[0];
+      opts.log?.(`worktree: fetch ${remote} ${opts.baseBranch} failed (${firstLine}) — using the local base`);
+    }
+  }
+  const remoteRef = `${remote}/${opts.baseBranch}`;
+  return git.refExists(remoteRef) ? remoteRef : opts.baseBranch;
+}
+
+/**
+ * Create `<worktreesDir>/<name>` on a fresh `branch` off the resolved base,
+ * and wire its data dir. Returns the spec its caller must eventually hand to
+ * `removeRunWorktree`.
+ *
+ * CLEARS A STALE WORKTREE DIRECTORY FIRST, but only when it's safe to: the
+ * path is deterministic from `name`, so the only way it can already exist is
+ * a previous attempt that never reached its own cleanup (killed mid-run,
+ * crashed, machine restart) — OR a previous attempt whose kept payload lives
+ * only in that tree's uncommitted edits (see `cli/commands/fanout.ts`'s
+ * winner-handling note: a chain with no commit step leaves its work in the
+ * worktree, not on the branch). `git worktree remove --force` deletes
+ * modified/untracked files with no confirmation and exit 0, so blindly
+ * force-removing here would silently destroy a kept winner the moment a
+ * `--adw-id` retry reuses its deterministic name. Refuse instead, loudly,
+ * before touching anything. `worktreeRemove` is a no-op when there is
+ * nothing to remove, so a genuinely stale (clean) leftover is still cleared
+ * exactly as before. (Same reasoning as `core/watch.ts`'s `runIssue`, which
+ * clears its own worktree the same way — modulo this same guard.)
+ *
+ * ALSO REFUSES A PRE-EXISTING BRANCH up front, for the same reason and the
+ * same actionable-error idea: the fan-out winner's branch is handed to a
+ * human to merge and can share this exact deterministic name across separate
+ * invocations (an explicit `--adw-id` retry), so it is never deleted here —
+ * see `removeRunWorktree` for the only place that happens, once an attempt
+ * is known to be discarded. Checking first turns `git worktree add -b`'s raw
+ * `fatal: a branch named '...' already exists` (which every attempt would
+ * otherwise hit identically, for the least helpful reason) into one message
+ * naming the collision and the way out.
+ */
+export function createRunWorktree(repoRoot: string, name: string, opts: RunWorktreeOptions): RunWorktreeSpec {
+  const git = opts.git ?? makeGit(repoRoot);
+  const worktreePath = path.join(opts.worktreesDir, name);
+
+  if (existsSync(worktreePath)) {
+    const status = spawnSync("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf-8" });
+    if (status.status === 0 && status.stdout.trim() !== "") {
+      throw new Error(
+        `${worktreePath} already exists and has uncommitted changes — refusing to remove it (it may be a ` +
+          `previous run's kept winner). Inspect or move it by hand, then retry, or use a fresh --adw-id.`,
+      );
+    }
+  }
+  try {
+    git.worktreeRemove(worktreePath);
+  } catch (error) {
+    opts.log?.(`worktree: cleanup warning for ${worktreePath}: ${(error as Error).message}`);
+  }
+
+  if (git.refExists(opts.branch)) {
+    throw new Error(
+      `branch ${opts.branch} already exists — delete it (\`git branch -D ${opts.branch}\`) once you no longer ` +
+        `need it, or use a fresh --adw-id`,
+    );
+  }
+
+  mkdirSync(opts.worktreesDir, { recursive: true });
+  git.worktreeAdd(worktreePath, opts.branch, resolveStartPoint(git, opts));
+  opts.linkDataDir?.(worktreePath);
+  return { path: worktreePath, branch: opts.branch };
+}
+
+/**
+ * Remove a run worktree and delete its branch. NEVER throws — cleanup runs on
+ * the failure path too, and a cleanup error must not replace the real error
+ * that got us here.
+ *
+ * Order matters and is not cosmetic: git refuses to delete a branch that is
+ * checked out in a worktree, so the worktree goes first. A caller that wants
+ * to KEEP the branch (the fan-out winner) must simply not call this.
+ */
+export function removeRunWorktree(
+  repoRoot: string,
+  worktree: RunWorktreeSpec,
+  opts: { git?: GitHandle; log?: (message: string) => void } = {},
+): void {
+  const git = opts.git ?? makeGit(repoRoot);
+  try {
+    git.worktreeRemove(worktree.path);
+    git.deleteLocalBranch(worktree.branch);
+  } catch (error) {
+    opts.log?.(`worktree: cleanup warning for ${worktree.path}: ${(error as Error).message}`);
+  }
+}
+
+/** What the callback of `withRunWorktree` is handed. */
+export interface RunWorktreeHandle extends RunWorktreeSpec {
+  /**
+   * Make this worktree and its branch SURVIVE the scope.
+   *
+   * The whole point of the scoped form: a caller that cannot decide the fate
+   * of a tree until it sees the result (fan-out keeps a successful attempt's
+   * branch so it can still be selected and, if it wins, handed to a human;
+   * a failed attempt's tree is worthless the moment it fails) says so from
+   * inside, once it knows. Not calling it is the default, and the default is
+   * cleanup.
+   */
+  keep(): void;
+}
+
+/**
+ * Run `fn` against a fresh run worktree, cleaning it up afterwards unless
+ * `wt.keep()` was called — including when `fn` throws, which is the case a
+ * hand-rolled create/remove pair reliably gets wrong.
+ *
+ * `opts` sits BEFORE the callback (a small departure from the usual
+ * `(a, b, fn)` shape) so the required options can't be forgotten behind an
+ * optional trailing argument, and so the callback stays the last thing you
+ * read — the JS convention that matters here.
+ */
+export async function withRunWorktree<T>(
+  repoRoot: string,
+  name: string,
+  opts: RunWorktreeOptions,
+  fn: (worktree: RunWorktreeHandle) => Promise<T>,
+): Promise<T> {
+  const spec = createRunWorktree(repoRoot, name, opts);
+  let kept = false;
+  const handle: RunWorktreeHandle = { ...spec, keep: () => void (kept = true) };
+  try {
+    return await fn(handle);
+  } finally {
+    if (!kept) removeRunWorktree(repoRoot, spec, { git: opts.git, log: opts.log });
+  }
 }

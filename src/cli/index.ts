@@ -25,12 +25,15 @@ import { eventsCommand } from "./commands/events.ts";
 import { abortCommand } from "./commands/abort.ts";
 import { uiCommand } from "./commands/ui.ts";
 import { watchCommand, watchInitCommand } from "./commands/watch.ts";
+import { fanoutCommand } from "./commands/fanout.ts";
 import { versionCommand } from "./commands/version.ts";
 
 const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 
   spf list                                  the chain registry — names, phases, what each needs
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
+  spf fanout <chain> "<prompt>" [--n 3]     best-of-N: N isolated attempts, one deterministic winner branch — YOU merge it, spf never does
+  spf fanout --clean <base-adw-id>          remove leftover worktrees/branches from a killed or discarded fanout run
   spf init [--force] [--yes] [--template <name>] [--no-skills]  interview to seed .spf/spf.config.yaml + .env, and install the Claude Code skill unless --no-skills (--yes/--template skip the interview, not the skill install)
   spf install-skill [--user] [--force]      (re)install the Claude Code skill by hand — spf init already does this
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
@@ -46,6 +49,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf version                               print the installed version
 
 Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>] [--issue <id>]
+Run budget: set defaults.max_run_cost (USD) and/or defaults.max_run_tokens in spf.config.yaml to stop the NEXT agent call once a run has already spent this much — checked before each call, never after, so a single call is never capped and a one-agent-dispatch chain (scout/prompt/build) can never trip it; absent (the default) = unbounded.
 Run \`spf list\` to see every chain and what it needs.`;
 
 /** A raw scan for `--cwd`, ahead of any command-specific argv parsing — every command that takes it means the same thing by it. */
@@ -143,6 +147,9 @@ export async function main(): Promise<void> {
         process.exitCode = await dispatchChain(chain, chainArgs);
         return;
       }
+      case "fanout":
+        process.exitCode = await fanoutCommand(rest);
+        return;
       case "list":
         process.exitCode = listCommand();
         return;

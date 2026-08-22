@@ -46,6 +46,7 @@ phases`/`spf events` exist so nobody has to guess the schema again).
 | "add a chain / a phase / an output type / a gate" | `authoring_chains.md` |
 | "what is SPF" | `spf_overview.md` |
 | "fold a third-party review tool's findings into the reviewer" | `cookbooks/ocr_reviewer.md` |
+| "try N attempts and pick the best one / best-of-N" | `spf fanout` — see `references/config.md`'s `spf fanout` section |
 | envelope/gate/session contract | `references/handoff.md` |
 | trace schema, spend vs. context | `references/observability.md` |
 | config field reference | `references/config.md` |
