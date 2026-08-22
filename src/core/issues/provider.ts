@@ -1,8 +1,8 @@
 /**
- * The two seams `spf watch` drives — the abstraction the user's own
- * reference implementation (a GitHub-issues SDLC poller) never had: its
- * GitHub client is a concrete class referenced by type everywhere, so
- * adding a second tracker would mean reworking the poll loop itself.
+ * The seams `spf watch` drives — the abstraction the user's own reference
+ * implementation (a GitHub-issues SDLC poller) never had: its GitHub client
+ * is a concrete class referenced by type everywhere, so adding a second
+ * tracker would mean reworking the poll loop itself.
  *
  * `IssueProvider` (tracker: list/claim/transition/comment/markers) and
  * `CodeHostProvider` (PR lifecycle: open/status) are deliberately separate
@@ -13,6 +13,9 @@
  * implements only `IssueProvider`, `bitbucket_provider.ts` only
  * `CodeHostProvider` — any tracker x host combination is just config
  * (`watch.issue_provider` x `watch.code_host`), never a poll-loop change.
+ * `IssueAuthoringProvider` (create/link, at the bottom of this file) is a
+ * third, again separate — the refine lane's own need, optional per tracker,
+ * and orthogonal to which one is the code host.
  *
  * The label-as-state-machine design is deliberate, copied from that same
  * reference: `transition()` is the ONE mutator, so every state change is
@@ -20,7 +23,20 @@
  * (Slack, a webhook, whatever) on top of it without the poll loop caring.
  */
 
-export type WatchState = "ready" | "working" | "review" | "done" | "blocked";
+/**
+ * `spec-ready`/`refining` drive the SECOND lane's state machine (a product
+ * spec being decomposed — see `reconcileRefining`/`claimSpecs` in
+ * `watch.ts`), independent of the build lane's own `ready..blocked` states.
+ * `refined` is not a lane state at all — it never appears on the left of a
+ * `transition()` call. It is the terminal label a generated LEAF issue
+ * (story/bug/task) gets, marking it awaiting a human's promotion to `ready`.
+ * All eight still live in one `WatchState` union (not two separate unions)
+ * because `transition()`'s "strip every `<prefix>:<state>` label, then add
+ * one" logic (see `github_provider.ts`/`jira_provider.ts`) has to know about
+ * every one of them to strip correctly, and `ensureLabels()` seeds all of
+ * them from one `STATES` array.
+ */
+export type WatchState = "ready" | "working" | "review" | "done" | "blocked" | "spec-ready" | "refining" | "refined";
 
 export interface Issue {
   /** Opaque tracker identifier: a GitHub issue number stringified ("42"), a Jira key ("PROJ-123"). */
@@ -28,6 +44,16 @@ export interface Issue {
   title: string;
   body: string;
   labels: string[];
+  /**
+   * The tracker's own internal/database id, distinct from `id` (the
+   * human-facing number/key) — only populated where an authoring operation
+   * needs it. GitHub's sub-issue API is the reason this exists: `POST
+   * /repos/{o}/{r}/issues/{n}/sub_issues` takes `sub_issue_id` as the
+   * issue's database id, not its issue number, so `linkChild()` cannot work
+   * from `id` alone. `undefined` on any issue this provider didn't just
+   * create/fetch with that field available.
+   */
+  internal_id?: string;
 }
 
 export interface PrRef {
@@ -47,12 +73,18 @@ export interface PrStatus {
  * on the issue itself — zero infrastructure, survives a daemon crash,
  * human-readable. `attempt` bounds orphan-retry (see `watch.ts`); `ciFixes`
  * is reserved for a future fix-loop, unused by the lean v1 poll logic.
+ * `refined` is the refine lane's own idempotency record: the ids of every
+ * issue a completed publish pass created for this spec. A re-claimed spec
+ * whose marker already lists them skips creation entirely — `to-tickets`
+ * (the skill this lane's prompt is ported from) has no such guard and
+ * duplicates every ticket on a re-run; this is what closes that gap.
  */
 export interface WatchMarker {
   worktree?: string;
   branch?: string;
   pr?: number;
   attempt?: number;
+  refined?: string[];
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */
@@ -65,11 +97,12 @@ export interface EnsureLabelsResult {
 export interface IssueProvider {
   /**
    * Idempotently seed whatever this tracker needs for the state machine to
-   * work at all — GitHub: the five `<prefix>:*` labels, with a color and
-   * description, created if missing and corrected if drifted. A tracker
-   * with no such concept (Jira labels are freeform strings, not seedable
-   * objects) can make this a no-op — `spf watch init` just reports
-   * whatever comes back, empty results included.
+   * work at all — GitHub: every `<prefix>:*` state label plus the
+   * `<prefix>:type:*` vocabulary the refine lane's generated issues carry,
+   * each with a color and description, created if missing and corrected if
+   * drifted. A tracker with no such concept (Jira labels are freeform
+   * strings, not seedable objects) can make this a no-op — `spf watch init`
+   * just reports whatever comes back, empty results included.
    */
   ensureLabels(): Promise<EnsureLabelsResult>;
   /** Issues currently labeled `<prefix>:ready`. */
@@ -86,12 +119,17 @@ export interface IssueProvider {
    */
   listInState(state: WatchState, opts?: { includeAll?: boolean }): Promise<Issue[]>;
   /**
-   * Move `ready` -> `working`, with a read-back verify (like the reference
-   * implementation's `claimIssue`) — not a true atomic claim, but enough to
-   * catch the common case; the real safety net against two daemons racing
-   * the same issue is `spf watch`'s own single-instance lockfile.
+   * Move `opts.from` (default `ready`) -> `opts.to` (default `working`),
+   * with a read-back verify (like the reference implementation's
+   * `claimIssue`) — not a true atomic claim, but enough to catch the common
+   * case; the real safety net against two daemons racing the same issue is
+   * `spf watch`'s own single-instance lockfile. Parameterized so the refine
+   * lane's `spec-ready -> refining` claim (see `claimSpecs` in `watch.ts`)
+   * reuses the identical DELETE-from/POST-to/read-back-verify dance the
+   * build lane's `ready -> working` claim already does, rather than a
+   * second copy of it per provider.
    */
-  claim(issue: Issue): Promise<boolean>;
+  claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean>;
   /** The one state-mutating call. `detail`, if given, is also posted as a comment. */
   transition(issue: Issue, to: WatchState, detail?: string): Promise<void>;
   comment(issue: Issue, body: string): Promise<void>;
@@ -111,4 +149,22 @@ export interface IssueProvider {
 export interface CodeHostProvider {
   openPr(opts: { branch: string; title: string; body: string; base: string }): Promise<PrRef>;
   prStatus(pr: PrRef): Promise<PrStatus>;
+}
+
+/**
+ * The third seam: creating issues and linking them into a hierarchy — what
+ * the refine lane needs and neither `IssueProvider` nor `CodeHostProvider`
+ * provides (a tracker's read/claim/transition surface has no reason to
+ * create new work items). Kept separate rather than folded into
+ * `IssueProvider` for the same reason `CodeHostProvider` is separate: not
+ * every tracker can do this (Jira could, in principle, via its native issue
+ * types + `parent` field, but that is a real future implementation, not a
+ * one-line stub — see `jira_provider.ts`'s module comment), and a tracker
+ * that can't should be a `null` from `resolveIssueAuthoringProvider()`
+ * (`cli/commands/watch.ts`), not a method that throws at call time.
+ */
+export interface IssueAuthoringProvider {
+  createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue>;
+  /** Link `child` under `parent` using the tracker's native hierarchy — GitHub's sub-issues API today. */
+  linkChild(parent: Issue, child: Issue): Promise<void>;
 }

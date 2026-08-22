@@ -1,9 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { branchNameFor, claimNewWork, createWatchState, finishReviews, reconcileOrphans, tick } from "../core/watch.js";
+import {
+  branchNameFor,
+  claimNewWork,
+  claimSpecs,
+  createWatchState,
+  finishReviews,
+  reconcileOrphans,
+  reconcileRefining,
+  refineBranchNameFor,
+  tick,
+} from "../core/watch.js";
 import type { GitHandle } from "../core/git_helper.js";
-import type { ChainRunResult, WatchDeps } from "../core/watch.js";
+import type { ChainRunResult, RefineRunResult, WatchDeps } from "../core/watch.js";
 import type { NotifyEvent } from "../core/notify/channel.js";
 import type {
   CodeHostProvider,
@@ -43,18 +53,20 @@ class FakeProvider implements IssueProvider {
   async listInState(state: WatchState): Promise<Issue[]> {
     return [...this.entries.values()].filter((e) => e.state === state).map((e) => e.issue);
   }
-  async claim(issue: Issue): Promise<boolean> {
+  async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {
     this.claimCalls.push(issue.id);
     const entry = this.entries.get(issue.id)!;
-    if (entry.state !== "ready") return false;
-    entry.state = "working";
+    const from = opts?.from ?? "ready";
+    const to = opts?.to ?? "working";
+    if (entry.state !== from) return false;
+    entry.state = to;
     return true;
   }
   async transition(issue: Issue, to: WatchState, detail?: string): Promise<void> {
     this.entries.get(issue.id)!.state = to;
     this.transitions.push({ id: issue.id, to, detail });
   }
-  async comment(): Promise<void> {}
+  async comment(_issue: Issue, _body: string): Promise<void> {}
   async readMarker(issue: Issue): Promise<WatchMarker | null> {
     return this.entries.get(issue.id)?.marker ?? null;
   }
@@ -116,6 +128,12 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     chain: "plan-build-test",
     baseBranch: "main",
     concurrency: 2,
+    // Off by default, like WatchRefineConfigSchema itself — a test that
+    // doesn't override these never touches the refine lane at all.
+    refineEnabled: false,
+    refineConcurrency: 1,
+    refineChain: "refine",
+    runRefine: async (opts): Promise<RefineRunResult> => ({ accepted: true, adwId: opts.adwId, detail: "", created: [] }),
     worktreesDir: "/tmp/spf-watch-test-worktrees",
     linkDataDir: () => {},
     dryRun: false,
@@ -464,6 +482,197 @@ test("reconcileOrphans: a routine orphan resume/retry notifies nothing — only 
   await reconcileOrphans(makeDeps(provider, codeHost, { notify }), state);
 
   assert.deepEqual(events, []);
+});
+
+// ── the refine lane ──────────────────────────────────────────────────────
+
+test("refineBranchNameFor: same sanitizer as branchNameFor, different prefix", () => {
+  assert.equal(refineBranchNameFor({ id: "9", title: "Team invitations spec", body: "", labels: [] }), "spf-refine/9-team-invitations-spec");
+});
+
+test("claimSpecs: a disabled refine lane never lists spec-ready issues or claims anything", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("100", "A spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  provider.listInState = async () => {
+    throw new Error("listInState should never be called when refineEnabled is false");
+  };
+
+  await claimSpecs(makeDeps(provider, codeHost, { refineEnabled: false }), state);
+
+  assert.equal(provider.claimCalls.length, 0);
+});
+
+test("claimSpecs: claims a spec-ready spec, publishes, and finishes it to done with a summary comment", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("101", "Team invitations", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const comments: Array<{ id: string; body: string }> = [];
+  provider.comment = async (issue, body) => {
+    comments.push({ id: issue.id, body });
+  };
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => ({
+      accepted: true,
+      adwId: opts.adwId,
+      detail: "",
+      created: [
+        { id: "200", title: "Owner invites by email", kind: "story", isLeaf: true },
+        { id: "199", title: "Invitations feature", kind: "feature", isLeaf: false },
+      ],
+    }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["101"]);
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["done"]);
+  assert.equal(comments.length, 1);
+  assert.match(comments[0]!.body, /#200 \(story\): Owner invites by email/);
+  assert.deepEqual(provider.entries.get("101")!.marker?.refined, ["200", "199"]);
+});
+
+test("claimSpecs: never claims more than refineConcurrency in one tick, independent of the build lane's own budget", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("110", "one spec", "spec-ready");
+  provider.addIssue("111", "two spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    refineConcurrency: 1,
+    runRefine: () => new Promise(() => {}), // never resolves — keeps the claim "in flight" for this assertion
+  });
+
+  await claimSpecs(deps, state);
+  assert.equal(state.refining.size, 1);
+  assert.equal(provider.claimCalls.length, 1);
+});
+
+test("claimSpecs: dry-run claims no spec and never calls runRefine", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("120", "dry run spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let called = false;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    dryRun: true,
+    runRefine: async (opts) => {
+      called = true;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+    },
+  });
+
+  await claimSpecs(deps, state);
+  assert.equal(provider.claimCalls.length, 0);
+  assert.equal(called, false);
+  assert.equal(provider.entries.get("120")!.state, "spec-ready");
+});
+
+test("claimSpecs: a rejected refine chain blocks the spec with the failure detail, without publishing anything", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("130", "unrefinable spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => ({ accepted: false, adwId: opts.adwId, detail: "refiner failed gates", created: [] }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(provider.transitions, [{ id: "130", to: "blocked", detail: "refiner failed gates" }]);
+});
+
+test("claimSpecs: a re-claimed spec whose marker already lists published issues skips runRefine entirely", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("140", "already published", "spec-ready", { refined: ["300", "301"] });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let called = false;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => {
+      called = true;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+    },
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.equal(called, false, "to-tickets itself has no idempotency guard — this is the one this lane adds");
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["done"]);
+});
+
+test("reconcileRefining: a refining spec whose marker already lists published issues finishes it without re-running the refiner", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("150", "orphaned after publish", "refining", { refined: ["400"] });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await reconcileRefining(makeDeps(provider, codeHost, { refineEnabled: true }), state);
+
+  assert.deepEqual(provider.transitions, [{ id: "150", to: "done", detail: undefined }]);
+});
+
+test("reconcileRefining: a refining spec with no marker retries up to the cap, then blocks", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("151", "orphaned, no marker", "refining", null);
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, { refineEnabled: true });
+
+  await reconcileRefining(deps, state); // attempt 1 -> spec-ready
+  assert.equal(provider.entries.get("151")!.state, "spec-ready");
+
+  provider.entries.get("151")!.state = "refining";
+  await reconcileRefining(deps, state); // attempt 2 -> spec-ready
+  assert.equal(provider.entries.get("151")!.state, "spec-ready");
+
+  provider.entries.get("151")!.state = "refining";
+  await reconcileRefining(deps, state); // attempt 3 exceeds MAX_ORPHAN_ATTEMPTS (2) -> blocked
+  assert.equal(provider.entries.get("151")!.state, "blocked");
+  assert.match(provider.transitions.at(-1)?.detail ?? "", /Gave up after 2 orphaned refine attempts/);
+});
+
+test("reconcileRefining: a disabled refine lane is a complete no-op", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("152", "should be ignored", "refining", null);
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  provider.listInState = async () => {
+    throw new Error("listInState should never be called when refineEnabled is false");
+  };
+
+  await reconcileRefining(makeDeps(provider, codeHost, { refineEnabled: false }), state);
+
+  assert.equal(provider.transitions.length, 0);
+});
+
+test("claim -> refine -> published fires issue_claimed then spec_refined, both info-level", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("160", "A spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    notify,
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "500", title: "A story", kind: "story", isLeaf: true }] }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "spec_refined"]);
+  assert.ok(events.every((e) => e.level === "info"));
 });
 
 test("tick: a per-stage error is caught and fires exactly one watch_error", async () => {

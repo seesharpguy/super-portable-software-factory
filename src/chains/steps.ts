@@ -21,17 +21,21 @@
  * tuning params, never express control flow.
  */
 
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 import * as changesLib from "../core/changes.ts";
 import * as gates from "../core/gates.ts";
 import * as quality from "../core/quality.ts";
 import * as agentsCfg from "../core/agents.ts";
 import * as session from "../core/session.ts";
+import * as refineLib from "../core/refine.ts";
 import { DOCUMENT_NOTES } from "../core/prompts.ts";
 import {
   BuildOutput,
   DocumentOutput,
   GenericOutput,
   PlanOutput,
+  RefineOutput,
   ReviewOutput,
   ScoutOutput,
   makeAgentCall,
@@ -41,6 +45,7 @@ import {
   type EnvelopeType,
   type GateFn,
   type QualityResult,
+  type RefinedIssue,
   type ReviewOutputT,
 } from "../core/data_types.ts";
 import type { ChangeSet } from "../core/data_types.ts";
@@ -60,14 +65,20 @@ export interface ChainState {
   changeset: ChangeSet | null;
   /** HEAD, pinned by request({logBaseline: true}) before the run commits anything. */
   baseline: string;
+  /**
+   * The originating tracker issue, only meaningful to `publishIssues()` —
+   * lifted from `ChainContext.issue_id` (see its doc comment) because a
+   * `Step` only ever sees `(run, state)`, never the `ChainContext` itself.
+   */
+  issue_id: string | null;
   /** The run's own acceptance criterion — distinct from "every phase succeeded"; see Run.finish(). */
   accepted: boolean;
   /** Why not, when accepted is false — passed straight to run.finish(). */
   reason: string;
 }
 
-function makeState(prompt: string, options: Record<string, string>): ChainState {
-  return { prompt, options, previous: null, quality: null, review: null, changeset: null, baseline: "", accepted: true, reason: "" };
+function makeState(prompt: string, options: Record<string, string>, issueId: string | null): ChainState {
+  return { prompt, options, previous: null, quality: null, review: null, changeset: null, baseline: "", issue_id: issueId, accepted: true, reason: "" };
 }
 
 /**
@@ -380,6 +391,62 @@ export function document(): Step {
   return makeStep(fn, { requiredAgents: ["documenter"], label: "documenter" });
 }
 
+/** Decompose the spec in `prompt` into a feature/story tree — see `RefinedIssueSchema`'s doc comment. Gated so a malformed tree (wrong container/leaf kinds, an unresolved reference, a dependency cycle) re-prompts the same session before publishIssues() ever runs. */
+export function refine(): Step {
+  return agentStep({
+    name: "refine",
+    owner: "refiner",
+    output_type: RefineOutput,
+    description: "Decompose the spec into a feature/story tree of vertical slices",
+    gates: [gates.refinementWellFormed],
+  });
+}
+
+/**
+ * Create the tree `refine()` produced on the tracker, in dependency order,
+ * and link each node to its parent. A `code` phase, not an agent one — the
+ * decision-making (topological order, label assignment, `## Blocked by`
+ * rendering) is `core/refine.ts`'s job; this step is sequencing only, per
+ * SKILL.md's "chains stay thin" rule. Requires a preceding refine() step.
+ *
+ * Writes what it created to `<context_handoff_dir>/refine_publish.json` —
+ * the side channel `cli/commands/watch.ts`'s `runRefine` reads after the
+ * chain returns, since a chain's own return value is just an exit code.
+ * `spf watch`'s own marker/comment/transition bookkeeping for the spec
+ * issue lives entirely in `core/watch.ts`'s `runSpec`, never here — a bare
+ * `spf refine` run (no daemon, no spec issue in play) still needs this step
+ * to work standalone.
+ */
+export function publishIssues(): Step {
+  const fn = async (run: Run, state: ChainState) => {
+    const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[] }) | null;
+    if (!envelope || !Array.isArray(envelope.issues)) {
+      throw new Error("publishIssues() requires a preceding refine() step in the chain's step list");
+    }
+    await run.phase(
+      makePhaseParams({
+        name: "publish",
+        kind: "code",
+        owner: "tracker",
+        description: "Create the feature/story tree on the tracker, in dependency order, and link each to its parent",
+      }),
+      async (ph) => {
+        const tracker = refineLib.resolveAuthoringProvider(run.cfg);
+        const created = await refineLib.publish(tracker, envelope.issues!, {
+          labelPrefix: run.cfg.watch.label_prefix,
+          specIssueId: state.issue_id,
+        });
+        writeFileSync(
+          path.join(run.context_handoff_dir, "refine_publish.json"),
+          JSON.stringify(created.map((c) => ({ id: c.issue.id, title: c.issue.title, kind: c.kind, isLeaf: c.isLeaf })), null, 2),
+        );
+        ph.log({ created: created.length, leaves: created.filter((c) => c.isLeaf).length });
+      },
+    );
+  };
+  return makeStep(fn, { label: "code(publish)" });
+}
+
 // ── layer 3: derive ChainDefinition fields from a step list ─────────────
 
 export function deriveRequiredAgents(steps: Step[]): string[] | ((options: Record<string, string>) => string[]) {
@@ -418,7 +485,7 @@ export async function runSteps(
   options: Record<string, string> = {},
 ): Promise<number> {
   const run = startRun(ctx, requiredAgents, requiredSuites);
-  const state = makeState(ctx.prompt, options);
+  const state = makeState(ctx.prompt, options, ctx.issue_id ?? null);
   for (const step of steps) {
     await step(run, state);
   }

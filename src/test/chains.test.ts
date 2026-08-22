@@ -43,6 +43,7 @@ const EXPECTED: Record<string, { phases: string; agents: string[]; suites: strin
   },
   quality: { phases: "engineer(request) -> code(quality)", agents: [], suites: ["all"] },
   document: { phases: "engineer(request) -> code(changes) -> documenter", agents: ["documenter"], suites: [] },
+  refine: { phases: "engineer(request) -> refiner -> code(publish)", agents: ["refiner"], suites: [] },
   "simple-sdlc": {
     phases:
       "engineer(request) -> planner -> git(commit_plan) -> builder -> code(test) [-> builder(fix) -> code(test) ...] " +

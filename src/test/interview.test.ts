@@ -264,15 +264,16 @@ test("customize models per agent: declining keeps today's behavior — only the 
   for (const a of config.agents) assert.equal(a.model, "opus");
 });
 
-test("customize models per agent: accepting patches the pinned three and appends builder/scout", async () => {
+test("customize models per agent: accepting patches the pinned three and appends builder/scout/refiner", async () => {
   const ctx = gatherContext(dir, new Map());
-  assert.deepEqual(ctx.rosterNames.slice().sort(), ["builder", "documenter", "planner", "reviewer", "scout"]);
+  assert.deepEqual(ctx.rosterNames.slice().sort(), ["builder", "documenter", "planner", "refiner", "reviewer", "scout"]);
   const asker = createFakeAsker({
     select: { "backend runs": "claude_code", "Model (Claude": "sonnet", Authentication: "login" },
     text: {
       "  planner": "opus",
       "  builder": "sonnet",
       "  scout": "haiku",
+      "  refiner": "opus",
       "  reviewer": "opus",
       "  documenter": "sonnet",
     },
@@ -293,7 +294,7 @@ test("customize models per agent: accepting patches the pinned three and appends
   assert.ok(result);
   const config = result!.config as any;
   const byName = Object.fromEntries(config.agents.map((a: any) => [a.name, a.model]));
-  assert.deepEqual(byName, { planner: "opus", reviewer: "opus", documenter: "sonnet", builder: "sonnet", scout: "haiku" });
+  assert.deepEqual(byName, { planner: "opus", reviewer: "opus", documenter: "sonnet", builder: "sonnet", scout: "haiku", refiner: "opus" });
 
   const configPath = mergedConfigPath();
   const { stringify } = await import("yaml");

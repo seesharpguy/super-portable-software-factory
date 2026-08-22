@@ -1,7 +1,10 @@
 /**
  * `spf install-skill` — copy the packaged Claude Code skill (`assets/skill/`)
- * into a target repo (or `~/.claude/skills/spf` with `--user`), on explicit
- * request only. Nothing here ever runs unless a user asks for it.
+ * into a target repo (or `~/.claude/skills/spf` with `--user`). `spf init`
+ * calls this itself, every run, unless `--no-skills` is passed — it's the
+ * command name a user (or a script) still reaches for by hand: to reinstall
+ * after an edit, to target `--user` instead of repo-local, or on a repo
+ * that never ran `spf init` at all (a pure-built-ins setup).
  *
  * Idempotent via a manifest (`.spf-skill-version`: {package, version,
  * files: {relpath: sha256}}) written at the skill root:

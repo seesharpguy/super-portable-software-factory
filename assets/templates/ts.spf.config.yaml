@@ -39,8 +39,8 @@ defaults:
 # always wins over defaults.model — switching coding_agent globally does
 # NOT reset those three, so they'd run on Claude Code with a model id it
 # can't resolve at all ("There's an issue with the selected model...").
-# builder/scout have no model of their own in the packaged roster, so they
-# correctly inherit defaults.model above and need no override here.
+# builder/scout/refiner have no model of their own in the packaged roster,
+# so they correctly inherit defaults.model above and need no override here.
 agents:
   - name: planner
     model: sonnet
@@ -64,6 +64,14 @@ agents:
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
+#   # Optional second lane: decompose a spf:spec-ready product spec into a
+#   # feature/story-or-bug tree of real issues instead of building it
+#   # directly. Off by default; needs issue_provider: github (the default
+#   # above) — issue authoring isn't implemented for Jira yet.
+#   refine:
+#     enabled: true
+#     chain: refine
+#     concurrency: 1
 
 # Optional: push notifications for unattended work — spf watch's daemon
 # lifecycle, and every chain run (including watch's own per-issue runs).

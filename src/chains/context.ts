@@ -18,4 +18,13 @@ export interface ChainContext {
   cwd: string;
   /** The CLI name (`"plan-build-test"`), for session.ensure()'s trace record — see core/session.ts. */
   chain_name: string;
+  /**
+   * The originating tracker issue's id, only meaningful to the `refine`
+   * chain — `steps.publishIssues()` renders it as a `## Parent: #<id>`
+   * back-reference on every issue it creates (`core/refine.ts`'s
+   * `renderBody`). `null`/omitted for a manual run with no source issue
+   * (a bare `spf refine "<spec text>"`, no `--issue`). Every other chain
+   * ignores this field.
+   */
+  issue_id?: string | null;
 }

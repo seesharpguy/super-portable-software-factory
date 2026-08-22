@@ -29,8 +29,8 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
 
   spf list                                  the chain registry — names, phases, what each needs
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
-  spf init [--force] [--yes] [--template <name>]  interview to seed .spf/spf.config.yaml + .env (--yes/--template skip the interview)
-  spf install-skill [--user] [--force]      install the Claude Code skill (repo-local by default)
+  spf init [--force] [--yes] [--template <name>] [--no-skills]  interview to seed .spf/spf.config.yaml + .env, and install the Claude Code skill unless --no-skills (--yes/--template skip the interview, not the skill install)
+  spf install-skill [--user] [--force]      (re)install the Claude Code skill by hand — spf init already does this
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
   spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
   spf doctor [--json]                       check everything that fails silently otherwise
@@ -43,7 +43,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf abort <adw_id>                        signal a run's process to stop
   spf version                               print the installed version
 
-Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>]
+Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>] [--issue <id>]
 Run \`spf list\` to see every chain and what it needs.`;
 
 /** A raw scan for `--cwd`, ahead of any command-specific argv parsing — every command that takes it means the same thing by it. */

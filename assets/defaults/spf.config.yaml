@@ -101,6 +101,22 @@ agents:
   # No tester agent: running the suite is a known command, so it is a kind="code"
   # phase over core/quality.ts. See SKILL.md hard rule 8.
 
+  - name: refiner
+    thinking: high
+    color: "#34d399"
+    purpose: Decompose a product spec into a feature/story-or-bug tree of vertical slices; change nothing.
+    prompt_engineering:
+      system: refiner/system.md
+      user: refiner/user.md
+    writes: []                     # read-only w.r.t. the repo; refine_plan.md lands in context_handoff_dir, not here
+    tools:                         # full recon; write only for refine_plan.md, no edit
+      - read
+      - grep
+      - find
+      - ls
+      - bash
+      - write
+
   - name: reviewer
     model: openai/gpt-5.6-terra
     thinking: high

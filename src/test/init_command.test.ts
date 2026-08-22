@@ -72,3 +72,23 @@ test("never writes .env or .env.example on the non-interactive paths", async () 
   assert.equal(existsSync(join(dir, ".env")), false);
   assert.equal(existsSync(join(dir, ".env.example")), false);
 });
+
+test("also installs the repo-local Claude Code skill by default, on every non-interactive path", async () => {
+  const code = await initCommand(["--cwd", dir, "--yes"]);
+  assert.equal(code, 0);
+  assert.ok(existsSync(join(dir, ".claude", "skills", "spf", "SKILL.md")), "spf init should install the skill unless --no-skills is passed");
+});
+
+test("--no-skills skips the skill install", async () => {
+  const code = await initCommand(["--cwd", dir, "--yes", "--no-skills"]);
+  assert.equal(code, 0);
+  assert.equal(existsSync(join(dir, ".claude", "skills", "spf")), false);
+});
+
+test("re-running spf init doesn't re-copy an unchanged skill install (install-skill's own idempotency)", async () => {
+  await initCommand(["--cwd", dir, "--yes"]);
+  const manifestPath = join(dir, ".claude", "skills", "spf", ".spf-skill-version");
+  const before = readFileSync(manifestPath, "utf-8");
+  await initCommand(["--cwd", dir, "--template", "ts-cc"]); // no --force: config write is a no-op, skill install still runs
+  assert.equal(readFileSync(manifestPath, "utf-8"), before);
+});

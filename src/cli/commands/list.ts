@@ -10,5 +10,6 @@ export function listCommand(): number {
     console.log();
   }
   console.log(`spf <name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>]   (spf run <name> ... works identically)`);
+  console.log(`spf watch polls a tracker and runs one of these chains per issue — spf doctor shows the current config.`);
   return 0;
 }

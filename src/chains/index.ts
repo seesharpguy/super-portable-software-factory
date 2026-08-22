@@ -94,6 +94,12 @@ export const CHAINS: ChainDefinition[] = [
 
   stepChain("document", "write up the work that was just done, from the diff", [steps.request(), steps.changes(), steps.document()]),
 
+  stepChain("refine", "decompose a product spec into a feature/story-or-bug tree of tracker issues — spf watch's spec-ready lane", [
+    steps.request(),
+    steps.refine(),
+    steps.publishIssues(),
+  ]),
+
   {
     name: "simple-sdlc",
     describe: "the work is real and its shape is not obvious — plan, build, test, review, document; 3 commits",

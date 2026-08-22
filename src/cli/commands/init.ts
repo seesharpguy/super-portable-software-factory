@@ -10,6 +10,14 @@
  * `src/cli/index.ts`). Piped input, `--yes`, or `--template <name>` all
  * fall through to the original non-interactive behavior unchanged — a
  * scripted `spf init` must never hang waiting on stdin.
+ *
+ * Every path here also installs the repo-local Claude Code skill (the same
+ * work `spf install-skill` does by hand) unless `--no-skills` is passed —
+ * on every run, not just the first: `install-skill` is idempotent (a no-op
+ * once the skill is already up to date), so this never re-does work or
+ * clobbers a locally-edited skill file. `--user` (installing to
+ * `~/.claude/skills/spf` instead) stays a `spf install-skill` invocation of
+ * its own; `init` only ever writes the repo-local default.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -22,6 +30,7 @@ import { paint } from "../../core/console.ts";
 import { createAsker, isInteractive, InterviewAborted } from "../ask.ts";
 import { gatherContext, runInterview } from "../interview.ts";
 import { readEnvFile, upsertEnvFile, writeEnvExample } from "../env_file.ts";
+import { installSkillCommand } from "./install-skill.ts";
 
 const TEMPLATE_SUFFIX = ".spf.config.yaml";
 
@@ -72,8 +81,8 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 # explicit Flue-style provider/model-id strings, and an agent's own model
 # always wins over defaults.model — so those three keep running on whatever
 # backend you just switched to, with a model id it can't resolve, unless
-# you override their model here too (builder/scout have no model of their
-# own in the packaged roster, so they need no override). See
+# you override their model here too (builder/scout/refiner have no model of
+# their own in the packaged roster, so they need no override). See
 # assets/templates/ts.spf.config.yaml (or --template ts) for the full
 # working pattern.
 
@@ -91,6 +100,13 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
+#   # Optional second lane: decompose a spf:spec-ready product spec into a
+#   # feature/story-or-bug tree of real issues. Off by default; needs
+#   # issue_provider: github — issue authoring isn't implemented for Jira yet.
+#   refine:
+#     enabled: true
+#     chain: refine
+#     concurrency: 1
 
 # Uncomment to push notifications for unattended work — spf watch's daemon
 # lifecycle, and every chain run (spf <chain> / spf run, including watch's
@@ -121,10 +137,18 @@ const GENERATED_HEADER = `# .spf/spf.config.yaml — written by \`spf init\`'s i
 `;
 
 export async function initCommand(argv: string[]): Promise<number> {
-  const { options, flags } = parseCli(argv, ["cwd", "template"], ["force", "yes"]);
+  const { options, flags } = parseCli(argv, ["cwd", "template"], ["force", "yes", "no-skills"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
   const sfDir = path.join(anchor.repo_root, ".spf");
   mkdirSync(sfDir, { recursive: true });
+
+  // Idempotent (a no-op once the skill is already up to date, a `.new`
+  // sibling rather than an overwrite for a locally-edited file) — safe to
+  // call on every `spf init`, not just the first.
+  const installSkill = () => {
+    if (flags["no-skills"]) return;
+    installSkillCommand(options["cwd"] ? ["--cwd", options["cwd"]] : []);
+  };
 
   const configPath = path.join(sfDir, "spf.config.yaml");
   const templateName = options["template"];
@@ -138,6 +162,7 @@ export async function initCommand(argv: string[]): Promise<number> {
       writeFileSync(configPath, content);
       console.log(`wrote ${configPath}${templateName ? ` (from template "${templateName}")` : ""}`);
     }
+    installSkill();
   } else {
     const asker = createAsker();
     try {
@@ -146,6 +171,7 @@ export async function initCommand(argv: string[]): Promise<number> {
         if (!overwrite) {
           console.log("leaving the existing config alone (--force to skip this prompt)");
           asker.close();
+          installSkill();
           ensureGitignore(anchor.repo_root, GITIGNORE_ENTRIES);
           return 0;
         }
@@ -164,6 +190,7 @@ export async function initCommand(argv: string[]): Promise<number> {
       console.log(`wrote ${configPath}`);
       if (Object.keys(result.env).length > 0) upsertEnvFile(anchor.repo_root, result.env);
       writeEnvExample(anchor.repo_root, result.envExampleKeys);
+      installSkill();
 
       // The same merge-then-validate pipeline `spf doctor` runs — catches a
       // bad answer (e.g. a suite naming an unconfigured check) right after

@@ -183,6 +183,23 @@ export function doctorCommand(argv: string[]): number {
       );
     }
     check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
+
+    if (cfg.watch.refine.enabled) {
+      check(
+        report,
+        "watch.refine.chain",
+        Boolean(findChain(cfg.watch.refine.chain)),
+        findChain(cfg.watch.refine.chain) ? cfg.watch.refine.chain : `"${cfg.watch.refine.chain}" is not a registered chain`,
+      );
+      check(
+        report,
+        "watch.refine issue authoring",
+        cfg.watch.issue_provider === "github",
+        cfg.watch.issue_provider === "github"
+          ? "github supports issue authoring (createIssue/sub-issues)"
+          : `watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — the refine lane needs "github" (Jira issue authoring isn't implemented yet)`,
+      );
+    }
   }
 
   if (cfg.notifications.events !== "off") {

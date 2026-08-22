@@ -108,9 +108,45 @@ sections: `assets/templates/ts.spf.config.yaml` in the spf package (or
 `spf init --template ts` to write it straight into `.spf/spf.config.yaml`).
 `spf init` with no `--template` prints every packaged template's name.
 
-### `notifications`
+### `watch`
 
-Optional outbound push for unattended work — `spf watch`'s daemon lifecycle,
+Full mechanism: the main README's "`spf watch`" section. Field reference:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `issue_provider` | `"github"` \| `"jira"` | The tracker `spf watch` polls. Default `github`. |
+| `code_host` | `"github"` \| `"bitbucket"` | Where PRs open — independent of `issue_provider` (Jira issues against a Bitbucket repo is a real setup). Default `github`. |
+| `repo` | string | Required once watch is actually run (not schema-validated — fails loudly at `spf watch` startup instead). `"owner/name"` for `code_host: github`, `"workspace/repo_slug"` for `code_host: bitbucket`. |
+| `label_prefix` | string | State-machine label prefix — polls/writes `<prefix>:ready`, `<prefix>:working`, etc. Default `spf`. |
+| `chain` | string | Which registered chain runs per claimed `<prefix>:ready` issue. Default `plan-build-test`. |
+| `base_branch` | string | Branch worktrees fork from and PRs target. Default `main`. |
+| `poll_ms` | int | Tick interval. Default `60000`. |
+| `concurrency` | int ≥1 | Max issues claimed and run at once, the build lane's own budget (independent of `refine.concurrency`). Default `2`. |
+| `jira.base_url` / `jira.project_key` | string | Only consulted when `issue_provider: jira`. |
+| `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` — `spf watch` fails loudly at startup otherwise, since issue authoring (create + link a hierarchy) isn't implemented for Jira yet. |
+| `refine.chain` | string | Which registered chain runs per claimed spec. Default `refine`. |
+| `refine.concurrency` | int ≥1 | The refine lane's own budget, separate from `concurrency`. Default `1`. |
+
+```yaml
+watch:
+  repo: owner/name
+  label_prefix: spf
+  chain: plan-build-test
+  refine:
+    enabled: true       # decompose spf:spec-ready specs into a feature/story tree
+    chain: refine
+    concurrency: 1
+```
+
+Generated issues carry a second, independent label vocabulary —
+`<prefix>:type:epic|feature|story|bug|task` — seeded by `spf watch init`
+alongside the state labels. A feature/epic (a container: some other node
+names it as `parent`) gets only its type label; a leaf (story/bug/task)
+additionally gets `<prefix>:refined`, so a human can review and promote it to
+`<prefix>:ready` when it's worth building — the refine lane never
+auto-promotes anything.
+
+
 and every chain run (`spf <chain>` / `spf run`, including watch's own
 per-issue runs). Interactive commands (`doctor`, `list`, `sessions`,
 `phases`, `events`, `init`, `ui`, `migrate`, `eject`, `abort`, `version`)

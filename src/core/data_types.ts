@@ -160,6 +160,36 @@ export const DocumentOutput = envelopeType("DocumentOutput", {
 });
 export type DocumentOutputT = v.InferOutput<typeof DocumentOutput.schema>;
 
+/**
+ * One node in a decomposed product spec — a feature/epic container, or a
+ * story/bug/task leaf. Flat with a `parent` key, not nested JSON: a model
+ * emits a flat list far more reliably than a recursive tree, and a flat
+ * shape is what lets `blocked_by` reference ANY other node, container or
+ * leaf, not just siblings under the same parent.
+ *
+ * `key` is the refiner's own local id for this run (e.g. "F1", "S1.1") —
+ * scoped to one `RefineOutput`, never a tracker id; `core/refine.ts`
+ * resolves `key`s to real issue numbers as it creates them, in dependency
+ * order. See `gates.refinementWellFormed` for the shape rules enforced on
+ * this list before publish ever runs (unique keys, resolvable references,
+ * no cycles, container/leaf kind agreement, at least one leaf).
+ */
+export const RefinedIssueSchema = v.object({
+  key: v.string(),
+  kind: v.picklist(["epic", "feature", "story", "bug", "task"]),
+  title: v.string(),
+  body: v.string(), // "## What to build" / "## Acceptance criteria" — see assets/prompts/refiner/user.md
+  parent: v.optional(v.string(), ""), // another node's `key`; "" = top level
+  blocked_by: v.optional(v.array(v.string()), () => []), // other nodes' `key`s that must land first
+});
+export type RefinedIssue = v.InferOutput<typeof RefinedIssueSchema>;
+
+/** A product spec decomposed into a feature/story tree — see `steps.refine()` and `core/refine.ts`. */
+export const RefineOutput = envelopeType("RefineOutput", {
+  issues: v.optional(v.array(RefinedIssueSchema), () => []),
+});
+export type RefineOutputT = v.InferOutput<typeof RefineOutput.schema>;
+
 // ── Deterministic quality blocks ─────────────────────────────────────────────
 
 export const QualityAreaSchema = v.picklist(["frontend", "backend"]);
@@ -449,6 +479,23 @@ export const WatchJiraConfigSchema = v.object({
 });
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 
+/**
+ * The second `spf watch` lane: decompose a `<prefix>:spec-ready` product
+ * spec into a feature/story tree of real issues, instead of running
+ * `watch.chain` against it directly (a spec is not individually workable —
+ * see `core/refine.ts`). Off by default so an existing `watch:` config's
+ * behavior is unchanged by upgrading; turning it on with
+ * `issue_provider: jira` fails loudly at `spf watch` startup, since
+ * `JiraProvider` doesn't implement `IssueAuthoringProvider` (create/link)
+ * yet — see its module comment.
+ */
+export const WatchRefineConfigSchema = v.object({
+  enabled: v.optional(v.boolean(), false),
+  chain: v.optional(v.string(), "refine"),
+  concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 1),
+});
+export type WatchRefineConfig = v.InferOutput<typeof WatchRefineConfigSchema>;
+
 export const WatchConfigSchema = v.object({
   issue_provider: v.optional(WatchIssueProviderSchema, "github"),
   code_host: v.optional(WatchCodeHostSchema, "github"),
@@ -459,6 +506,7 @@ export const WatchConfigSchema = v.object({
   poll_ms: v.optional(v.number(), 60_000),
   concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),
   jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
+  refine: v.optional(WatchRefineConfigSchema, () => v.parse(WatchRefineConfigSchema, {})),
 });
 export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
 

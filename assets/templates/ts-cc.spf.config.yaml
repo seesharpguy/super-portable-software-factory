@@ -47,9 +47,9 @@ defaults:
 # provider/model-id strings, which an agent's own model always wins over
 # defaults.model above — switching coding_agent globally does NOT reset
 # those three, so they'd run on Claude Code (redirected at Ollama) with a
-# model id Ollama has never heard of, and fail outright. builder/scout
-# have no model of their own in the packaged roster, so they correctly
-# inherit defaults.model above and need no override here.
+# model id Ollama has never heard of, and fail outright. builder/scout/
+# refiner have no model of their own in the packaged roster, so they
+# correctly inherit defaults.model above and need no override here.
 agents:
   - name: planner
     model: qwen3-coder:30b

@@ -16,7 +16,7 @@ import { GitHubProvider } from "../../core/issues/github_provider.ts";
 import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
-import { createWatchState, tick, type ChainRunResult, type WatchDeps } from "../../core/watch.ts";
+import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import type { SFConfig } from "../../core/data_types.ts";
@@ -155,6 +155,23 @@ export async function watchCommand(argv: string[]): Promise<number> {
     console.error(`watch.chain ${JSON.stringify(cfg.watch.chain)} is not a registered chain — run \`spf list\` to see every chain`);
     return 1;
   }
+  if (cfg.watch.refine.enabled) {
+    if (cfg.watch.issue_provider !== "github") {
+      // Fail loudly at startup, not silently every tick: JiraProvider
+      // doesn't implement IssueAuthoringProvider yet (see its module
+      // comment) — a refine lane that can never publish would otherwise
+      // just claim every spec-ready spec and block it, forever.
+      console.error(
+        `watch.refine.enabled is true but watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — ` +
+          `the refine lane needs "github" (issue authoring isn't implemented for Jira yet)`,
+      );
+      return 1;
+    }
+    if (!findChain(cfg.watch.refine.chain)) {
+      console.error(`watch.refine.chain ${JSON.stringify(cfg.watch.refine.chain)} is not a registered chain — run \`spf list\` to see every chain`);
+      return 1;
+    }
+  }
 
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
   const lockPath = path.join(dataPaths.data_dir, "watch.lock");
@@ -194,23 +211,71 @@ export async function watchCommand(argv: string[]): Promise<number> {
     symlinkSync(dataPaths.data_dir, target, "dir");
   }
 
+  /** Shared by `runChain`/`runRefine`: best-effort enrichment of a generic "didn't succeed" message with the first phase that actually failed, read back from the worktree's own (symlinked) trace db. */
+  function detailFromFailedPhase(cwd: string, adwId: string, prefix: string): string {
+    let detail = prefix;
+    try {
+      const wtAnchor = paths.resolveAnchor(cwd);
+      const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
+      const db = new SfDb(wtDataPaths.db_path);
+      const failed = db.phases(adwId).find((p) => p.status === "fail");
+      if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
+    } catch {
+      // best-effort — the generic message above still points at where to look
+    }
+    return detail;
+  }
+
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
     const chainDef = findChain(cfg.watch.chain)!; // checked above
     const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd, chain_name: chainDef.name };
     const code = await runChainDef(chainDef, ctx);
     if (code === 0) return { accepted: true, adwId: opts.adwId, detail: "" };
+    const detail = detailFromFailedPhase(
+      opts.cwd,
+      opts.adwId,
+      `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
+    );
+    return { accepted: false, adwId: opts.adwId, detail };
+  };
 
-    let detail = `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`;
+  /**
+   * Same shape as `runChain`, for the refine lane — with one extra step on
+   * success: a chain's return value is just an exit code, so the created-
+   * issues list `steps.publishIssues()` actually produced has to come back
+   * through the side channel it wrote (`refine_publish.json`, under the
+   * SAME symlinked session dir `linkDataDir` already wires up), not through
+   * `runChainDef`'s return value.
+   */
+  const runRefine = async (opts: { prompt: string; cwd: string; adwId: string; issueId: string }): Promise<RefineRunResult> => {
+    const chainDef = findChain(cfg.watch.refine.chain)!; // checked above
+    const ctx: ChainContext = {
+      prompt: opts.prompt,
+      config_paths: configPaths,
+      adw_id: opts.adwId,
+      cwd: opts.cwd,
+      chain_name: chainDef.name,
+      issue_id: opts.issueId,
+    };
+    const code = await runChainDef(chainDef, ctx);
+    if (code !== 0) {
+      const detail = detailFromFailedPhase(
+        opts.cwd,
+        opts.adwId,
+        `Refine chain "${cfg.watch.refine.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
+      );
+      return { accepted: false, adwId: opts.adwId, detail, created: [] };
+    }
+    let created: RefineRunResult["created"] = [];
     try {
       const wtAnchor = paths.resolveAnchor(opts.cwd);
       const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-      const db = new SfDb(wtDataPaths.db_path);
-      const failed = db.phases(opts.adwId).find((p) => p.status === "fail");
-      if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
+      const summaryPath = path.join(wtDataPaths.data_dir, "sessions", opts.adwId, "context_handoff", "refine_publish.json");
+      created = JSON.parse(readFileSync(summaryPath, "utf-8"));
     } catch {
-      // best-effort — the generic message above still points at where to look
+      // best-effort — an empty list still lets runSpec finish cleanly, just with no per-issue summary
     }
-    return { accepted: false, adwId: opts.adwId, detail };
+    return { accepted: true, adwId: opts.adwId, detail: "", created };
   };
 
   const deps: WatchDeps = {
@@ -222,6 +287,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
     chain: cfg.watch.chain,
     baseBranch: cfg.watch.base_branch,
     concurrency: cfg.watch.concurrency,
+    refineEnabled: cfg.watch.refine.enabled,
+    refineConcurrency: cfg.watch.refine.concurrency,
+    refineChain: cfg.watch.refine.chain,
+    runRefine,
     worktreesDir,
     linkDataDir,
     dryRun: Boolean(flags["dry-run"]),
@@ -263,7 +332,9 @@ export async function watchCommand(argv: string[]): Promise<number> {
   process.on("SIGTERM", stop);
 
   console.log(
-    `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}${flags["dry-run"] ? "  (dry run)" : ""}`,
+    `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}` +
+      (cfg.watch.refine.enabled ? `  refine "${cfg.watch.refine.chain}" concurrency ${cfg.watch.refine.concurrency}` : "") +
+      (flags["dry-run"] ? "  (dry run)" : ""),
   );
   deps.notify({
     kind: "watch_started",

@@ -15,7 +15,7 @@ Everyone can get an agent to write code once. Almost nobody gets the same result
 npm i -g @gr8ful/spf
 ```
 
-No Bun, no separate coding-agent binary to install first, no template stamped into your repo. `spf` ships with a packaged default agent roster and default prompts — it runs against any repo with zero setup, and only writes files into that repo if you explicitly ask it to (`spf init`, `spf install-skill`).
+No Bun, no separate coding-agent binary to install first, no template stamped into your repo. `spf` ships with a packaged default agent roster and default prompts — it runs against any repo with zero setup, and only writes files into that repo if you explicitly ask it to (`spf init`, which also installs the Claude Code skill unless you pass `--no-skills`; `spf install-skill` does just the skill by hand).
 
 ```bash
 cd your-repo
@@ -37,6 +37,8 @@ spf list                       # every chain this install knows, its phases, wha
 On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code` or `flue`) and model (optionally customized per agent instead of one model for the whole roster), which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host, and whether to push notifications to Slack/Teams/a webhook — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
 
 Without an interview, `spf init` writes the same small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
+
+Every `spf init` run — interview or not — also installs the repo-local Claude Code skill (`.claude/skills/spf`), the same work `spf install-skill` does by hand: pass `--no-skills` to skip it. It's idempotent (a no-op once the skill is already current, and writes a `.new` sibling instead of overwriting a file you've locally edited), so re-running `spf init` never clobbers anything there. `spf install-skill --user` (installing to `~/.claude/skills/spf` instead) is still its own separate invocation.
 
 ### Local development
 
@@ -108,7 +110,7 @@ agents:
     writes: [specs/]                 # the plan is all it may leave in the repo
 ```
 
-Five starter agents ship in the box: `planner`, `builder`, `scout` (read-only recon), `reviewer`, and `documenter`. There is no tester, because running a suite is a known command and therefore code, not an agent's job.
+Six starter agents ship in the box: `planner`, `builder`, `scout` (read-only recon), `refiner` (decomposes a product spec for `spf watch`'s refine lane — see "`spf watch`" below), `reviewer`, and `documenter`. There is no tester, because running a suite is a known command and therefore code, not an agent's job.
 
 Every agent gets its own model, thinking level, prompts, and tools. Give the planner a frontier model and the builder a cheap fast one. Give the reviewer no ability to write code at all.
 
@@ -243,6 +245,8 @@ spf build-test "implement the plan" --adw-id a1b2c3d4
 
 Polls an issue tracker for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR against a code host, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
 
+A second, optional lane (`watch.refine`, off by default) decomposes a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues instead — see "Refining specs" below.
+
 The tracker (`issue_provider`) and the code host (`code_host`) are independent config choices, not one bundled "provider" — a tracker and a host are independent choices in practice (Jira issues against a Bitbucket repo is a real setup). Supported today: `issue_provider: github | jira`, `code_host: github | bitbucket` — any combination works, including Jira+GitHub or GitHub-issues+Bitbucket.
 
 The easiest way into any of this is `spf init`'s interview: it asks whether to enable `spf watch`, which tracker and code host, and collects exactly the env vars that combination needs (below) straight into `.env` — no hand-editing YAML or hunting down which credential pair a given combination wants.
@@ -283,15 +287,61 @@ spf watch --dry-run          # log intended claims/transitions, mutate nothing
 
 No GitHub App, no webhook, no Jira/Bitbucket app install — it's a plain REST poll against whichever combination is configured, same philosophy as the trace db's own polling contract. See [`assets/templates/`](assets/templates/) for full worked configs (also usable directly via `spf init --template <name>`), and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
 
+### Refining specs (`watch.refine`)
+
+A product spec isn't individually workable — it needs to become a feature,
+broken down into user stories and bugs, before the build lane above has
+anything to claim. `watch.refine` is a second lane over the same poll loop
+that does exactly that: it polls `<prefix>:spec-ready`, runs a decomposition
+chain (`refine` by default) against the spec in its own worktree, and
+publishes what it produces as real tracker issues — a feature/epic container
+plus story/bug/task leaves, linked via GitHub's native sub-issue hierarchy.
+
+```yaml
+watch:
+  issue_provider: github    # required — issue authoring isn't implemented for Jira yet
+  repo: owner/name
+  refine:
+    enabled: true
+    chain: refine           # any chain that ends in steps.publishIssues()
+    concurrency: 1          # this lane's own budget, independent of watch.concurrency
+```
+
+Every generated issue carries a `<prefix>:type:epic|feature|story|bug|task`
+label. A container (a feature/epic — something else names it as `parent`)
+gets only that label; a leaf additionally gets `<prefix>:refined` — **never**
+`<prefix>:ready`. Promoting a leaf to `<prefix>:ready` is a deliberate human
+decision: the refine lane never auto-promotes anything, so a spec fanning out
+into twenty stories doesn't turn into twenty unattended chain runs and twenty
+PRs with nobody having looked at the breakdown first. Once you do promote a
+leaf, the existing build lane picks it up completely unchanged.
+
+The spec issue itself gets a `spec-ready → refining → done`/`blocked`
+lifecycle, same shape as the build lane, and a summary comment listing every
+issue it created. Try it by hand first, against a real spec, before turning
+on the daemon:
+
+```bash
+spf refine "<spec text or path/to/spec.md>" --issue 42   # --issue renders a "## Parent: #42" back-reference
+```
+
+`spf watch init` seeds the type labels alongside the state ones. This lane's
+prompt (`assets/prompts/refiner/`) is adapted from a "tracer-bullet ticket"
+decomposition skill — vertical slices, a `blocked_by` dependency graph, and
+an expand/migrate/contract sequence for wide mechanical refactors — with a
+gate (`gates.refinementWellFormed`) added on top to enforce the
+container/leaf shape that skill left as prose convention rather than a
+checked rule.
+
 ### GitHub (`issue_provider: github` and/or `code_host: github`)
 
 ```bash
 export GITHUB_TOKEN=...   # classic PAT; spf doctor checks it's set
 ```
 
-`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked` labels with a color and description each — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
+`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked`/`spec-ready`/`refining`/`refined` labels, plus `<prefix>:type:epic`/`feature`/`story`/`bug`/`task` (used by the refine lane whether or not it's enabled), each with a color and description — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
 
-A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes on GitHub: creating/editing labels, reading and labeling issues, posting comments, opening PRs, and reading PR/check-run status.
+A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes on GitHub: creating/editing labels, reading and labeling issues, posting comments, opening PRs, reading PR/check-run status, and — with `watch.refine.enabled` — creating issues and linking them via the sub-issues API. All of it is already covered by `repo`/`public_repo`; refine needs no additional scope.
 
 | Target repo | Scope | Covers |
 |---|---|---|
@@ -385,7 +435,7 @@ super-portable-software-factory/
 └── assets/
     ├── defaults/    # the packaged default roster
     ├── prompts/     # default system.md + user.md per starter agent
-    └── skill/       # an optional Claude Code skill — `spf install-skill` to use it
+    └── skill/       # a Claude Code skill — `spf init` installs it by default (`--no-skills` to opt out), or `spf install-skill` by hand
 ```
 
 There's no template stamped into your repo. Everything above ships inside the installed npm package; a repo you run `spf` against only ever gains a `.spf/` directory, and only if you ask for one.

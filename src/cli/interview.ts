@@ -288,6 +288,22 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
 
     watch = { issue_provider: issueProvider, code_host: codeHost, repo, label_prefix: labelPrefix, chain, base_branch: baseBranch };
 
+    // Issue authoring (create + link a hierarchy) is only implemented on
+    // GitHubProvider today — see jira_provider.ts's module comment — so
+    // this lane isn't offered at all on a Jira tracker rather than asking a
+    // question that would just fail at `spf watch` startup.
+    if (issueProvider === "github") {
+      const enableRefine = await asker.confirm(
+        `Also enable the refine lane (decompose a "${labelPrefix}:spec-ready" product spec into a feature/story-or-bug tree)?`,
+        false,
+      );
+      if (enableRefine) {
+        const refineChainChoices = CHAINS.map((c) => ({ value: c.name, label: c.name, hint: c.describe }));
+        const refineChain = await asker.select("Chain to run per spec", refineChainChoices, "refine");
+        watch.refine = { enabled: true, chain: refineChain };
+      }
+    }
+
     if (issueProvider === "jira") {
       const baseUrl = await asker.text("Jira base URL", {
         default: "https://your-domain.atlassian.net",
@@ -392,6 +408,10 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       if (watchPollMs !== "60000") watch.poll_ms = Number(watchPollMs);
       const concurrency = await asker.text("watch.concurrency", { default: "2" });
       if (concurrency !== "2") watch.concurrency = Number(concurrency);
+      if ((watch.refine as Record<string, unknown> | undefined)?.enabled) {
+        const refineConcurrency = await asker.text("watch.refine.concurrency", { default: "1" });
+        if (refineConcurrency !== "1") (watch.refine as Record<string, unknown>).concurrency = Number(refineConcurrency);
+      }
     }
 
     const engineerName = await asker.text("ENGINEER_NAME (falls back to `git config user.name`)", { default: ctx.gitName ?? "" });

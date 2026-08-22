@@ -29,10 +29,20 @@
  * `ensureLabels()` is a no-op that reports the labels this run will use:
  * Jira labels are freeform strings with no color/description registry to
  * seed, unlike GitHub's.
+ *
+ * Does NOT implement `IssueAuthoringProvider` — the refine lane's create/
+ * link seam. Jira maps cleanly in principle (native issue types plus a
+ * `parent` field give a real hierarchy, unlike the label trick this file
+ * already leans on for state), but that is a real implementation, not a
+ * one-line stub, so it is a deliberate follow-on rather than done here.
+ * `resolveIssueAuthoringProvider()` (`cli/commands/watch.ts`) returns `null`
+ * for this provider, and `watch.refine.enabled: true` with
+ * `issue_provider: jira` fails loudly at startup rather than silently
+ * running a refine lane that can never publish anything.
  */
 import type { EnsureLabelsResult, Issue, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
-const STATES: WatchState[] = ["ready", "working", "review", "done", "blocked"];
+const STATES: WatchState[] = ["ready", "working", "review", "done", "blocked", "spec-ready", "refining", "refined"];
 const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*?\})/s;
 
 interface JiraIssue {
@@ -152,16 +162,18 @@ export class JiraProvider implements IssueProvider {
     return this.searchByLabel(this.label(state));
   }
 
-  async claim(issue: Issue): Promise<boolean> {
-    const next = issue.labels.filter((l) => l !== this.label("ready"));
-    next.push(this.label("working"));
+  async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {
+    const from = this.label(opts?.from ?? "ready");
+    const to = this.label(opts?.to ?? "working");
+    const next = issue.labels.filter((l) => l !== from);
+    next.push(to);
     await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: next } }) });
     const fresh = await this.jira<JiraIssue>(`/rest/api/3/issue/${issue.id}?fields=summary,description,labels`);
     const labels = fresh.fields.labels;
-    const claimed = labels.includes(this.label("working")) && !labels.includes(this.label("ready"));
+    const claimed = labels.includes(to) && !labels.includes(from);
     if (!claimed) {
-      const revert = labels.filter((l) => l !== this.label("working"));
-      revert.push(this.label("ready"));
+      const revert = labels.filter((l) => l !== to);
+      revert.push(from);
       await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: revert } }) }).catch(
         () => undefined,
       );

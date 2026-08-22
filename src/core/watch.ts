@@ -1,10 +1,18 @@
 /**
- * The `spf watch` state machine: poll -> claim -> run a chain -> PR ->
- * done/blocked. Provider-agnostic (drives whatever `IssueProvider` it's
- * given) and chain-agnostic (drives whatever `runChain` callback it's
+ * The `spf watch` state machine — two lanes over the same poll loop.
+ *
+ * The build lane: poll -> claim -> run a chain -> PR -> done/blocked.
+ * The refine lane (`watch.refine.enabled`, off by default): poll a
+ * `spec-ready` product spec -> claim -> decompose it into a feature/story
+ * tree -> publish those as real issues -> done/blocked. A spec is not
+ * individually workable, so this lane never opens a PR — it hands the build
+ * lane its next batch of `ready`-able work instead (see `core/refine.ts`).
+ *
+ * Provider-agnostic (drives whatever `IssueProvider` it's given) and
+ * chain-agnostic (drives whatever `runChain`/`runRefine` callback it's
  * given) — deliberately kept out of `src/chains/`'s dependency direction,
- * so this stays testable against a fake provider and a fake `runChain`
- * with no chain registry involved.
+ * so this stays testable against a fake provider and fake callbacks with no
+ * chain registry involved.
  *
  * Design lifted from the user's own GitHub-poller reference implementation
  * (a label-as-state-machine daemon), leaned down for a v1: no per-issue
@@ -41,6 +49,23 @@ export interface ChainRunResult {
   detail: string;
 }
 
+/** One issue the refine lane created — enough for `finishSpec`'s summary comment and the marker's idempotency record. */
+export interface RefinedIssueRef {
+  id: string;
+  title: string;
+  kind: string;
+  isLeaf: boolean;
+}
+
+export interface RefineRunResult {
+  accepted: boolean;
+  adwId: string;
+  /** Shown to the engineer via a `blocked` comment on a failed/no-op run. */
+  detail: string;
+  /** What `steps.publishIssues()` created, read back from its side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted`. */
+  created: RefinedIssueRef[];
+}
+
 export interface WatchDeps {
   provider: IssueProvider;
   codeHost: CodeHostProvider;
@@ -51,6 +76,18 @@ export interface WatchDeps {
   chain: string;
   baseBranch: string;
   concurrency: number;
+  /**
+   * The second lane — decomposing a `<prefix>:spec-ready` product spec
+   * instead of building a `<prefix>:ready` issue. `false` (the default) is
+   * a complete no-op: `claimSpecs`/`reconcileRefining` return immediately,
+   * so an existing `spf watch` config sees no new poll traffic at all until
+   * this is turned on. See `WatchConfigSchema`'s `refine` field.
+   */
+  refineEnabled: boolean;
+  refineConcurrency: number;
+  refineChain: string;
+  /** Same shape as `runChain`, for the refine lane — see its own doc comment for why the two aren't unified into one callback. */
+  runRefine: (opts: { prompt: string; cwd: string; adwId: string; issueId: string }) => Promise<RefineRunResult>;
   worktreesDir: string; // OUTSIDE the repo — see module doc comment
   /**
    * Symlink (or otherwise wire up) `<worktreePath>/.spf/data` to the MAIN
@@ -80,28 +117,53 @@ export interface WatchDeps {
 
 export interface WatchRunState {
   inflight: Set<string>;
+  /**
+   * Separate from `inflight` — not a defensive copy of the same set, a
+   * genuinely different budget. The refine lane's `claimSpecs` caps against
+   * `refineConcurrency`, independent of the build lane's `concurrency`; a
+   * shared set would conflate "how many specs are being refined" with "how
+   * many issues are being built" and make either budget impossible to
+   * enforce on its own. The two never collide on an id in practice (a
+   * `spec-ready` issue and a `ready` issue are never the same issue), but
+   * that isn't why this is separate — the budgets are what require it.
+   */
+  refining: Set<string>;
 }
 
 export function createWatchState(): WatchRunState {
-  return { inflight: new Set() };
+  return { inflight: new Set(), refining: new Set() };
+}
+
+function slugifyTitle(title: string): string {
+  return (
+    title
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join("-")
+      .replace(/[^a-z0-9-]/g, "") || "issue"
+  );
 }
 
 export function branchNameFor(issue: Issue): string {
-  const slug = issue.title
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 5)
-    .join("-")
-    .replace(/[^a-z0-9-]/g, "");
   // The issue's own id in the branch name isn't just labeling: Jira's
   // Bitbucket integration auto-links a PR to the issue when its key
   // appears anywhere in the branch name, no explicit API call needed.
-  return `spf-watch/${issue.id}-${slug || "issue"}`.slice(0, 200);
+  return `spf-watch/${issue.id}-${slugifyTitle(issue.title)}`.slice(0, 200);
+}
+
+/** Same idea as `branchNameFor`, for the refine lane's throwaway worktree — a spec never gets a PR, so this branch is only ever fetched-from-and-thrown-away, never pushed. */
+export function refineBranchNameFor(issue: Issue): string {
+  return `spf-refine/${issue.id}-${slugifyTitle(issue.title)}`.slice(0, 200);
 }
 
 function worktreePathFor(deps: WatchDeps, issue: Issue): string {
   return path.join(deps.worktreesDir, `issue-${issue.id}`);
+}
+
+function specWorktreePathFor(deps: WatchDeps, issue: Issue): string {
+  return path.join(deps.worktreesDir, `spec-${issue.id}`);
 }
 
 function cleanupWorktree(deps: WatchDeps, marker: WatchMarker | null): void {
@@ -151,6 +213,78 @@ export async function reconcileOrphans(deps: WatchDeps, state: WatchRunState): P
       });
       if (!deps.dryRun) {
         await deps.provider.transition(issue, "blocked", `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned attempts.`);
+        cleanupWorktree(deps, marker);
+      }
+    }
+  }
+}
+
+/**
+ * Post the summary comment on a decomposed spec and transition it to `done`
+ * — the refine lane's one shared finishing move, reached from both the
+ * normal path (`runSpec`, right after a successful publish) and the
+ * orphan-resume path (`reconcileRefining`, when a completed publish's
+ * marker survived a crash the `transition` itself didn't). `created` only
+ * has titles/kinds in the normal path — an orphan resume has nothing but
+ * the ids `WatchMarker.refined` recorded, and the comment degrades to a
+ * bare list of `#id`s rather than blocking on a re-fetch.
+ */
+async function finishSpec(deps: WatchDeps, issue: Issue, created: Array<{ id: string; title?: string; kind?: string }>): Promise<void> {
+  const body =
+    created.length > 0
+      ? `spf watch refined this spec into ${created.length} issue(s):\n\n` +
+        created.map((c) => (c.title ? `- #${c.id} (${c.kind}): ${c.title}` : `- #${c.id}`)).join("\n") +
+        `\n\nPromote any of them to \`${deps.labelPrefix}:ready\` when it's worth building.`
+      : `spf watch refined this spec but the refiner produced no issues.`;
+  deps.notify({
+    kind: "spec_refined",
+    level: "info",
+    title: `spec ${issue.id} refined`,
+    detail: `${created.length} issue(s) created.`,
+    fields: [["issue", issue.id], ["title", issue.title], ["created", String(created.length)]],
+  });
+  if (!deps.dryRun) {
+    await deps.provider.comment(issue, body);
+    await deps.provider.transition(issue, "done");
+  }
+}
+
+/**
+ * The refine lane's own `reconcileOrphans` — a `refining`-labeled spec this
+ * process isn't tracking is either a completed publish that crashed before
+ * its own `transition(issue, "done")` ran (resume: finish it, no re-run),
+ * or a genuine orphan (retry up to `MAX_ORPHAN_ATTEMPTS`, then give up).
+ * A no-op entirely when `watch.refine` is off — see `WatchDeps.refineEnabled`.
+ */
+export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): Promise<void> {
+  if (!deps.refineEnabled) return;
+  const refining = await deps.provider.listInState("refining");
+  for (const issue of refining) {
+    if (state.refining.has(issue.id)) continue;
+    const marker = await deps.provider.readMarker(issue);
+    if (marker?.refined && marker.refined.length > 0) {
+      deps.log(`watch: spec ${issue.id} orphaned after publish already completed — finishing`);
+      await finishSpec(deps, issue, marker.refined.map((id) => ({ id })));
+      continue;
+    }
+    const attempt = (marker?.attempt ?? 0) + 1;
+    if (attempt <= MAX_ORPHAN_ATTEMPTS) {
+      deps.log(`watch: spec ${issue.id} orphaned mid-refine, retry ${attempt}/${MAX_ORPHAN_ATTEMPTS} — back to spec-ready`);
+      if (!deps.dryRun) {
+        await deps.provider.writeMarker(issue, { ...marker, attempt });
+        await deps.provider.transition(issue, "spec-ready");
+      }
+    } else {
+      deps.log(`watch: spec ${issue.id} orphaned past ${MAX_ORPHAN_ATTEMPTS} attempts — blocked`);
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `spec ${issue.id} blocked`,
+        detail: `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned refine attempts.`,
+        fields: [["issue", issue.id], ["title", issue.title]],
+      });
+      if (!deps.dryRun) {
+        await deps.provider.transition(issue, "blocked", `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned refine attempts.`);
         cleanupWorktree(deps, marker);
       }
     }
@@ -285,6 +419,76 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
   }
 }
 
+/**
+ * One spec's full claim -> decompose -> publish path, run in the background
+ * — `claimSpecs` doesn't await this. The build lane's `runIssue`, minus the
+ * PR half: no `diffFiles` check (the refiner has `writes: []`, so an empty
+ * diff is the CORRECT outcome, not a failure), no push, no `openPr`. Its
+ * mirror image is "publish, then finish" instead of "commit, then review".
+ */
+async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
+  const branch = refineBranchNameFor(issue);
+  const worktreePath = specWorktreePathFor(deps, issue);
+  const adwId = `spec-${issue.id}`;
+  try {
+    // A spec re-claimed after a completed publish (the transition/comment
+    // that should have followed never ran — a crash, a kill) already has
+    // its answer on disk: skip straight to finishing rather than asking the
+    // refiner to redo work that already exists on the tracker. `to-tickets`
+    // (the skill this lane's prompt is ported from) has no such guard and
+    // would duplicate every issue on a re-run.
+    const existingMarker = await deps.provider.readMarker(issue);
+    if (existingMarker?.refined && existingMarker.refined.length > 0) {
+      deps.log(`watch: spec ${issue.id}: a previous attempt already published ${existingMarker.refined.length} issue(s) — finishing without re-running the refiner`);
+      await finishSpec(deps, issue, existingMarker.refined.map((id) => ({ id })));
+      return;
+    }
+
+    // See runIssue's identical comment: worktreePath/branch are deterministic
+    // from issue.id, so a leftover from a killed prior attempt is the only
+    // way either could already exist — clear it unconditionally.
+    cleanupWorktree(deps, { worktree: worktreePath, branch });
+    deps.git.fetch("origin", deps.baseBranch);
+    deps.git.worktreeAdd(worktreePath, branch, `origin/${deps.baseBranch}`);
+    deps.linkDataDir(worktreePath);
+    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
+
+    const prompt = `${issue.title}\n\n${issue.body}`.trim();
+    const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id });
+
+    if (!result.accepted) {
+      deps.log(`watch: spec ${issue.id}: refine chain "${deps.refineChain}" did not succeed — blocked`);
+      const detail = result.detail || `Refine chain "${deps.refineChain}" (adw_id ${adwId}) did not complete successfully. Run \`spf phases ${adwId}\` for detail.`;
+      deps.notify({
+        kind: "issue_blocked",
+        level: "error",
+        title: `spec ${issue.id} blocked`,
+        detail,
+        fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.refineChain], ["adw_id", adwId]],
+      });
+      await deps.provider.transition(issue, "blocked", detail);
+      cleanupWorktree(deps, { worktree: worktreePath, branch });
+      return;
+    }
+
+    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0, refined: result.created.map((c) => c.id) });
+    await finishSpec(deps, issue, result.created);
+    cleanupWorktree(deps, { worktree: worktreePath, branch });
+  } catch (error) {
+    const message = (error as Error).message;
+    deps.log(`watch: spec ${issue.id}: refine error: ${message}`);
+    deps.notify({
+      kind: "watch_error",
+      level: "error",
+      title: `spec ${issue.id} errored`,
+      detail: message,
+      fields: [["issue", issue.id], ["title", issue.title]],
+    });
+    await deps.provider.transition(issue, "blocked", `spf watch refine error: ${message}`).catch(() => undefined);
+    cleanupWorktree(deps, { worktree: worktreePath, branch });
+  }
+}
+
 /** Claim as many `ready` issues as the concurrency budget allows, and kick off `runIssue` for each in the background. */
 export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promise<void> {
   if (state.inflight.size >= deps.concurrency) return;
@@ -313,6 +517,35 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
   }
 }
 
+/** Claim as many `spec-ready` specs as `refineConcurrency` allows, and kick off `runSpec` for each in the background. A no-op when `watch.refine` is off. */
+export async function claimSpecs(deps: WatchDeps, state: WatchRunState): Promise<void> {
+  if (!deps.refineEnabled) return;
+  if (state.refining.size >= deps.refineConcurrency) return;
+  const eligible = await deps.provider.listInState("spec-ready");
+  for (const issue of eligible) {
+    if (state.refining.size >= deps.refineConcurrency) break;
+    if (state.refining.has(issue.id)) continue;
+    if (deps.dryRun) {
+      deps.log(`watch: [dry-run] would claim spec ${issue.id} (${issue.title}) and run refine chain "${deps.refineChain}"`);
+      continue;
+    }
+    const claimed = await deps.provider.claim(issue, { from: "spec-ready", to: "refining" });
+    if (!claimed) {
+      deps.log(`watch: spec ${issue.id} lost the claim race this tick — skipping`);
+      continue;
+    }
+    deps.log(`watch: claimed spec ${issue.id}: ${issue.title}`);
+    deps.notify({
+      kind: "issue_claimed",
+      level: "info",
+      title: `spec ${issue.id} claimed`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.refineChain]],
+    });
+    state.refining.add(issue.id);
+    runSpec(deps, issue).finally(() => state.refining.delete(issue.id));
+  }
+}
+
 function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => void {
   return (error: unknown) => {
     const message = (error as Error).message;
@@ -321,9 +554,11 @@ function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => v
   };
 }
 
-/** One poll tick: reconcile, finish, claim — each independently caught, so one phase's error never blocks the rest. */
+/** One poll tick: reconcile both lanes, finish reviews, then claim both lanes — each stage independently caught, so one stage's error never blocks the rest. */
 export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void> {
   await reconcileOrphans(deps, state).catch(tickErrorHandler(deps, "reconcileOrphans"));
+  await reconcileRefining(deps, state).catch(tickErrorHandler(deps, "reconcileRefining"));
   await finishReviews(deps).catch(tickErrorHandler(deps, "finishReviews"));
+  await claimSpecs(deps, state).catch(tickErrorHandler(deps, "claimSpecs"));
   await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));
 }

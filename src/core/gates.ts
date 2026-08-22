@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { GateReport, type EnvelopeBase, type GateFn, type RunContext } from "./data_types.ts";
+import { GateReport, type EnvelopeBase, type GateFn, type RefinedIssue, type RunContext } from "./data_types.ts";
 import { operatorEnv } from "./utils.ts";
 
 const TAIL_CHARS = 1000; // command output kept as evidence on a failure
@@ -141,6 +141,111 @@ export function verdictConsistent(envelope: EnvelopeBase, _run: RunContext): Gat
       ? "verdict is supported"
       : "approved=false but no blocking item or unmet requirement was given",
   );
+  return report;
+}
+
+const CONTAINER_KINDS = new Set(["epic", "feature"]);
+const LEAF_KINDS = new Set(["story", "bug", "task"]);
+
+/**
+ * The gate that turns `to-tickets`' flat, untyped ticket list into an
+ * actually-enforced feature/story-or-bug tree — see `RefinedIssueSchema`'s
+ * doc comment in `data_types.ts`. Checks the envelope's `issues` list
+ * against itself, never anything already published: `core/refine.ts` never
+ * gets a chance to publish a malformed tree in the first place, because a
+ * violation here re-prompts the SAME refiner session before `steps.refine()`
+ * ever hands off to `steps.publishIssues()`.
+ *
+ * "Container" and "leaf" are derived from the graph, not asserted by the
+ * agent: a node is a container iff some other node names it as `parent`.
+ */
+export function refinementWellFormed(envelope: EnvelopeBase, _run: RunContext): GateReport {
+  const report = new GateReport();
+  const issues = ((envelope as any).issues as RefinedIssue[] | undefined) ?? [];
+
+  if (issues.length === 0) {
+    report.check("issues", false, "a refinement produced no issues at all — decompose the spec into at least one leaf");
+    return report;
+  }
+
+  const byKey = new Map<string, RefinedIssue>();
+  for (const issue of issues) {
+    if (byKey.has(issue.key)) {
+      report.check(`key ${JSON.stringify(issue.key)}`, false, "duplicate key — every node needs a unique key within this refinement");
+    } else {
+      byKey.set(issue.key, issue);
+    }
+  }
+
+  const childKeys = new Set<string>(); // keys named as some OTHER node's parent -> that node is a container
+  for (const issue of issues) {
+    if (!issue.parent) continue;
+    if (!byKey.has(issue.parent)) {
+      report.check(`${issue.key}.parent`, false, `parent ${JSON.stringify(issue.parent)} does not match any issue's key`);
+      continue;
+    }
+    childKeys.add(issue.parent);
+  }
+  for (const issue of issues) {
+    for (const blocker of issue.blocked_by) {
+      if (!byKey.has(blocker)) {
+        report.check(`${issue.key}.blocked_by`, false, `blocked_by ${JSON.stringify(blocker)} does not match any issue's key`);
+      }
+    }
+  }
+
+  // Cycle check over the union of parent + blocked_by edges — both mean
+  // "must exist before this node" from core/refine.ts's own topological
+  // publish order, so a cycle in either (or across both) would hang it.
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map<string, number>();
+  let cyclic = false;
+  const edgesFrom = (key: string): string[] => {
+    const issue = byKey.get(key);
+    if (!issue) return [];
+    const out: string[] = [];
+    if (issue.parent && byKey.has(issue.parent)) out.push(issue.parent);
+    for (const b of issue.blocked_by) if (byKey.has(b)) out.push(b);
+    return out;
+  };
+  const visit = (key: string): void => {
+    if (cyclic) return;
+    color.set(key, GRAY);
+    for (const next of edgesFrom(key)) {
+      const c = color.get(next) ?? WHITE;
+      if (c === GRAY) {
+        cyclic = true;
+        return;
+      }
+      if (c === WHITE) visit(next);
+    }
+    color.set(key, BLACK);
+  };
+  for (const issue of issues) {
+    if ((color.get(issue.key) ?? WHITE) === WHITE) visit(issue.key);
+  }
+  report.check("dependency graph", !cyclic, cyclic ? "parent/blocked_by edges form a cycle — nothing to publish first" : "acyclic");
+
+  for (const issue of issues) {
+    const isContainer = childKeys.has(issue.key);
+    if (isContainer && !CONTAINER_KINDS.has(issue.kind)) {
+      report.check(`${issue.key}.kind`, false, `has children but kind is ${JSON.stringify(issue.kind)} — a container must be "epic" or "feature"`);
+    } else if (!isContainer && !LEAF_KINDS.has(issue.kind)) {
+      report.check(`${issue.key}.kind`, false, `has no children but kind is ${JSON.stringify(issue.kind)} — a leaf must be "story", "bug", or "task"`);
+    } else {
+      report.check(`${issue.key}.kind`, true, isContainer ? "container" : "leaf");
+    }
+  }
+
+  const leafCount = issues.filter((i) => !childKeys.has(i.key)).length;
+  report.check(
+    "has leaves",
+    leafCount > 0,
+    leafCount > 0 ? `${leafCount} leaf issue(s)` : "every node is a container — nothing here is independently workable",
+  );
+
   return report;
 }
 

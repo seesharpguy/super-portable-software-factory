@@ -4,7 +4,7 @@ import { parseCli, resolvePrompt } from "../../core/utils.ts";
 import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 
-const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base"];
+const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base", "issue"];
 
 export function usageFor(chain: ChainDefinition): string {
   return `usage: spf ${chain.name} "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>]`;
@@ -24,6 +24,10 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
     adw_id: options["adw-id"] ?? null,
     cwd: anchor.cwd,
     chain_name: chain.name,
+    // Only `refine` reads this (a "## Parent: #<id>" back-reference on
+    // every issue it creates — see ChainContext's doc comment); every
+    // other chain ignores it, so it's harmless to always pass through.
+    issue_id: options["issue"] ?? null,
   };
 
   const chainOptions: Record<string, string> = {};
