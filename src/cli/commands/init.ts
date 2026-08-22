@@ -96,7 +96,9 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 # watch:
 #   issue_provider: github   # github | jira
 #   code_host: github        # github | bitbucket
-#   repo: owner/name          # "owner/name" (github) or "workspace/repo_slug" (bitbucket)
+#   repo: owner/name          # the CODE HOST's repo — "owner/name" (github) or "workspace/repo_slug" (bitbucket)
+#   # issue_repo: owner/name  # ONLY for issue_provider: github + code_host: bitbucket, when
+#   #                         # the tracker and code host are genuinely different repos
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
