@@ -4,6 +4,7 @@
  * HTTP requests — the same shape as the manual verification this port was
  * checked against, kept as a regression guard rather than a one-off.
  */
+import "./hermetic_git.js";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";

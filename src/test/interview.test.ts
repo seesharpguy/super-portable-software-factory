@@ -12,6 +12,7 @@
  *      `cli/commands/watch.ts`'s resolveIssueProvider/resolveCodeHostProvider
  *      actually read — no more, no less.
  */
+import "./hermetic_git.js";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -26,15 +27,6 @@ import { createFakeAsker } from "./fake_asker.js";
 let dir: string;
 
 before(() => {
-  // When the suite runs inside a git hook (lefthook's pre-push), git exports
-  // GIT_DIR/GIT_WORK_TREE pointing at the REAL repo, and those beat `cwd` for
-  // every git child process — so the scratch-repo setup below (and
-  // gatherContext's own git calls) would silently operate on the repo being
-  // pushed ("remote origin already exists"). Strip them for the whole test
-  // process so cwd is authoritative again.
-  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR"]) {
-    delete process.env[key];
-  }
   dir = mkdtempSync(join(tmpdir(), "spf-interview-test-"));
   execFileSync("git", ["init", "-q"], { cwd: dir });
   execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"], { cwd: dir });

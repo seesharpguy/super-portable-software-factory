@@ -11,6 +11,7 @@
  * which has nothing to read in a test process — exercising it here would
  * just hang, so it isn't.
  */
+import "./hermetic_git.js";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
