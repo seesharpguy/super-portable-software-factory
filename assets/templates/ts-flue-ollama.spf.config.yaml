@@ -1,0 +1,67 @@
+# .spf/spf.config.yaml — Flue backend (the default), routed at a local
+# Ollama server instead of a hosted provider. `spf init --template
+# ts-flue-ollama` writes this file as-is.
+#
+# model: is ALWAYS provider/model-id for Flue — "ollama/<tag>", where <tag>
+# is whatever `ollama list` shows on the machine actually running the model
+# (agent_flue.ts registers each distinct "ollama/<tag>" it sees with Flue's
+# own provider registry the first time it's dispatched — no separate model
+# catalog to keep in sync here). agents.validate() only checks the STRING
+# SHAPE (provider/id, via agent_flue.ts's resolveModel()) — never that the
+# tag actually exists on the server. A wrong or not-yet-pulled tag only
+# surfaces at the first real dispatch, as an "Unknown model" error from
+# Ollama itself, not at validate() time.
+#
+# The two model ids below (qwen3.8:27b-mlx, granite4.1:8b) are EXAMPLES from
+# one spike machine's own `ollama list` output, not a stable public catalog —
+# replace both with whatever `ollama list` shows on YOUR machine before
+# running spf. Nothing here pins a specific model family; the split is
+# purely "heavier reasoning agent" vs. "lighter/faster agent", same as any
+# other template's planner-vs-builder split.
+#
+# ollama is a KEYLESS provider (providers.ts's PROVIDER_ENV_KEYS.ollama is
+# `[]`) — no API key to export. What IS required:
+#   export OLLAMA_BASE_URL=http://localhost:11434/v1   # default if unset
+# `spf doctor` probes OLLAMA_BASE_URL/models (informational, never a hard
+# failure) so a server that isn't running shows up before your first real
+# run does, not during it.
+#
+# Context-window occupancy reporting is disabled for every ollama/* model:
+# agent_flue.ts registers these models with contextWindow: 0 (spike-verified
+# safe — the same convention agent_flue.ts already uses for
+# context_window: 0 elsewhere), which turns off threshold-based compaction
+# rather than reporting a fabricated number Ollama's OpenAI-compatible API
+# doesn't actually provide per-model.
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: lint, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    test: [test]
+    all: [typecheck, lint, build, test]
+
+defaults:
+  coding_agent: flue
+  # EXAMPLE tag — replace with a heavier model from your own `ollama list`.
+  model: ollama/qwen3.8:27b-mlx
+
+# Overridden here (unlike the OpenRouter template's rationale, which applies
+# equally): the packaged roster's planner/reviewer/documenter pin their own
+# Flue-style provider/model-id strings (fireworks/openai models), unrelated
+# to a local Ollama server — left alone, those three would still resolve and
+# run fine, just against a hosted provider's key this template never asks
+# for. Overridden so every agent actually demonstrates local-only routing.
+agents:
+  - name: planner
+    model: ollama/qwen3.8:27b-mlx
+  - name: reviewer
+    model: ollama/qwen3.8:27b-mlx
+  - name: documenter
+    # EXAMPLE tag — replace with a lighter/faster model from your own
+    # `ollama list`. Tool-calling (the injected sf_report contract every
+    # agent's structured output rides on) was spike-verified to work down to
+    # a 3B model — a lighter tag here is a real, not merely theoretical,
+    # option.
+    model: ollama/granite4.1:8b

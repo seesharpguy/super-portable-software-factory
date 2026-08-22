@@ -166,7 +166,9 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       const token = await asker.secret("ANTHROPIC_AUTH_TOKEN", { current: ctx.existingEnv.get("ANTHROPIC_AUTH_TOKEN") });
       env["ANTHROPIC_AUTH_TOKEN"] = token || "ollama";
       envExampleKeys.push("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN");
-      asker.note("spf doctor does not check these two — confirm the endpoint is reachable yourself.");
+      asker.note(
+        "spf doctor now probes ANTHROPIC_BASE_URL with a minimal POST /v1/messages (informational only, never a hard failure) and flags a base URL that already ends in \"/v1\" as a likely double-path mistake — the default above (without a trailing /v1) is exactly what that check is guarding against. It still cannot validate ANTHROPIC_AUTH_TOKEN itself.",
+      );
     }
 
     // The packaged roster pins planner/reviewer/documenter to their own
@@ -207,6 +209,36 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       envExampleKeys.push(envKey);
     } else {
       asker.note(`${provider} is keyless — no API key to collect.`);
+      if (provider === "ollama") {
+        // Same shape as the claude_code branch's ANTHROPIC_BASE_URL prompt
+        // above: a local/cloud Ollama server has no key, just an address.
+        // The `/v1` suffix matches agent_flue.ts's own registration default
+        // (spike-verified: Ollama serves its OpenAI-compatible surface —
+        // the one Flue's pi-ai backend actually speaks — under `/v1`, not
+        // at the bare root `/api/...` Ollama also exposes).
+        const baseUrl = await asker.text("OLLAMA_BASE_URL", {
+          default: "http://localhost:11434/v1",
+          validate: (v) => (v.trim() ? null : "required"),
+        });
+        env["OLLAMA_BASE_URL"] = baseUrl;
+        envExampleKeys.push("OLLAMA_BASE_URL");
+        asker.note("spf doctor checks this one — a probe against OLLAMA_BASE_URL/models runs on every `spf doctor`.");
+
+        // Same problem the claude_code branch already solves above: the
+        // packaged roster pins planner/reviewer/documenter to their own
+        // fireworks/gemini/openai model strings, which always win over
+        // defaults.model. Left alone, this flow would produce a config
+        // where three of six agents are still routed at hosted providers
+        // whose keys this ollama flow never collects — `spf doctor` would
+        // immediately report missing FIREWORKS_API_KEY/GEMINI_API_KEY/
+        // OPENAI_API_KEY right after an interview that asked for neither.
+        for (const name of ["planner", "reviewer", "documenter"]) {
+          agentOverrides.push({ name, model: defaults.model });
+        }
+        notes.push(
+          "planner/reviewer/documenter pin their own model in the packaged roster and always win over defaults.model — overriding all three to the ollama model chosen above, or spf doctor would report missing FIREWORKS_API_KEY/GEMINI_API_KEY/OPENAI_API_KEY for providers this flow never asked about.",
+        );
+      }
     }
   }
 

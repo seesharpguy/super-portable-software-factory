@@ -216,7 +216,15 @@ no public model-registry API) — `agents.ts` checks only the static shape at
 first real dispatch instead. Provider credentials come from the
 environment, matching the provider you named (`GEMINI_API_KEY`/
 `GOOGLE_API_KEY` for `google/...`, `ANTHROPIC_API_KEY` for `anthropic/...`,
-etc.) — `spf doctor` checks the common ones are set.
+etc.) — `spf doctor` checks the common ones are set. `ollama/...` is the one
+keyless provider (`PROVIDER_ENV_KEYS.ollama` is `[]`) — instead of a key, set
+`OLLAMA_BASE_URL` (default `http://localhost:11434/v1` if unset) to point at
+your server; the `spf init` interview asks for this instead of a secret when
+you pick `ollama`, and `spf doctor` probes it (informational — a down server
+is reported, never a hard failure). See README.md's "flue + local Ollama"
+section for the full walkthrough and
+[`assets/templates/ts-flue-ollama.spf.config.yaml`](../../templates/ts-flue-ollama.spf.config.yaml)
+for a ready-to-run starting config.
 
 **For `coding_agent: claude_code`:** write `model` in Claude Code's own
 vocabulary — a bare alias (`sonnet`, `opus`) or a full model name — never
@@ -275,4 +283,23 @@ No config section for this — it's an environment-variable recipe, since
 `claude` subprocess, exactly like every other env var. Set
 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (local or cloud Ollama) before
 running `spf`; see `roster.md`'s "Coding agent backends" section for the
-exact commands.
+exact commands. `spf doctor` probes `ANTHROPIC_BASE_URL` (informational — a
+down endpoint or wrong path is reported, never a hard failure) and flags a
+base URL that already ends in `/v1` as a likely double-path mistake, since
+the `claude` CLI appends `/v1/messages` itself.
+
+Routing through `SPF_CLAUDE_CMD="ollama launch claude --model granite4.1:8b"`
+instead needs an explicit `--` before `claude`'s own flags (cobra flag
+parsing otherwise consumes them as `ollama launch`'s own) — `agent_cc.ts`
+detects this exact `ollama launch ...` token shape and inserts that
+separator automatically, so you never add it by hand. The `--model` before
+that separator is NOT optional, though: it's `ollama launch`'s own flag, and
+it's mandatory in headless mode (SPF always pipes stdio, so the interactive
+model picker `ollama launch` falls back to without it can never run) — a
+`--model` typed after the `--` belongs to `claude`, not to `ollama launch`,
+and doesn't help. `spf doctor` hard-fails a `SPF_CLAUDE_CMD` missing it. See
+README.md's "Proxy or wrapper launchers" section for the full explanation.
+
+For `flue` (the default backend) pointed at Ollama instead of `claude_code`
+— i.e. `model: ollama/<tag>` — see "Model resolution" above and README.md's
+"flue + local Ollama" section.

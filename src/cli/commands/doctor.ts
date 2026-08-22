@@ -15,6 +15,7 @@ import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
+import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
@@ -23,16 +24,89 @@ import type { SFConfig } from "../../core/data_types.ts";
 
 interface Report {
   ok: boolean;
-  checks: { name: string; ok: boolean; detail: string }[];
+  checks: { name: string; ok: boolean; detail: string; severity?: "info" | "warn" }[];
 }
 
-function check(report: Report, name: string, ok: boolean, detail: string): void {
-  report.checks.push({ name, ok, detail });
+/**
+ * `severity` is a display-only axis, orthogonal to `ok`/`report.ok`: an
+ * "info"/"warn" check still reports `ok: true` (it never fails `spf doctor`
+ * on its own — see each call site for why), but prints as `ℹ`/`⚠` instead of
+ * a plain `✓` so a real negative finding (e.g. "unreachable", a `/v1`
+ * double-path warning) can't be mistaken for a pass at a glance.
+ */
+function check(report: Report, name: string, ok: boolean, detail: string, severity?: "info" | "warn"): void {
+  report.checks.push({ name, ok, detail, severity });
   if (!ok) report.ok = false;
 }
 
-export function doctorCommand(argv: string[]): number {
-  const { options, flags } = parseCli(argv, ["cwd", "config"], ["json"]);
+type ProbeResult = { ok: true; status: number } | { ok: false; error: string };
+
+const PROBE_TIMEOUT_MS = 3_000;
+
+/** A GET that never throws — a down/unreachable server is a finding to report, never a crash of `spf doctor` itself. */
+async function probeGet(url: string): Promise<ProbeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return { ok: true, status: res.status };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A minimal `POST {base}/v1/messages` — the same request shape `agent_cc.ts`
+ * ultimately drives, just with `max_tokens: 1` and no tools/schema, so a
+ * genuinely-reachable-but-model-not-found endpoint still answers fast. Never
+ * throws: a network failure or timeout is a finding (`unreachable`), not a
+ * doctor crash. Anthropic's Messages API forced adoption is what Ollama
+ * 0.32.14 natively speaks at this path (spike-verified) — HTTP 200 with a
+ * `type: "message"` body is the positive signal; any other status or body
+ * shape still gets reported, just labeled accordingly, since this check is
+ * informational either way (see its call site).
+ */
+async function probeAnthropicMessages(base: string, model: string): Promise<ProbeResult & { note?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    // Send whatever auth the operator already has configured for this
+    // endpoint, if any: with no header at all, a real hosted endpoint (a
+    // proxy, api.anthropic.com) answers 401, which reads as "broken" even
+    // though the probe itself never authenticated. Harmless for Ollama,
+    // which ignores the header entirely (see the module doc above).
+    const apiKey = process.env["ANTHROPIC_AUTH_TOKEN"] || process.env["ANTHROPIC_API_KEY"];
+    const res = await fetch(`${base}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+      },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
+      signal: controller.signal,
+    });
+    let note: string | undefined;
+    if (res.status === 200) {
+      try {
+        const body = (await res.json()) as { type?: string };
+        note = body?.type === "message" ? "type: message" : `unexpected body shape (type: ${JSON.stringify(body?.type)})`;
+      } catch {
+        note = "non-JSON body";
+      }
+    }
+    return { ok: true, status: res.status, note };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function doctorCommand(argv: string[]): Promise<number> {
+  const { options, flags } = parseCli(argv, ["cwd", "config"], ["json", "no-probe"]);
   const report: Report = { ok: true, checks: [] };
 
   check(report, "node version", true, process.version);
@@ -91,13 +165,130 @@ export function doctorCommand(argv: string[]): number {
 
   const usesClaudeCode = cfg.agents.some((a) => a.coding_agent === "claude_code");
   if (usesClaudeCode) {
-    const claudeOnPath = binaryOnPath("claude");
+    // A custom SPF_CLAUDE_CMD points the real work at something other than
+    // the literal `claude` binary (a wrapper, a launcher) — checking `claude`
+    // itself in that case both misses the wrapper being missing and can
+    // falsely pass on a machine where `claude` happens to be on PATH but
+    // unused. Check whatever agent_cc.ts will actually `spawn()`: cmdSpec's
+    // first token.
+    const cmdSpec = process.env["SPF_CLAUDE_CMD"] || "claude";
+    const cmdTokens = cmdSpec.split(/\s+/).filter(Boolean);
+    const cmdBin = cmdTokens[0] || "claude";
+    const claudeOnPath = binaryOnPath(cmdBin);
     let version = "";
-    if (claudeOnPath) {
+    if (claudeOnPath && cmdBin === "claude") {
       const result = spawnSync("claude", ["--version"], { encoding: "utf-8" });
       version = result.status === 0 ? result.stdout.trim() : "";
     }
-    check(report, "claude CLI", claudeOnPath, claudeOnPath ? version || "on PATH, but --version failed" : "not found on PATH — required by any coding_agent: claude_code agent");
+    check(
+      report,
+      "claude CLI",
+      claudeOnPath,
+      claudeOnPath
+        ? version || (cmdBin === "claude" ? "on PATH, but --version failed" : `"${cmdBin}" on PATH (via SPF_CLAUDE_CMD) — --version not checked for a wrapper/launcher`)
+        : `"${cmdBin}" not found on PATH — required by any coding_agent: claude_code agent${cmdBin !== "claude" ? " (checked SPF_CLAUDE_CMD's first token, not the literal \"claude\")" : ""}`,
+    );
+
+    // `ollama launch <cmd>` needs an explicit `--` before claude's own flags
+    // (cobra flag parsing otherwise consumes them as ITS OWN — see
+    // agent_cc.ts's module comment for the spike-verified failure and fix),
+    // and agent_cc.ts now inserts that separator automatically for exactly
+    // this token shape. But `--` alone is NOT sufficient: `ollama launch`
+    // also requires its OWN `--model <tag>` flag, typed BEFORE the `--`,
+    // whenever it's run headless — SPF always spawns with piped stdio, so
+    // without `--model` there, `ollama launch` falls back to an interactive
+    // model picker that can never run and fails with "model selection
+    // requires an interactive terminal" (spike-verified; see agent_cc.ts's
+    // module comment). Unlike the reachability probes below, this is a
+    // static, deterministic misconfiguration knowable from the string alone
+    // — a real hard failure, not an informational note.
+    if (cmdTokens[0] === "ollama" && cmdTokens[1] === "launch") {
+      const dashIdx = cmdTokens.indexOf("--");
+      const beforeSeparator = dashIdx === -1 ? cmdTokens : cmdTokens.slice(0, dashIdx);
+      const hasModelFlag = beforeSeparator.includes("--model");
+      check(
+        report,
+        "SPF_CLAUDE_CMD ollama launch wrapper",
+        hasModelFlag,
+        hasModelFlag
+          ? cmdTokens.includes("--")
+            ? 'explicit "--" and "--model" (before it) already present in SPF_CLAUDE_CMD — left as-is'
+            : 'auto-handled: agent_cc.ts inserts "--" before claude\'s flags for this wrapper shape (see its module comment); "--model" is present before that point, as `ollama launch` requires in headless mode'
+          : 'missing "--model <tag>" before any "--" — `ollama launch` runs headless (SPF pipes stdio) and will fail with "model selection requires an interactive terminal" even though agent_cc.ts inserts the "--" separator for you. Set SPF_CLAUDE_CMD="ollama launch claude --model <tag>" (tag from `ollama list`).',
+      );
+    }
+
+    const anthropicBaseUrl = process.env["ANTHROPIC_BASE_URL"];
+    if (anthropicBaseUrl && !flags["no-probe"]) {
+      const trimmed = anthropicBaseUrl.replace(/\/+$/, "");
+      // The claude CLI appends "/v1/messages" itself — a base URL that
+      // already ends in "/v1" produces a double "/v1/v1/messages" 404, a
+      // real mistake seen in practice, not a hypothetical.
+      const doubledPath = /\/v1$/.test(trimmed);
+      if (doubledPath) {
+        check(
+          report,
+          "ANTHROPIC_BASE_URL shape",
+          true,
+          `${anthropicBaseUrl} ends in "/v1" — the claude CLI appends "/v1/messages" itself; this looks like a double-path mistake (try dropping the trailing "/v1")`,
+          "warn",
+        );
+      }
+      // Informational/warning only (ok always true): reachability here says
+      // nothing about auth or model correctness, and a down server between
+      // doctor runs shouldn't fail the whole command — it's a fact to
+      // surface, the same pattern as the other checks in this file that are
+      // never allowed to fail `spf doctor` on their own. When the shape
+      // check above just flagged a double "/v1", probe the CORRECTED base
+      // instead of the known-bad one — probing the bad path would just
+      // confirm the mistake we already diagnosed, spending the probe on
+      // nothing new.
+      const probeBase = doubledPath ? trimmed.replace(/\/v1$/, "") : trimmed;
+      const claudeCodeAgent = cfg.agents.find((a) => a.coding_agent === "claude_code");
+      const probeModel = claudeCodeAgent?.model || "claude-sonnet-5";
+      const result = await probeAnthropicMessages(probeBase, probeModel);
+      check(
+        report,
+        "ANTHROPIC_BASE_URL reachability",
+        true,
+        (result.ok
+          ? `${doubledPath ? `dropping the trailing "/v1" makes it ` : ""}reachable: POST ${probeBase}/v1/messages -> HTTP ${result.status}${result.note ? ` (${result.note})` : ""}`
+          : `unreachable: POST ${probeBase}/v1/messages -> ${result.error}`) +
+          " (this is a real, billable inference request — pass --no-probe to skip both network probes)",
+        result.ok ? "info" : "warn",
+      );
+    }
+  }
+
+  // Flue agents pointed at a local Ollama server (`model: ollama/...`) have
+  // no API key to check (providers.ts's PROVIDER_ENV_KEYS.ollama is `[]`,
+  // handled in the per-agent loop below) but DO have a server that might
+  // simply not be running — worth a reachability probe the same way
+  // ANTHROPIC_BASE_URL gets one above.
+  const usesOllamaFlue = cfg.agents.some((a) => a.coding_agent !== "claude_code" && a.model.startsWith("ollama/"));
+  if (usesOllamaFlue && !flags["no-probe"]) {
+    // `ollamaBaseUrl()` (ollama_provider.ts) is the SAME default-substitution
+    // logic `registerOllamaModel` uses for a real dispatch, including
+    // treating a set-but-EMPTY OLLAMA_BASE_URL as unset — re-deriving the
+    // default here with `||` would agree on the common cases but diverge on
+    // that one, which is exactly the failure mode doctor exists to catch,
+    // not mask.
+    const ollamaBase = ollamaBaseUrl().replace(/\/+$/, "");
+    // `/models` (the OpenAI-compat list, matching the base URL's own `/v1`
+    // shape) over `/api/tags` (Ollama's native catalog endpoint): measured
+    // live against a real local server, `/models` returned 886 bytes vs.
+    // `/api/tags`'s 4461 bytes for the identical model catalog, same ~20ms
+    // latency either way — strictly cheaper for a pure reachability check,
+    // and there's no live-server dependency in this choice: doctor's probe
+    // itself tolerates either endpoint being down (see `probeGet`).
+    const result = await probeGet(`${ollamaBase}/models`);
+    check(
+      report,
+      "OLLAMA_BASE_URL reachability",
+      true, // informational/warning only — see the ANTHROPIC_BASE_URL check above for why
+      result.ok ? `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}` : `unreachable: GET ${ollamaBase}/models -> ${result.error}`,
+      result.ok ? "info" : "warn",
+    );
   }
 
   for (const agent of cfg.agents) {
@@ -274,7 +465,8 @@ function finish(report: Report, json: boolean): number {
     console.log(JSON.stringify(report, null, 2));
   } else {
     for (const c of report.checks) {
-      console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
+      const icon = c.severity === "warn" ? "⚠" : c.severity === "info" ? "ℹ" : c.ok ? "✓" : "✗";
+      console.log(`${icon} ${c.name}: ${c.detail}`);
     }
     console.log(report.ok ? "\nspf doctor: clean" : "\nspf doctor: problems found above");
   }
