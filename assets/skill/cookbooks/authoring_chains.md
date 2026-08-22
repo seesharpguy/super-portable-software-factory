@@ -3,11 +3,9 @@
 Composing a new chain, extending an existing one, and adding the engine
 primitives a chain needs (an output type, a gate, a step) are one skill with
 three doors. All three live in `src/` inside the SPF package itself — there
-is no per-repo copy to edit. If you need to change engine behavior for a
-specific target repo without forking the package, that's `spf eject` (prints
-the path to the installed package's `src/` for you to copy and load from your
-own `.spf/` — engine-level changes are the one thing `.spf/` config can't
-express).
+is no per-repo copy to edit, because code owns the loop and all repos trust the
+engine to sequence work the same way. Engine-level changes (a new gate, a new
+envelope type, a modified phase primitive) require forking the package itself.
 
 ## Step 1 — design the chain before writing code
 
@@ -23,6 +21,16 @@ the step list itself — see Step 2 — so it can't drift from what actually run
 | build | agent | builder | `BuildOutput` | `diffMatchesClaims` |
 | test | code | quality | — | (suite pass/fail is the phase's own result) |
 | commit | code | git | — | — |
+
+If you need to change engine behavior for a specific target repo without forking
+the package, that's `spf eject`. It copies the installed engine's compiled
+artifacts (`dist/core/` and `dist/chains/`) out to `.spf/engine/` for reference
+or reading — but understand that these files are **not wired into any spf
+command**: editing them changes nothing about how spf itself runs. Engine-level
+changes (a new gate, a new envelope type, a modified phase primitive) have no
+config surface by design, because the codebase is a single shared engine all
+repos trust to sequence their work the same way. If you are genuinely changing
+the engine semantics, you are forking the package itself, not ejecting a copy.
 
 **Ownership rules**, non-negotiable:
 

@@ -21,7 +21,8 @@ export interface ChainDefinition {
   phases: string;
   /** Static for most chains; prompt's depends on --agent, so it's a function there. */
   requiredAgents: string[] | ((options: Record<string, string>) => string[]);
-  requiredSuites: string[];
+  /** Static unless a step's suite can be overridden by --suite (qualityCheck/fixLoop), in which case it's a function — see steps.deriveRequiredSuites. */
+  requiredSuites: string[] | ((options: Record<string, string>) => string[]);
   /** The declarative path — a flat step list, run by runChain() via steps.runSteps(). */
   steps?: steps.Step[];
   /** The imperative escape hatch for a chain too shaped by its own logic to be a flat list (simple-sdlc). */
@@ -121,6 +122,11 @@ export function resolveRequiredAgents(chain: ChainDefinition, options: Record<st
   return typeof chain.requiredAgents === "function" ? chain.requiredAgents(options) : chain.requiredAgents;
 }
 
+/** Same idea as resolveRequiredAgents(), for the suite(s) --suite can override before validate() ever runs. */
+export function resolveRequiredSuites(chain: ChainDefinition, options: Record<string, string>): string[] {
+  return typeof chain.requiredSuites === "function" ? chain.requiredSuites(options) : chain.requiredSuites;
+}
+
 /**
  * Run a chain, whichever path it defines: `run` (the imperative escape
  * hatch) if it has one, otherwise `steps` through the shared driver. Both
@@ -130,5 +136,5 @@ export function resolveRequiredAgents(chain: ChainDefinition, options: Record<st
  */
 export async function runChain(chain: ChainDefinition, ctx: ChainContext, options: Record<string, string> = {}): Promise<number> {
   if (chain.run) return chain.run(ctx, options);
-  return steps.runSteps(ctx, resolveRequiredAgents(chain, options), chain.requiredSuites, chain.steps!, options);
+  return steps.runSteps(ctx, resolveRequiredAgents(chain, options), resolveRequiredSuites(chain, options), chain.steps!, options);
 }

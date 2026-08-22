@@ -21,4 +21,8 @@ export const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   deepseek: ["DEEPSEEK_API_KEY"],
   together: ["TOGETHER_API_KEY"],
   cerebras: ["CEREBRAS_API_KEY"],
+  // Keyless: a local server, not a hosted API — nothing to check for or
+  // prompt for. An empty array here means "known provider, needs no key",
+  // never "unknown provider" (that's a missing table entry, not `[]`).
+  ollama: [],
 };

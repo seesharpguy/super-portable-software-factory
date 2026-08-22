@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import * as v from "valibot";
 import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import { resolveNotifier } from "../../core/notify/notifier.ts";
@@ -17,11 +18,62 @@ import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
-import { findChain, runChain as runChainDef } from "../../chains/index.ts";
+import { findChain, resolveRequiredAgents, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
-import type { SFConfig } from "../../core/data_types.ts";
+import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
+
+/** Kept well under Slack's own 2900-char slice on `detail` (see `slack_channel.ts`) — a reviewer can emit a lot of findings, but the PR body/notification only needs enough to tell a human whether to look closer. */
+const MAX_REVIEW_DIGEST_CHARS = 1200;
+
+/**
+ * `&`/`<`/`>` are active markup in every destination a digest lands in —
+ * `<url|text>`/`*bold*` in Slack mrkdwn, raw HTML in GitHub's markdown
+ * pipeline, and (cosmetically only — Adaptive Cards don't decode entities)
+ * Teams' TextBlock and the generic webhook payload — and a reviewer's
+ * findings/blocking text is LLM-authored, so it is untrusted content, not a
+ * template. Escaped before it ever reaches any renderer, never trusted as
+ * pre-formatted. Note this runs BEFORE truncateDigest, so a cut can in
+ * principle land mid-entity (e.g. `&am…`) — cosmetic only, since the `<`
+ * escape (the one that actually prevents Slack link forgery) is always
+ * complete by the time truncation could touch it.
+ */
+export function escapeForMarkup(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Codepoint-safe truncation — a plain `.slice(0, n)` can land mid surrogate pair on a multi-byte finding. */
+export function truncateDigest(text: string): string {
+  const codepoints = Array.from(text);
+  if (codepoints.length <= MAX_REVIEW_DIGEST_CHARS) return text;
+  return `${codepoints.slice(0, MAX_REVIEW_DIGEST_CHARS).join("")}…`;
+}
+
+/** A `ReviewOutput` envelope, reduced to the short digest threaded into the PR body and the `pr_opened` notification — see `core/watch.ts`'s `ChainRunResult.reviewSummary`. */
+export function formatReviewDigest(review: ReviewOutputT): string {
+  const lines = [`Reviewer verdict: ${review.approved ? "approved" : "changes requested"}.`];
+  if (review.blocking.length > 0) {
+    lines.push("Blocking:", ...review.blocking.map((b) => `- ${escapeForMarkup(b)}`));
+  }
+  const unmet = review.findings.filter((f) => !f.met);
+  if (unmet.length > 0) {
+    lines.push("Unmet requirements:", ...unmet.map((f) => `- ${escapeForMarkup(f.requirement)}${f.evidence ? ` — ${escapeForMarkup(f.evidence)}` : ""}`));
+  }
+  // The common case on the success path (see the module comment on
+  // `reviewSummaryFor`): every reachable ReviewOutput has approved:true,
+  // blocking:[], unmet:[] — gates.verdictConsistent throws otherwise, and a
+  // gate failure exits the run non-zero before a digest is ever built. So
+  // without this, an approved run's digest would be the vacuous constant
+  // "Reviewer verdict: approved." with zero information in it. The met
+  // findings ARE the reviewer's signal on an approved run — what it actually
+  // verified — so surface them.
+  const met = review.findings.filter((f) => f.met);
+  if (met.length > 0) {
+    lines.push(`Verified ${met.length} requirement(s):`, ...met.map((f) => `- ${escapeForMarkup(f.requirement)}${f.evidence ? ` — ${escapeForMarkup(f.evidence)}` : ""}`));
+  }
+  return truncateDigest(lines.join("\n"));
+}
 
 /**
  * Shared by `watch` and `watch init`: resolve config into an `IssueProvider`
@@ -214,29 +266,67 @@ export async function watchCommand(argv: string[]): Promise<number> {
   /** Shared by `runChain`/`runRefine`: best-effort enrichment of a generic "didn't succeed" message with the first phase that actually failed, read back from the worktree's own (symlinked) trace db. */
   function detailFromFailedPhase(cwd: string, adwId: string, prefix: string): string {
     let detail = prefix;
+    let db: SfDb | undefined;
     try {
       const wtAnchor = paths.resolveAnchor(cwd);
       const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-      const db = new SfDb(wtDataPaths.db_path);
+      db = new SfDb(wtDataPaths.db_path);
       const failed = db.phases(adwId).find((p) => p.status === "fail");
       if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
     } catch {
       // best-effort — the generic message above still points at where to look
+    } finally {
+      db?.close();
     }
     return detail;
+  }
+
+  /**
+   * Best-effort: the reviewer's latest verdict for this run, read back from
+   * the worktree's own (symlinked) trace db and reduced to a digest — same
+   * DB, same try/catch shape as `detailFromFailedPhase` above, but on the
+   * SUCCESS path. `undefined` on any DB/parse hiccup, or when the chain
+   * never produced a `ReviewOutput` envelope at all — never thrown: a digest
+   * is a nice-to-have, not something that gets to block the PR-open flow
+   * it's decorating.
+   */
+  function reviewSummaryFor(cwd: string, adwId: string): string | undefined {
+    let db: SfDb | undefined;
+    try {
+      const wtAnchor = paths.resolveAnchor(cwd);
+      const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
+      db = new SfDb(wtDataPaths.db_path);
+      const envelope = db
+        .envelopes(adwId)
+        .filter((e) => e.output_type === ReviewOutput.name)
+        .at(-1); // the LATEST verdict — a revise loop can produce several
+      if (!envelope?.payload_json) return undefined;
+      const review = v.parse(ReviewOutput.schema, JSON.parse(envelope.payload_json)) as ReviewOutputT;
+      return formatReviewDigest(review);
+    } catch {
+      return undefined; // best-effort — see the doc comment above
+    } finally {
+      db?.close();
+    }
   }
 
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
     const chainDef = findChain(cfg.watch.chain)!; // checked above
     const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd, chain_name: chainDef.name };
     const code = await runChainDef(chainDef, ctx);
-    if (code === 0) return { accepted: true, adwId: opts.adwId, detail: "" };
+    // Static for every chain but "prompt" (whose --agent flag `spf watch`
+    // never passes) — resolved with no options, exactly like `runChainDef`
+    // above ran it.
+    const reviewRequired = resolveRequiredAgents(chainDef, {}).includes("reviewer");
+    if (code === 0) {
+      return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: reviewSummaryFor(opts.cwd, opts.adwId) };
+    }
     const detail = detailFromFailedPhase(
       opts.cwd,
       opts.adwId,
       `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
     );
-    return { accepted: false, adwId: opts.adwId, detail };
+    return { accepted: false, adwId: opts.adwId, detail, reviewRequired };
   };
 
   /**

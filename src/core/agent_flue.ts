@@ -193,10 +193,12 @@ function resolveBuiltinTools(names: string[]): Array<(env: Sandbox) => unknown> 
  * `undefined`/`null` toolNames = every builtin (Flue's own default when no
  * `tools` override is given — matches SPF's "unset = all tools usable").
  * `local()`'s env does NOT inherit process.env by default (only PATH/HOME/
- * USER/LANG/TERM/TMPDIR) — operatorEnv() restores today's actual behavior.
+ * USER/LANG/TERM/TMPDIR) — `env` is `request.env ?? operatorEnv()` from the
+ * caller, restoring today's actual behavior unless the agent's own
+ * `env_allowlist` narrowed it (see agents.ts).
  */
-function sandboxFor(toolNames: string[] | null | undefined, cwd: string): SandboxFactory {
-  const base = local({ cwd, env: operatorEnv() });
+function sandboxFor(toolNames: string[] | null | undefined, cwd: string, env: Record<string, string>): SandboxFactory {
+  const base = local({ cwd, env });
   if (!toolNames) return base;
   const factories = resolveBuiltinTools(toolNames);
   return { ...base, tools: (env) => factories.map((f) => f(env)) as any };
@@ -231,6 +233,7 @@ interface RenderSpec {
   systemText: string;
   outputSchema: AgentRequest["output_schema"];
   outputTypeName: string;
+  env: Record<string, string>;
 }
 
 const REGISTRY = new Map<string, RenderSpec>();
@@ -240,7 +243,7 @@ function sfAgentRender({ id }: AgentProps): string {
   if (!spec) throw new Error(`agent_flue: no render spec registered for conversation ${id} — run() must set it before dispatching`);
 
   useModel(spec.model, { thinkingLevel: spec.thinking });
-  useSandbox(sandboxFor(spec.toolNames, spec.cwd));
+  useSandbox(sandboxFor(spec.toolNames, spec.cwd, spec.env));
 
   const writeReport = useDataWriter("sf_report");
   useTool({
@@ -342,6 +345,7 @@ export async function run(
     systemText: request.system_prompt,
     outputSchema: request.output_schema,
     outputTypeName: request.output_type_name,
+    env: request.env ?? operatorEnv(),
   });
 
   const pid = process.pid ?? -1;

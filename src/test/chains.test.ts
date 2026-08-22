@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CHAINS, findChain, resolveRequiredAgents } from "../chains/index.js";
+import { CHAINS, findChain, resolveRequiredAgents, resolveRequiredSuites } from "../chains/index.js";
 
 // name -> [phases, requiredAgents (with no options), requiredSuites]
 const EXPECTED: Record<string, { phases: string; agents: string[]; suites: string[] }> = {
@@ -64,7 +64,7 @@ for (const chain of CHAINS) {
   test(`${chain.name}: derived phases/requiredAgents/requiredSuites match what was hand-verified against \`spf list\``, () => {
     assert.equal(chain.phases, expected.phases);
     assert.deepEqual(resolveRequiredAgents(chain, {}), expected.agents);
-    assert.deepEqual(chain.requiredSuites, expected.suites);
+    assert.deepEqual(resolveRequiredSuites(chain, {}), expected.suites);
   });
 }
 
@@ -72,6 +72,12 @@ test("prompt: requiredAgents depends on --agent, not a fixed list — the one dy
   const chain = findChain("prompt")!;
   assert.deepEqual(resolveRequiredAgents(chain, {}), ["builder"], "no --agent -> falls back to builder");
   assert.deepEqual(resolveRequiredAgents(chain, { agent: "planner" }), ["planner"], "--agent overrides the default");
+});
+
+test("plan-build-test: requiredSuites depends on --suite, the same way prompt's agent does", () => {
+  const chain = findChain("plan-build-test")!;
+  assert.deepEqual(resolveRequiredSuites(chain, {}), ["test"], "no --suite -> falls back to the compiled-in default");
+  assert.deepEqual(resolveRequiredSuites(chain, { suite: "custom" }), ["custom"], "--suite overrides the default");
 });
 
 test("every chain but simple-sdlc is a steps list; simple-sdlc alone uses the imperative run() escape hatch", () => {

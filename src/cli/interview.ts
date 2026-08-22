@@ -199,10 +199,15 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     }
     defaults.model = model;
 
-    const envKey = PROVIDER_ENV_KEYS[provider][0];
-    const key = await asker.secret(envKey, { current: ctx.existingEnv.get(envKey) });
-    if (key) env[envKey] = key;
-    envExampleKeys.push(envKey);
+    const envKeys = PROVIDER_ENV_KEYS[provider];
+    if (envKeys.length > 0) {
+      const envKey = envKeys[0];
+      const key = await asker.secret(envKey, { current: ctx.existingEnv.get(envKey) });
+      if (key) env[envKey] = key;
+      envExampleKeys.push(envKey);
+    } else {
+      asker.note(`${provider} is keyless — no API key to collect.`);
+    }
   }
 
   // Declined (the default): today's behavior exactly — on claude_code, the
