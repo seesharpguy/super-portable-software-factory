@@ -48,6 +48,7 @@ import {
 import { local, sqlite, start, type Flue } from "@flue/runtime/node";
 import type { AgentRequest, AgentResult, ThinkingLevel } from "./data_types.ts";
 import { UsageBreakdown, makeAgentResult } from "./data_types.ts";
+import { registerOllamaModel } from "./ollama_provider.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
 
 const RESULT_SNIPPET_CHARS = 20_000; // tool output rides along whole; clip only guards pathological cases
@@ -335,6 +336,26 @@ export async function run(
   onSpawn?: (pid: number) => void,
   onExit?: (pid: number) => void,
 ): Promise<AgentResult> {
+  // Ollama has no pi-ai/Flue built-in provider — it must be registered as a
+  // custom `createProvider(...)` before anything dispatches against it (see
+  // ollama_provider.ts's header comment for why: dummy api key, union
+  // re-registration, exact version pin). Doing this BEFORE `ensureRuntime()`
+  // means it's in place before that call's `start()` ever gets a chance to
+  // run its own default-provider registration — irrelevant today (pi-ai ships
+  // no "ollama" built-in to collide with) but keeps the ordering the one a
+  // future built-in couldn't quietly undermine. `resolveModel` is a cheap
+  // string split regardless of provider, so the check above costs nothing
+  // extra for a non-ollama agent — but `registerOllamaModel`'s own dynamic
+  // imports are NOT a load-time saving for the ollama case either (this
+  // module's own unconditional `@flue/runtime/node` import already pulls in
+  // pi-ai's full runtime for every run; see ollama_provider.ts's header
+  // comment for the measured numbers). What the lazy boundary actually buys
+  // is keeping ollama-only symbols off the module graph of anything that
+  // imports this module for `resolveModel()` alone (doctor.ts, interview.ts)
+  // without ever dispatching an ollama call.
+  const [provider, modelId] = resolveModel(request.model);
+  if (provider === "ollama") await registerOllamaModel(modelId);
+
   await ensureRuntime(request.flue_db_path);
 
   REGISTRY.set(request.session_id, {

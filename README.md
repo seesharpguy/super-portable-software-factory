@@ -120,7 +120,7 @@ Config defines who an agent **is**. The chain call site defines how it is **used
 
 ### A second backend: Claude Code
 
-Set `coding_agent: claude_code` on any agent (or in `defaults`) to run it on your own installed [Claude Code](https://claude.com/product/claude-code) CLI instead of Flue — `spf doctor` checks it's on `PATH`. Model names follow Claude Code's own vocabulary (a bare alias like `sonnet`, not `provider/model-id`); everything else — `tools`, `writes`, `thinking` — stays the same shape. Pointing a `claude_code` agent at a local or cloud [Ollama](https://ollama.com) server needs no config at all — just `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` set before you run `spf`, since Claude Code's CLI reads those itself.
+Set `coding_agent: claude_code` on any agent (or in `defaults`) to run it on your own installed [Claude Code](https://claude.com/product/claude-code) CLI instead of Flue — `spf doctor` checks whatever `SPF_CLAUDE_CMD`'s first token resolves to on `PATH` (`claude` itself, by default). Model names follow Claude Code's own vocabulary (a bare alias like `sonnet`, not `provider/model-id`); everything else — `tools`, `writes`, `thinking` — stays the same shape. Pointing a `claude_code` agent at a local or cloud [Ollama](https://ollama.com) server needs no config at all — just `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` set before you run `spf`, since Claude Code's CLI reads those itself.
 
 #### Proxy or wrapper launchers
 
@@ -128,9 +128,13 @@ To route the `claude` command through a wrapper, proxy server, or launcher (e.g.
 
 ```bash
 # Route through Ollama's launcher
-export SPF_CLAUDE_CMD="ollama launch claude"
+export SPF_CLAUDE_CMD="ollama launch claude --model granite4.1:8b"
 spf build "your prompt"
 ```
+
+`ollama launch <cmd>` uses cobra flag parsing, which treats anything typed after it as its own flags unless a literal `--` says otherwise — without one, `claude`'s own flags (`-p`, `--json-schema`, ...) fail with `unknown shorthand flag: 'p' in -p` before `claude` is ever reached. `agent_cc.ts` detects exactly this `ollama launch ...` shape and inserts that `--` automatically, so you never add the separator by hand for this specific launcher.
+
+That `--` alone is not enough to reach `claude`, though: `ollama launch` also needs its OWN `--model <tag>` flag (a tag from `ollama list`), typed BEFORE the auto-inserted `--`, whenever it runs headless — which it always does under SPF, since SPF spawns with piped stdio. Without it, `ollama launch` falls back to an interactive model picker that can never run, and fails one step later than the `--` problem, with `model selection requires an interactive terminal; use --model to run in headless mode`. A `--model` typed after the `--` doesn't help — at that point it belongs to `claude`, not to `ollama launch`. So `SPF_CLAUDE_CMD` must include `ollama launch`'s `--model` yourself, exactly as written above; `spf doctor` hard-fails if it's missing.
 
 ```bash
 # Or use a custom wrapper script
@@ -138,7 +142,26 @@ export SPF_CLAUDE_CMD=/path/to/my-wrapper
 spf build "your prompt"
 ```
 
-The command/launcher must support the full Claude Code CLI interface: `-p` for prompt, `--json-schema`, `--model`, `--session-id`/`--resume`, `--output-format stream-json`, and all other flags `agent_cc` uses. When unset, `SPF_CLAUDE_CMD` defaults to `claude` (resolved from `PATH` normally).
+The command/launcher must support the full Claude Code CLI interface: `-p` for prompt, `--json-schema`, `--model`, `--session-id`/`--resume`, `--output-format stream-json`, and all other flags `agent_cc` uses. When unset, `SPF_CLAUDE_CMD` defaults to `claude` (resolved from `PATH` normally). A cmdSpec that already contains its own literal `--` is left completely alone — `agent_cc.ts` never inserts a second one.
+
+### flue + local Ollama
+
+Point the default `flue` backend at a local Ollama server the same way you'd pick any other Flue provider — the model string's own prefix, `ollama/<tag>` (whatever `ollama list` shows on your machine) instead of `openai/...`/`anthropic/...`:
+
+```yaml
+defaults:
+  coding_agent: flue
+  model: ollama/qwen3.8:27b-mlx
+```
+
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434/v1   # default if unset
+spf build "your prompt"
+```
+
+That's the whole config change. `ollama` is a keyless provider — `spf doctor` and the `spf init` interview both know this: no API key is ever asked for or checked, and interview.ts asks for `OLLAMA_BASE_URL` instead when you pick `ollama` as your provider. A ready-to-run starting point ships at [`assets/templates/ts-flue-ollama.spf.config.yaml`](assets/templates/ts-flue-ollama.spf.config.yaml) (`spf init --template ts-flue-ollama`).
+
+Two things worth knowing before pointing a full roster at local models: tool-calling — the injected `sf_report` contract every agent's structured output rides on — worked reliably in testing down to a 3B-parameter model, which isn't a "only frontier models get tools" situation. And context-window occupancy reporting is disabled for `ollama/*` models specifically, which turns off threshold-based compaction rather than reporting a number Ollama's OpenAI-compatible API doesn't actually provide per model.
 
 ---
 

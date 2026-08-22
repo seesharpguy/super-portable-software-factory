@@ -40,12 +40,16 @@
     "tag:patch": "node scripts/tag-release.js patch"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.83.0",
     "@flue/runtime": "2.0.3",
     "@hono/node-server": "^2.1.1",
     "@valibot/to-json-schema": "^1.7.1",
     "hono": "^4.13.3",
     "valibot": "^1.4.2",
     "yaml": "^2.5.1"
+  },
+  "overrides": {
+    "@earendil-works/pi-ai": "0.83.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
