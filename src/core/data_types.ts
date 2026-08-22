@@ -448,6 +448,50 @@ export const ConfigDefaultsSchema = v.object({
   // .spf/ is the whole per-repo footprint now — no adws/ tree to protect.
   protected_files: v.optional(v.array(v.string()), () => [".spf/", "spf.config.yaml"]),
   data_dir: v.optional(v.string(), ".spf/data"),
+  /**
+   * RUN BUDGET CEILINGS — the two knobs that bound what one adw_id may spend.
+   *
+   * BOTH ABSENT BY DEFAULT, and absence is a total no-op: `agents.ts`'s
+   * `assertRunBudget()` returns immediately when neither is set, so every
+   * existing config behaves byte-identically to before this field existed.
+   * There is no ambient environment variable and no implicit default — an
+   * unbounded run stays the default because a surprise mid-run failure on a
+   * ceiling nobody chose is worse than the spend.
+   *
+   * SCOPE IS THE RUN, NOT THE CALL. Enforced against the Run's ACCUMULATED
+   * usage (`run.tokens`/`run.cost` — the same totals `run.addUsage()` mirrors
+   * into the sessions row), checked BEFORE every agent dispatch including
+   * every JSON-repair retry and every gate correction, because the cost of
+   * the call about to happen is unknowable in advance. That makes these a
+   * hard cap on FURTHER spend rather than a post-hoc report: reaching the
+   * ceiling stops the next call, it does not merely note that the last one
+   * was expensive. A tripped ceiling fails the phase closed — see
+   * `agents.ts`'s `BudgetExceeded`.
+   *
+   * `max_run_cost` is USD (the same unit the provider's own usage.cost
+   * arrives in, summed by `UsageBreakdown`); `max_run_tokens` is TOTAL
+   * tokens, i.e. the spend number — every turn re-sends the whole
+   * conversation, so this counts cached re-reads too, exactly like the
+   * `total_tokens` column in `sessions` (see `ui/server/db.ts`'s `usage()`
+   * for why that number is much larger than "material moved").
+   *
+   * Both are `> 0`, not `>= 0`: a zero ceiling would mean "no agent may ever
+   * run", which is a config mistake, not a budget — it would fail the first
+   * phase of every chain with a budget message instead of saying what is
+   * actually wrong.
+   *
+   * THE BACK-FILL TRAP (see `agents.ts`'s `loadConfig`): that function copies
+   * a handful of `defaults` keys DOWN onto each agent that hasn't set them
+   * (coding_agent/model/thinking/color/tools/writes/env_allowlist). These two
+   * keys are deliberately NOT in that list and must never be added to it —
+   * they are RUN-scoped ceilings, not per-agent settings, and a per-agent
+   * copy would read as "each agent may spend this much", which is a
+   * different (and unenforced) feature. `mergeRawConfig`'s `defaults` spread
+   * is what carries them through config layering, key-by-key; pinned by
+   * `src/test/budget.test.ts`.
+   */
+  max_run_cost: v.optional(v.pipe(v.number(), v.gtValue(0))),
+  max_run_tokens: v.optional(v.pipe(v.number(), v.integer(), v.gtValue(0))),
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 

@@ -76,6 +76,29 @@ agents:
 | `env_allowlist` | string[] \| null | Roster-wide env allowlist, back-filled the same way as `writes`. Unset/null = every agent gets the full operator environment (see `env_allowlist` under `agents[]`). |
 | `protected_files` | string[] | Paths no agent may touch unless named in its own `writes`. Default `[".spf/", "spf.config.yaml"]`. |
 | `data_dir` | path | Runtime home, repo-relative. Default `.spf/data`. |
+| `max_run_cost` | number > 0 (USD) | Stops the NEXT agent call once a run has already spent this much — checked before each call, never after. A single call is never capped (a run can overshoot by one whole call), and a chain with only one agent dispatch (`scout`, `prompt`, `build`) can never trip it at all. Absent (default) = unbounded. Throws `BudgetExceeded`, which fails the phase closed. |
+| `max_run_tokens` | integer > 0 | Same semantics as `max_run_cost`, on `sessions.total_tokens` instead of cost. Absent (default) = unbounded. |
+
+### `spf fanout`
+
+`spf fanout <chain> "<prompt>" [--n 3] [--concurrency N] [--base <branch>]
+[--adw-id <id>] [--first-success] [--config <path>] [--cwd <dir>]` — best-of-N:
+runs `<chain>` N times in parallel, each in its own git worktree and branch
+(`spf/fanout/<base-adw-id>-<i>`), then picks ONE winner by code (succeeded >
+fewest gate failures > most gate passes > lowest cost > fewest tokens >
+lowest wall time > adw_id) and deletes the rest. SPF never merges the
+winner — it prints the branch and the basis; a human runs `git merge`. The
+chain named MUST have a commit step (`plan-build`, `plan-build-test`,
+`plan-build-test-quality`, `simple-sdlc`, or a repo-local chain with one) —
+`spf fanout` refuses any chain without one, since a winner with no commit
+leaves its only copy of the work as uncommitted edits in a worktree.
+`--first-success` opts into stopping early once one attempt succeeds
+(first-past-the-post) instead of the default, which runs every attempt to
+completion for a true N-way comparison. `spf fanout --clean <base-adw-id>`
+removes any worktrees/branches a killed or discarded run left behind under
+that id — a `--adw-id` is never safe to reuse against session rows still in
+the shared db, so a rerun with the same id fails loudly instead of mixing
+the two runs' cost/tokens/gates together.
 
 ### `observability`
 
