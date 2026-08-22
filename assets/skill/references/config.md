@@ -116,7 +116,8 @@ Full mechanism: the main README's "`spf watch`" section. Field reference:
 |---|---|---|
 | `issue_provider` | `"github"` \| `"jira"` | The tracker `spf watch` polls. Default `github`. |
 | `code_host` | `"github"` \| `"bitbucket"` | Where PRs open — independent of `issue_provider` (Jira issues against a Bitbucket repo is a real setup). Default `github`. |
-| `repo` | string | Required once watch is actually run (not schema-validated — fails loudly at `spf watch` startup instead). `"owner/name"` for `code_host: github`, `"workspace/repo_slug"` for `code_host: bitbucket`. |
+| `repo` | string | The **code host's** repo — required once watch is actually run (not schema-validated — fails loudly at `spf watch` startup instead). `"owner/name"` for `code_host: github`, `"workspace/repo_slug"` for `code_host: bitbucket`. |
+| `issue_repo` | string | Overrides `repo` for the **issue tracker** side, only meaningful (and only needed) for `issue_provider: github` + `code_host: bitbucket` — the one combination where the tracker and the code host are genuinely different repos in different systems. Unset (the default) falls back to `repo`, which is exactly right for `github`+`github` (one repo) and for `issue_provider: jira` (which never reads `repo` at all). |
 | `label_prefix` | string | State-machine label prefix — polls/writes `<prefix>:ready`, `<prefix>:working`, etc. Default `spf`. |
 | `chain` | string | Which registered chain runs per claimed `<prefix>:ready` issue. Default `plan-build-test`. |
 | `base_branch` | string | Branch worktrees fork from and PRs target. Default `main`. |
@@ -146,7 +147,9 @@ additionally gets `<prefix>:refined`, so a human can review and promote it to
 `<prefix>:ready` when it's worth building — the refine lane never
 auto-promotes anything.
 
+### `notifications`
 
+Optional outbound push for unattended work — `spf watch`'s daemon lifecycle,
 and every chain run (`spf <chain>` / `spf run`, including watch's own
 per-issue runs). Interactive commands (`doctor`, `list`, `sessions`,
 `phases`, `events`, `init`, `ui`, `migrate`, `eject`, `abort`, `version`)

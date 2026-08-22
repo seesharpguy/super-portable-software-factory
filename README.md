@@ -278,6 +278,29 @@ watch:
     project_key: PROJ
 ```
 
+```yaml
+# .spf/spf.config.yaml — GitHub issues + Bitbucket PRs, in TWO DIFFERENT repos
+watch:
+  issue_provider: github
+  code_host: bitbucket
+  repo: workspace/repo_slug     # Bitbucket's repo — the CODE HOST always reads plain `repo`
+  issue_repo: owner/name        # GitHub's repo — only needed here, where issue tracker != code host
+  label_prefix: spf             # polls GitHub issues labeled spf:ready
+  chain: plan-build-test
+  base_branch: main
+```
+
+`repo` always names the code host's own repo; `issue_repo` overrides it for
+the issue-tracker side. This only matters for `issue_provider: github` +
+`code_host: bitbucket` — the one combination where they're genuinely
+different repos in different systems, not the same repo worn two ways
+(`github`+`github` is one repo by construction; `issue_provider: jira` never
+reads `repo` at all, so it's never ambiguous). Leave `issue_repo` unset
+everywhere else. `spf doctor` flags this specific combination when
+`issue_repo` is missing, since the silent failure mode — polling GitHub with
+the Bitbucket identifier — finds no matching issues and looks exactly like
+nothing being configured at all.
+
 ```bash
 spf watch init                # idempotently seed tracker state (no-op for Jira — see below); run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first

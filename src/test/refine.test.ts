@@ -1,9 +1,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publish } from "../core/refine.js";
+import { publish, resolveAuthoringProvider } from "../core/refine.js";
 import { refinementWellFormed } from "../core/gates.js";
 import type { Issue, IssueAuthoringProvider } from "../core/issues/provider.js";
-import type { RefinedIssue } from "../core/data_types.js";
+import type { RefinedIssue, SFConfig } from "../core/data_types.js";
+
+/** Only the `watch:` fields resolveAuthoringProvider actually reads — the rest of SFConfig is irrelevant to it. */
+function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
+  return {
+    watch: {
+      issue_provider: "github",
+      code_host: "github",
+      repo: "",
+      issue_repo: "",
+      label_prefix: "spf",
+      chain: "plan-build-test",
+      base_branch: "main",
+      poll_ms: 60_000,
+      concurrency: 2,
+      jira: { base_url: "", project_key: "" },
+      refine: { enabled: false, chain: "refine", concurrency: 1 },
+      ...watch,
+    },
+  } as unknown as SFConfig;
+}
 
 /** In-memory fake — exactly the seam `IssueAuthoringProvider` exists for. */
 class FakeTracker implements IssueAuthoringProvider {
@@ -21,6 +41,50 @@ class FakeTracker implements IssueAuthoringProvider {
     this.links.push({ parent: parent.id, child: child.id });
   }
 }
+
+// ── resolveAuthoringProvider ─────────────────────────────────────────────
+
+test("resolveAuthoringProvider: rejects a non-github issue_provider", () => {
+  assert.throws(() => resolveAuthoringProvider(makeCfg({ issue_provider: "jira" })), /does not support issue authoring/);
+});
+
+test("resolveAuthoringProvider: rejects when neither issue_repo nor repo is set", () => {
+  assert.throws(() => resolveAuthoringProvider(makeCfg({ issue_provider: "github", repo: "", issue_repo: "" })), /watch\.repo/);
+});
+
+test("resolveAuthoringProvider: rejects when GITHUB_TOKEN is unset", () => {
+  const before = process.env["GITHUB_TOKEN"];
+  delete process.env["GITHUB_TOKEN"];
+  try {
+    assert.throws(() => resolveAuthoringProvider(makeCfg({ issue_provider: "github", repo: "acme/widgets" })), /GITHUB_TOKEN/);
+  } finally {
+    if (before !== undefined) process.env["GITHUB_TOKEN"] = before;
+  }
+});
+
+test("resolveAuthoringProvider: issue_repo overrides repo — the github-issues-against-bitbucket-code case", async () => {
+  const before = process.env["GITHUB_TOKEN"];
+  process.env["GITHUB_TOKEN"] = "test-token";
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = "";
+  (globalThis as any).fetch = async (url: string) => {
+    capturedUrl = String(url);
+    return { ok: true, status: 201, json: async () => ({ id: 1, number: 1, title: "x", body: "", labels: [] }) };
+  };
+  try {
+    // repo is the BITBUCKET code repo here — issue authoring must use
+    // issue_repo (the GitHub repo), never fall back to repo, or it would
+    // try to create a GitHub issue against a Bitbucket-shaped identifier.
+    const provider = resolveAuthoringProvider(makeCfg({ issue_provider: "github", repo: "acme-workspace/widgets-code", issue_repo: "acme/widgets-issues" }));
+    await provider.createIssue({ title: "x", body: "", labels: [] });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (before !== undefined) process.env["GITHUB_TOKEN"] = before;
+    else delete process.env["GITHUB_TOKEN"];
+  }
+  assert.match(capturedUrl, /acme\/widgets-issues/);
+  assert.doesNotMatch(capturedUrl, /widgets-code/);
+});
 
 function node(overrides: Partial<RefinedIssue> & Pick<RefinedIssue, "key" | "kind" | "title">): RefinedIssue {
   return { body: "", parent: "", blocked_by: [], ...overrides };

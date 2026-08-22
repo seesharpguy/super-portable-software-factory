@@ -31,8 +31,16 @@ import { parseCli } from "../../core/utils.ts";
  */
 function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
   if (cfg.watch.issue_provider === "github") {
-    if (!cfg.watch.repo.trim()) {
-      console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
+    // `issue_repo` (falling back to `repo`) — NOT `repo` alone — because
+    // `repo` always names `code_host`'s own repo (see WatchConfigSchema's
+    // doc comment). Those coincide for issue_provider: github + code_host:
+    // github (the common case, and why the fallback exists at all), but
+    // for issue_provider: github + code_host: bitbucket they are two
+    // different repos in two different systems — reading `repo` here would
+    // silently poll the BITBUCKET repo's identifier for GitHub issues.
+    const repo = cfg.watch.issue_repo.trim() || cfg.watch.repo.trim();
+    if (!repo) {
+      console.error(`watch.repo (or watch.issue_repo, if code_host names a different repo) is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
       return null;
     }
     const token = process.env["GITHUB_TOKEN"];
@@ -40,7 +48,7 @@ function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
       console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
       return null;
     }
-    return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
+    return new GitHubProvider(repo, cfg.watch.label_prefix, token);
   }
   if (cfg.watch.issue_provider === "jira") {
     if (!cfg.watch.jira.base_url.trim() || !cfg.watch.jira.project_key.trim()) {
@@ -59,7 +67,13 @@ function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
   return null;
 }
 
-/** Same shape as `resolveIssueProvider`, for `watch.code_host`. */
+/**
+ * Same shape as `resolveIssueProvider`, for `watch.code_host` — always
+ * reads plain `watch.repo`, never `watch.issue_repo`. `repo` is defined as
+ * the CODE HOST's own repo (see `WatchConfigSchema`'s doc comment); `issue_repo`
+ * exists only to give the issue-tracker side an override when it names a
+ * different repo, which is `resolveIssueProvider`'s concern, not this one's.
+ */
 function resolveCodeHostProvider(cfg: SFConfig): CodeHostProvider | null {
   if (!cfg.watch.repo.trim()) {
     console.error(`watch.repo is not configured — add it to spf.config.yaml's watch: section`);

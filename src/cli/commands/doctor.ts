@@ -143,6 +143,24 @@ export function doctorCommand(argv: string[]): number {
   if (cfg.watch.repo.trim()) {
     check(report, "watch.issue_provider", true, cfg.watch.issue_provider);
     check(report, "watch.code_host", true, cfg.watch.code_host);
+    check(report, "watch.repo", true, `${cfg.watch.repo} (code_host's repo)`);
+
+    // The one combination where a single `repo` field is ambiguous: GitHub
+    // issues against a Bitbucket repo are two different repos in two
+    // different systems, not one repo worn two ways. Every other
+    // combination is unambiguous even with issue_repo unset — flag this
+    // one specifically rather than silently polling GitHub with the
+    // Bitbucket workspace/repo_slug string as if it were "owner/name".
+    if (cfg.watch.issue_provider === "github" && cfg.watch.code_host === "bitbucket") {
+      check(
+        report,
+        "watch.issue_repo",
+        Boolean(cfg.watch.issue_repo.trim()),
+        cfg.watch.issue_repo.trim()
+          ? cfg.watch.issue_repo
+          : `not set — issue_provider is github and code_host is bitbucket, two different repos in two different systems; without watch.issue_repo, GitHub issues will be polled using watch.repo (${JSON.stringify(cfg.watch.repo)}), which is the BITBUCKET repo`,
+      );
+    }
 
     if (cfg.watch.issue_provider === "github" || cfg.watch.code_host === "github") {
       check(
