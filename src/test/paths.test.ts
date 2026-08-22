@@ -8,6 +8,7 @@
  * checkout, and every subsequent command failed with `ELOOP` at its very
  * first filesystem touch.
  */
+import "./hermetic_git.js";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

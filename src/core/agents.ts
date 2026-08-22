@@ -60,6 +60,72 @@ export function agentEnv(agent: AgentConfig): Record<string, string> | undefined
 export class GateFailure extends Error {}
 
 /**
+ * A run that has reached (or passed) one of `defaults`' budget ceilings.
+ *
+ * Its own class, like `GateFailure`, so a caller can tell "this run was cut
+ * off on purpose" from "the agent broke" — thrown from `send()` below, which
+ * puts it inside `run.phase()`'s try/catch, so the phase records `fail` and
+ * the run exits non-zero. That is the intended outcome: fail CLOSED. A budget
+ * that logged a warning and kept spending would not be a budget.
+ */
+export class BudgetExceeded extends Error {}
+
+/**
+ * `$0.412` — three decimals, with a trailing zero trimmed so a round ceiling
+ * reads as the operator wrote it (`$0.40`, not `$0.400`). Cents are not
+ * enough precision here: a single cheap call is often sub-cent, and a budget
+ * message that says `$0.00 of max_run_cost $0.40` tells nobody anything.
+ */
+export function formatUsd(value: number): string {
+  const fixed = value.toFixed(3);
+  return `$${fixed.endsWith("0") ? fixed.slice(0, -1) : fixed}`;
+}
+
+/**
+ * The accumulating totals a budget check reads. Structurally a subset of
+ * `Run` (`core/runner.ts`) — `run.tokens`/`run.cost` are incremented by
+ * `run.addUsage()` after every send — so the real `Run` satisfies it with no
+ * adapter, and a test can pass a plain object with fake usage.
+ */
+export interface RunBudgetState {
+  cfg: SFConfig;
+  tokens: number;
+  cost: number;
+}
+
+/**
+ * Throw if this run has spent its budget. Called BEFORE every agent
+ * dispatch, never after.
+ *
+ * WHY BEFORE, AND WHY `>=`: the cost of the call about to happen is
+ * unknowable until it finishes, so a ceiling can only ever be enforced as
+ * "no further calls" — checked after the fact it would be a report, not a
+ * cap. `>=` follows from that: a run that has already spent exactly its
+ * ceiling has nothing left to spend, and letting one more (unbounded) call
+ * through would make the ceiling soft by exactly one call — which, on a
+ * chain whose last phase is the expensive one, is the whole overrun.
+ *
+ * Both ceilings absent (the default) returns immediately: zero behavior
+ * change, no arithmetic, nothing to get wrong.
+ */
+export function assertRunBudget(run: RunBudgetState): void {
+  const { max_run_cost: maxCost, max_run_tokens: maxTokens } = run.cfg.defaults;
+  if (maxCost === undefined && maxTokens === undefined) return;
+  if (maxCost !== undefined && run.cost >= maxCost) {
+    throw new BudgetExceeded(
+      `run budget exceeded: ${formatUsd(run.cost)} of max_run_cost ${formatUsd(maxCost)} — ` +
+        `raise defaults.max_run_cost or split the work`,
+    );
+  }
+  if (maxTokens !== undefined && run.tokens >= maxTokens) {
+    throw new BudgetExceeded(
+      `run budget exceeded: ${run.tokens.toLocaleString("en-US")} tokens of max_run_tokens ` +
+        `${maxTokens.toLocaleString("en-US")} — raise defaults.max_run_tokens or split the work`,
+    );
+  }
+}
+
+/**
  * A ValiError's own `.message` is only its FIRST issue — fine for a quick
  * console line, not for something a human has to act on or a model has to
  * repair. `v.flatten()` gives every issue, keyed by field path; this renders
@@ -141,6 +207,15 @@ export function loadConfig(configPaths: string[]): SFConfig {
     raw = mergeRawConfig(raw, parsed);
   }
   const defaults = raw.defaults || {};
+  // THE BACK-FILL LIST IS PER-AGENT SETTINGS ONLY. Every key here is copied
+  // DOWN onto each agent that didn't set it, so only fields that mean
+  // something about ONE agent belong. Run-scoped `defaults` keys must stay
+  // out: `data_dir`, `protected_files`, and `max_run_cost`/`max_run_tokens`
+  // are properties of the RUN, and a per-agent copy of a run budget would
+  // read as "each agent may spend this much" — a different, unenforced
+  // feature. (AgentConfigSchema is a non-strict v.object, so a stray copy
+  // would be silently STRIPPED at parse rather than rejected: the mistake
+  // would look like it worked. See ConfigDefaultsSchema's own note.)
   for (const agent of raw.agents || []) {
     for (const key of ["coding_agent", "model", "thinking", "color", "tools", "writes", "env_allowlist"]) {
       if (key in defaults && !(key in agent)) agent[key] = defaults[key];
@@ -238,6 +313,9 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
 interface RunForAgents {
   cfg: SFConfig;
   adw_id: string;
+  /** Run-total tokens/cost so far, mirrored by `addUsage` below — read by `assertRunBudget` before every send. */
+  tokens: number;
+  cost: number;
   repo_root: string;
   spf_dir: string | null;
   data_dir: string;
@@ -307,6 +385,12 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   const spent = new UsageBreakdown();
 
   async function send(promptText: string): Promise<FlueResultLike> {
+    // The ONE dispatch point for this phase — the first prompt, every
+    // JSON-repair retry, and every gate correction all funnel through here,
+    // so checking the run's ceilings here is what makes them a cap on the
+    // WHOLE run rather than on the first call of each phase. See
+    // `assertRunBudget` for why it is checked before, not after.
+    assertRunBudget(run);
     const request: AgentRequest = {
       prompt: promptText,
       system_prompt: systemText,
