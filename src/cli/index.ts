@@ -8,6 +8,7 @@ import path from "node:path";
 import * as agentCc from "../core/agent_cc.ts";
 import * as agentFlue from "../core/agent_flue.ts";
 import * as notify from "../core/notify/notifier.ts";
+import * as otel from "../core/otel.ts";
 import * as paths from "../core/paths.ts";
 import { findChain, registerRepoChains, repoChainProblems } from "../chains/index.ts";
 import { loadRepoChains } from "../chains/repo_chains.ts";
@@ -210,5 +211,10 @@ export async function main(): Promise<void> {
     // A no-op if notifications are off/unconfigured — awaits any in-flight
     // webhook POST so a fast-exiting command doesn't drop it mid-flight.
     await notify.flushAll();
+    // A no-op if `observability.otel` is not configured — drains the bounded
+    // span queue and awaits any in-flight OTLP POST, under its own hard
+    // deadline, so a fast-exiting command neither drops spans mid-flight nor
+    // waits on an unreachable collector. Never throws (core/otel.ts).
+    await otel.flushAll();
   }
 }

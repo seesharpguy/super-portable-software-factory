@@ -166,6 +166,49 @@ test("review merges key-by-key across two layered config files, like observabili
   }
 });
 
+// observability.otel is the one nested OBJECT under a top-level key that
+// mergeRawConfig spreads field-by-field, so its merge semantics differ from its
+// siblings' and are worth pinning: `otel:` is replaced as a WHOLE OBJECT by an
+// override that names it (you never want a half-merged endpoint/headers pair —
+// that is how an auth token gets POSTed to the wrong collector), while
+// `observability`'s other keys still merge key-by-key around it. Also the
+// activation contract: absent by default, so no repo starts exporting because
+// it upgraded.
+test("observability.otel survives loadConfig's merge — absent by default, whole-object replace on override", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-otel-merge-test-"));
+  try {
+    const bare = join(dir, "bare.yaml");
+    writeFileSync(bare, "observability:\n  poll_ms: 250\n");
+    assert.equal(loadConfig([bare]).observability.otel, undefined, "no otel: block -> export stays off, the default for every repo");
+
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "observability:\n  poll_ms: 250\n  otel:\n    endpoint: http://base-collector:4318/v1/traces\n    headers: {authorization: base-token}\n    service_name: base\n",
+    );
+    writeFileSync(override, "observability:\n  otel:\n    endpoint: http://override-collector:4318/v1/traces\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.observability.poll_ms, 250, "observability's other keys still merge key-by-key around otel");
+    assert.equal(cfg.observability.otel?.endpoint, "http://override-collector:4318/v1/traces");
+    assert.equal(cfg.observability.otel?.headers, undefined, "whole-object replace: the base's auth header does NOT follow the override's endpoint");
+    assert.equal(cfg.observability.otel?.service_name, "spf", "and the base's service_name doesn't either — the schema default applies");
+
+    // A single config file must reach SFConfig at all — the silent-drop trap
+    // mergeRawConfig's fixed-shape object literal sets for any new key.
+    const single = join(dir, "single.yaml");
+    writeFileSync(single, "observability:\n  otel:\n    endpoint: https://collector.example.com/v1/traces\n");
+    assert.equal(loadConfig([single]).observability.otel?.endpoint, "https://collector.example.com/v1/traces");
+
+    // A typo fails at config load, not as a silent per-run export failure.
+    const bad = join(dir, "bad.yaml");
+    writeFileSync(bad, "observability:\n  otel:\n    endpoint: not-a-url\n");
+    assert.throws(() => loadConfig([bad]), /invalid config/, "endpoint is URL-validated");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("EventRecordTypeSchema accepts every observed event type and rejects an unknown one", () => {
   for (const type of ["phase_start", "agent_start", "tool_call", "handoff", "gate_pass", "gate_fail", "log", "agent_end", "phase_end", "error"]) {
     assert.equal(v.parse(EventRecordTypeSchema, type), type);
