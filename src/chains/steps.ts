@@ -16,9 +16,29 @@
  * The loops (`fixLoop`, `reviseLoop`) own their bounded iteration and dynamic
  * phase naming (`test_1`, `fix_1`, ...) INTERNALLY — a chain's step list is
  * therefore always flat, with no loop or conditional syntax at the
- * composition layer. That is what would make a future declarative (YAML)
- * chain tractable: it would only ever need to name steps and pass them
- * tuning params, never express control flow.
+ * composition layer. That is what makes a declarative (YAML) chain
+ * tractable: it only ever names steps and passes them tuning params, never
+ * expresses control flow. `chains/repo_chains.ts` is that reader — every
+ * factory below is a name a `.spf/chains/*.yaml` file may use, and its
+ * `opts` object is that step's entire vocabulary.
+ *
+ * Consequences of being that vocabulary, all of which apply to the code
+ * below and none of which are cosmetic:
+ *
+ *  - EVERY DEFAULT IS A PUBLISHED DEFAULT. `src/test/chains.test.ts` pins the
+ *    exact `phases`/`requiredAgents`/`requiredSuites` strings every built-in
+ *    chain derives from these factories. A factory called with no opts must
+ *    keep producing byte-identical output forever; if a default label moves,
+ *    that is a bug in this file, not in the test.
+ *  - PARAMS ADD, THEY DO NOT SUBTRACT. A repo-local chain is data supplied by
+ *    the target repo; it may widen what a step does (an extra gate, a
+ *    different owner, more retries) but it must never be able to weaken the
+ *    checks spf itself imposes. See GATE_ALLOWLIST below for the one place
+ *    that rule bites hardest.
+ *  - A BAD PARAM MUST FAIL AT DEFINITION TIME. A factory validates what it
+ *    can the moment it is called (see `preflightDescription`), so a malformed
+ *    chain is a load-time problem the loader can report against a file and a
+ *    line, never a phase that blows up ten minutes into an unattended run.
  */
 
 import { writeFileSync } from "node:fs";
@@ -40,6 +60,7 @@ import {
   ScoutOutput,
   makeAgentCall,
   makeChangeCapture,
+  makeEventRecord,
   makePhaseParams,
   type EnvelopeBase,
   type EnvelopeType,
@@ -114,7 +135,26 @@ function makeStep(
 export function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Run {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
-  return session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name);
+  const run = session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name);
+  // Provenance, once per run, before any phase opens: a repo-local chain
+  // (.spf/chains/*.yaml) records the file it came from. `chain_name` alone
+  // stops being enough to reconstruct a run the moment a target repo can
+  // ship its own chain definitions — the same name can mean a different
+  // step list next week, and the trace is the only copy that does not
+  // change when the yaml does.
+  //
+  // Deliberately a `type: "log"` event with a `chain_source` name, NOT a new
+  // event kind: EventRecord.type is a closed picklist mirrored by the UI
+  // (data_types.ts's EVENT_RECORD_TYPES <-> ui/shared/types.ts's EventType),
+  // and "this run's chain came from a file" is not a new lifecycle stage —
+  // it is a note. Adding a picklist member would force a UI change for a
+  // payload the UI already renders generically.
+  if (ctx.chain_source) {
+    run.tracer.event(
+      makeEventRecord({ adw_id: run.adw_id, type: "log", name: "chain_source", payload: { source: ctx.chain_source } }),
+    );
+  }
+  return run;
 }
 
 /** Commit an envelope in its own author's words — the message-fallback four chains repeated. */
@@ -134,10 +174,135 @@ export function logChangeset(ph: PhaseHandle, result: ChangeSet): void {
   });
 }
 
+// ── layer 1.5: the params a chain DEFINITION may supply ─────────────────
+
+/**
+ * The gates a chain definition is allowed to name, by name.
+ *
+ * An EXPLICIT map, not `gates` itself and not a lookup on `gates[name]`:
+ * `core/gates.ts` is a module of exported functions, and reflecting over it
+ * would silently promote every future export (and every internal helper that
+ * ever gets exported for a test) into the surface a target repo's YAML can
+ * reach. Adding a gate to this map is a deliberate, reviewable act.
+ *
+ * CRITICAL POLICY — this map backs `extraGates`, which is ADDITIVE ONLY. A
+ * step's built-in gates are NON-REMOVABLE: there is no `gates:` param that
+ * replaces them, and there must never be one.
+ *
+ * The reason is what a repo-local chain IS. SPF's contract is "agent
+ * proposes, code disposes", and the code that disposes is SPF'S code — that
+ * is precisely why chains load as data (YAML naming these factories) instead
+ * of as imported repo code. A `gates: []` override would hand that back:
+ * the target repo would be editing its own disposer, and the first thing
+ * anyone under deadline pressure deletes is the gate that keeps failing —
+ * `diffMatchesClaims` (the builder claimed files it never wrote) or
+ * `verdictConsistent` (the reviewer approved while listing blockers).
+ * Those two are exactly the checks that catch an agent grading its own
+ * homework, and `spf watch` runs chains UNATTENDED (see
+ * `ChainContext.unattended`), so nobody is at the console to notice they
+ * stopped running. A weaker chain must therefore be un-expressible, not
+ * merely discouraged.
+ *
+ * `gates.testsPass` is deliberately absent: it is a FACTORY over a shell
+ * command string, so allowing it by name would mean letting a YAML file
+ * name an arbitrary command to execute inside a gate. Commands belong in
+ * `quality.checks`/`quality.suites` in spf.config.yaml, where
+ * `core/quality.ts` owns them and `core/permissions.ts` applies. If a
+ * command-running gate is ever wanted here, it needs its own param with its
+ * own review, not an entry in this map.
+ */
+export const GATE_ALLOWLIST: Readonly<Record<string, GateFn>> = Object.freeze({
+  artifactsExist: gates.artifactsExist,
+  filesNonEmpty: gates.filesNonEmpty,
+  jsonParses: gates.jsonParses,
+  diffMatchesClaims: gates.diffMatchesClaims,
+  verdictConsistent: gates.verdictConsistent,
+});
+
+/** Every name a chain definition may put in SOME `extraGates` param — for the module-level backstop in `resolveExtraGates` only. Schema validation must use the narrower, per-param lists below, never this one. */
+export const GATE_NAMES: readonly string[] = Object.freeze(Object.keys(GATE_ALLOWLIST));
+
+/**
+ * Which gate names are meaningful on which envelope shape — the missing
+ * per-step subset `GATE_ALLOWLIST` never had. `GATE_ALLOWLIST` says "these
+ * functions exist and are the ones a chain may ever name"; these three lists
+ * say "here is the subset that reads fields THIS envelope actually has."
+ *
+ * `artifactsExist`/`filesNonEmpty`/`jsonParses` only ever read
+ * `envelope.artifacts`, which every envelope has (see `EnvelopeBase`) — safe
+ * anywhere. `diffMatchesClaims` reads `changed_files`, which only a
+ * `BuildOutput`-shaped envelope populates; naming it on a step whose
+ * envelope is something else (e.g. a review) makes it read an absent field
+ * as `[]` and pass vacuously — silent, not a real check. `verdictConsistent`
+ * reads `approved`/`blocking`/`findings`, which only a review envelope
+ * populates; on anything else its "rejection names a problem" check reads
+ * `approved: false` with nothing to blame and fails EVERY time, which is
+ * exactly the shape of bug this module exists to make load-time-visible
+ * instead of run-time-fatal.
+ */
+export const GENERIC_GATE_NAMES: readonly string[] = Object.freeze(["artifactsExist", "filesNonEmpty", "jsonParses"]);
+export const BUILD_ENVELOPE_GATE_NAMES: readonly string[] = Object.freeze([...GENERIC_GATE_NAMES, "diffMatchesClaims"]);
+export const REVIEW_ENVELOPE_GATE_NAMES: readonly string[] = Object.freeze([...GENERIC_GATE_NAMES, "verdictConsistent"]);
+
+/**
+ * Resolve `extraGates` names to functions, throwing on an unknown one.
+ *
+ * The loader validates names against `GATE_NAMES` first, so in practice a
+ * YAML typo is reported as a load problem and never reaches here; this
+ * throw is the backstop for a programmatic caller (a test, a built-in chain)
+ * and for any future path that forgets to pre-validate. Failing loudly at
+ * factory-call time beats an `undefined` landing in a gate list and blowing
+ * up mid-phase.
+ */
+function resolveExtraGates(names: string[] | undefined): GateFn[] {
+  if (!names || names.length === 0) return [];
+  return names.map((name) => {
+    const gate = GATE_ALLOWLIST[name];
+    if (!gate) {
+      throw new Error(`unknown gate ${JSON.stringify(name)} — allowed: ${GATE_NAMES.join(", ")}`);
+    }
+    return gate;
+  });
+}
+
+/** Built-in gates first, in their compiled-in order, then whatever the definition added. Never fewer. */
+function withExtraGates(builtIn: GateFn[], extra: string[] | undefined): GateFn[] {
+  return [...builtIn, ...resolveExtraGates(extra)];
+}
+
+/**
+ * Validate a chain-definition-supplied `description` NOW, at factory-call
+ * time, instead of letting `makePhaseParams` reject it when the phase opens.
+ *
+ * `makePhaseParams` throws on a blank description and on one that merely
+ * echoes the phase name (see PhaseParamsSchema) — a rule worth keeping
+ * exactly as strict for a repo-authored description as for spf's own. But a
+ * chain definition is read minutes or hours before the phase it describes
+ * runs: `repo_chains.ts` builds every step at LOAD time, so a bad
+ * description surfaces there as a `{file, message}` problem, and an
+ * unattended `spf watch` run never starts a session it was always going to
+ * abort in phase four.
+ *
+ * The phase name used here is the step's STATIC name. Two steps compute
+ * their real name at run time from `--suite` (`qualityCheck`, `fixLoop`)
+ * and the loops append an iteration counter (`test_1`, `fix_1`) — so this
+ * is a pre-flight, not a replacement for the real check inside
+ * `makePhaseParams`, which still runs on the actual name. Both are wanted:
+ * this one catches the definition, that one catches the run.
+ */
+function preflightDescription(phaseName: string, description: string | undefined): void {
+  if (description === undefined) return;
+  // kind/owner are irrelevant to the description rule; any valid pair works.
+  // Thrown as-is on purpose: makePhaseParams' message already names the phase
+  // and says what is wrong, and the loader prefixes the file it came from.
+  makePhaseParams({ name: phaseName, kind: "code", owner: "spf", description });
+}
+
 // ── layer 2: step factories ──────────────────────────────────────────────
 
 /** The engineer(request) phase every chain opens with. */
 export function request(opts: { description?: string; logBaseline?: boolean } = {}): Step {
+  preflightDescription("request", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     if (opts.logBaseline) state.baseline = run.git.rev("HEAD");
     await run.phase(
@@ -172,50 +337,93 @@ function agentStep<T extends EnvelopeBase>(opts: {
   return makeStep(fn, { requiredAgents: [opts.owner], label: opts.label ?? opts.owner });
 }
 
-export function plan(): Step {
+/**
+ * `owner` names WHO plans, defaulting to the `planner` agent. It flows
+ * straight into `agentStep`'s existing owner argument, which is also what
+ * `makeStep` records as `requiredAgents` and as the display `label` — so a
+ * chain that plans with a differently-named agent updates its own
+ * `spf list` line and its own config validation with no second place to
+ * edit. Same shape for `build`/`scout`/`document` below.
+ */
+export function plan(opts: { owner?: string; description?: string; retries?: number; extraGates?: string[] } = {}): Step {
+  preflightDescription("plan", opts.description);
   return agentStep({
     name: "plan",
-    owner: "planner",
+    owner: opts.owner ?? "planner",
     output_type: PlanOutput,
-    description: "Turn the request into an implementable plan",
-    gates: [gates.artifactsExist, gates.filesNonEmpty],
+    description: opts.description ?? "Turn the request into an implementable plan",
+    gates: withExtraGates([gates.artifactsExist, gates.filesNonEmpty], opts.extraGates),
+    retries: opts.retries ?? 0,
   });
 }
 
 /**
  * `fromPlan` only changes the description — whether a plan() step precedes
  * this one already decides whether `state.previous` is a plan or null, so
- * there is nothing else for this flag to gate.
+ * there is nothing else for this flag to gate. An explicit `description`
+ * therefore makes `fromPlan` moot; it is still accepted rather than made
+ * mutually exclusive, because the two chains that pass `fromPlan` today read
+ * better for it and a definition that sets both is not ambiguous (the
+ * explicit text wins).
  */
-export function build(opts: { fromPlan?: boolean; retries?: number } = {}): Step {
+export function build(opts: { fromPlan?: boolean; owner?: string; description?: string; retries?: number; extraGates?: string[] } = {}): Step {
   const fromPlan = opts.fromPlan ?? true;
+  preflightDescription("build", opts.description);
   return agentStep({
     name: "build",
-    owner: "builder",
+    owner: opts.owner ?? "builder",
     output_type: BuildOutput,
-    description: fromPlan ? "Implement the plan exactly" : "Implement the request",
-    gates: [gates.diffMatchesClaims],
+    description: opts.description ?? (fromPlan ? "Implement the plan exactly" : "Implement the request"),
+    gates: withExtraGates([gates.diffMatchesClaims], opts.extraGates),
     retries: opts.retries ?? 0,
   });
 }
 
-export function scout(): Step {
+export function scout(opts: { owner?: string; description?: string; retries?: number; extraGates?: string[] } = {}): Step {
+  preflightDescription("scout", opts.description);
   return agentStep({
     name: "scout",
-    owner: "scout",
+    owner: opts.owner ?? "scout",
     output_type: ScoutOutput,
-    description: "Find and report where things live — change nothing",
-    gates: [gates.artifactsExist],
+    description: opts.description ?? "Find and report where things live — change nothing",
+    gates: withExtraGates([gates.artifactsExist], opts.extraGates),
+    retries: opts.retries ?? 0,
   });
 }
 
-/** The `prompt` chain's one step: --agent picks who, at run time and at requiredAgents-derivation time alike. */
-export function promptOnly(): Step {
+/**
+ * The `prompt` chain's one step: --agent picks who, at run time and at
+ * requiredAgents-derivation time alike.
+ *
+ * No `owner` param, unlike the steps above: this step's whole purpose is
+ * that the OPERATOR chooses the agent at invocation time, so an owner baked
+ * into a definition would defeat it. A chain that wants a fixed agent
+ * already has one — that is what `plan`/`build`/`scout` with an `owner` are.
+ * `extraGates` is accepted (the default is genuinely no gates — a generic
+ * envelope claims nothing specific) so a definition can still demand, say,
+ * that whatever files the agent claims actually exist.
+ */
+export function promptOnly(opts: { description?: string; retries?: number; extraGates?: string[] } = {}): Step {
+  preflightDescription("prompt", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     const owner = state.options["agent"] ?? "builder";
     const envelope = await run.phase(
-      makePhaseParams({ name: "prompt", kind: "agent", owner, description: `Send the request straight to ${owner} and parse its envelope` }),
-      (ph) => ph.call(makeAgentCall({ output_type: GenericOutput, prompt: state.prompt, previous: state.previous })),
+      makePhaseParams({
+        name: "prompt",
+        kind: "agent",
+        owner,
+        description: opts.description ?? `Send the request straight to ${owner} and parse its envelope`,
+        retries: opts.retries ?? 0,
+      }),
+      (ph) =>
+        ph.call(
+          makeAgentCall({
+            output_type: GenericOutput,
+            prompt: state.prompt,
+            previous: state.previous,
+            gates: resolveExtraGates(opts.extraGates),
+          }),
+        ),
     );
     state.previous = envelope;
   };
@@ -236,6 +444,12 @@ export function promptOnly(): Step {
  */
 export function qualityCheck(opts: { suite: string; description?: string } = { suite: "all" }): Step {
   const staticName = opts.suite === "all" ? "quality" : opts.suite;
+  // No extraGates here, and none below on fixLoop's suite phase either: a
+  // gate validates an AGENT's envelope against reality (see core/gates.ts).
+  // A `code` phase has no envelope to check — its command's exit status IS
+  // the check. Widening a deterministic block belongs in
+  // `quality.checks`/`quality.suites`, not in a gate list.
+  preflightDescription(staticName, opts.description);
   const fn = async (run: Run, state: ChainState) => {
     const suiteName = state.options["suite"] ?? opts.suite;
     const name = suiteName === "all" ? "quality" : suiteName;
@@ -273,10 +487,25 @@ export function qualityCheck(opts: { suite: string; description?: string } = { s
  * the default, "test") is named for itself, exactly as in `qualityCheck()`.
  * `--suite` (run.ts) overrides the compiled-in default at invocation time.
  */
-export function fixLoop(opts: { suite: string; max?: number; owner?: string } = { suite: "test" }): Step {
+export function fixLoop(
+  opts: {
+    suite: string;
+    max?: number;
+    owner?: string;
+    /** The suite phase's description (`test_1`, `verify_1`, ...). */
+    description?: string;
+    /** The repair phase's description (`fix_1`, ...) — a separate phase, so a separate override. */
+    fixDescription?: string;
+    fixRetries?: number;
+    fixExtraGates?: string[];
+  } = { suite: "test" },
+): Step {
   const max = opts.max ?? 3;
   const owner = opts.owner ?? "builder";
   const staticStepName = opts.suite === "all" ? "verify" : opts.suite;
+  const fixGates = withExtraGates([gates.diffMatchesClaims], opts.fixExtraGates);
+  preflightDescription(staticStepName, opts.description);
+  preflightDescription("fix", opts.fixDescription);
   const fn = async (run: Run, state: ChainState) => {
     const suiteName = state.options["suite"] ?? opts.suite;
     const stepName = suiteName === "all" ? "verify" : suiteName;
@@ -289,9 +518,10 @@ export function fixLoop(opts: { suite: string; max?: number; owner?: string } = 
           kind: "code",
           owner: "quality",
           description:
-            suiteName === "all"
+            opts.description ??
+            (suiteName === "all"
               ? "Lint, typecheck, and build before testing"
-              : "Run the suite — a known command, so code runs it and no agent has to rediscover it",
+              : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
         }),
         async (ph) => {
           const r = quality.runSuite(run, suiteName);
@@ -304,14 +534,20 @@ export function fixLoop(opts: { suite: string; max?: number; owner?: string } = 
       if (i === max) break; // never leave an unverified fix on the table
 
       state.previous = await run.phase(
-        makePhaseParams({ name: `fix_${i}`, kind: "agent", owner, retries: 1, description: "Repair what the suite reported, from its verbatim output" }),
+        makePhaseParams({
+          name: `fix_${i}`,
+          kind: "agent",
+          owner,
+          retries: opts.fixRetries ?? 1,
+          description: opts.fixDescription ?? "Repair what the suite reported, from its verbatim output",
+        }),
         (ph) =>
           ph.call(
             makeAgentCall({
               output_type: BuildOutput,
               prompt: state.prompt,
               previous: quality.asEnvelope(result!, what),
-              gates: [gates.diffMatchesClaims],
+              gates: fixGates,
             }),
           ),
       );
@@ -327,33 +563,85 @@ export function fixLoop(opts: { suite: string; max?: number; owner?: string } = 
   });
 }
 
-/** Bounded review -> revise loop. Sets state.accepted/reason from the final verdict. */
-export function reviseLoop(opts: { max?: number } = {}): Step {
+/**
+ * Bounded review -> revise loop. Sets state.accepted/reason from the final
+ * verdict.
+ *
+ * `reviewer`/`builder` name the two agents by role, defaulting to the agents
+ * literally called "reviewer" and "builder". They are two params rather than
+ * one because the whole point of this loop is that the critic and the author
+ * are DIFFERENT agents — a chain that points both at the same name has an
+ * agent reviewing its own work, which is the failure mode
+ * `gates.verdictConsistent` exists to make visible. Nothing here enforces
+ * that they differ (a repo may legitimately have one strong agent and want
+ * the self-review anyway), but the trace will say so plainly: the derived
+ * label below is built from these names, so `spf list` and the run's phases
+ * both read `x [-> x(revise) -> x ...]`.
+ */
+export function reviseLoop(
+  opts: {
+    max?: number;
+    reviewer?: string;
+    builder?: string;
+    /** The review phase's description (`review_1`, ...). */
+    description?: string;
+    retries?: number;
+    extraGates?: string[];
+    /** The revise phase's description (`revise_1`, ...) — a separate phase, so a separate override. */
+    reviseDescription?: string;
+    reviseRetries?: number;
+    reviseExtraGates?: string[];
+  } = {},
+): Step {
   const max = opts.max ?? 3;
+  const reviewer = opts.reviewer ?? "reviewer";
+  const builder = opts.builder ?? "builder";
+  const reviewGates = withExtraGates([gates.artifactsExist, gates.verdictConsistent], opts.extraGates);
+  const reviseGates = withExtraGates([gates.diffMatchesClaims], opts.reviseExtraGates);
+  preflightDescription("review", opts.description);
+  preflightDescription("revise", opts.reviseDescription);
   const fn = async (run: Run, state: ChainState) => {
     let review: ReviewOutputT | null = null;
     for (let i = 1; i <= max; i++) {
       review = await run.phase(
-        makePhaseParams({ name: `review_${i}`, kind: "agent", owner: "reviewer", description: "Rule on every requirement in the spec, against the code on disk" }),
-        (ph) => ph.call(makeAgentCall({ output_type: ReviewOutput, prompt: state.prompt, previous: state.previous, gates: [gates.artifactsExist, gates.verdictConsistent] })),
+        makePhaseParams({
+          name: `review_${i}`,
+          kind: "agent",
+          owner: reviewer,
+          retries: opts.retries ?? 0,
+          description: opts.description ?? "Rule on every requirement in the spec, against the code on disk",
+        }),
+        (ph) => ph.call(makeAgentCall({ output_type: ReviewOutput, prompt: state.prompt, previous: state.previous, gates: reviewGates })),
       );
 
       if (review.approved || i === max) break;
 
       state.previous = await run.phase(
-        makePhaseParams({ name: `revise_${i}`, kind: "agent", owner: "builder", retries: 1, description: "Close every blocking finding the reviewer named" }),
-        (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: [gates.diffMatchesClaims] })),
+        makePhaseParams({
+          name: `revise_${i}`,
+          kind: "agent",
+          owner: builder,
+          retries: opts.reviseRetries ?? 1,
+          description: opts.reviseDescription ?? "Close every blocking finding the reviewer named",
+        }),
+        (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: reviseGates })),
       );
     }
     state.review = review;
     state.accepted = review !== null && review.approved;
     state.reason = state.accepted ? "" : `the reviewer never approved after ${max} revision(s)`;
   };
-  return makeStep(fn, { requiredAgents: ["reviewer", "builder"], label: "reviewer [-> builder(revise) -> reviewer ...] bounded" });
+  // requiredAgents deduplicates via deriveRequiredAgents' Set, so pointing
+  // both roles at one agent yields a one-name list, not a duplicate.
+  return makeStep(fn, {
+    requiredAgents: [reviewer, builder],
+    label: `${reviewer} [-> ${builder}(revise) -> ${reviewer} ...] bounded`,
+  });
 }
 
 /** Commit the last agent step's envelope. `onlyIfAccepted` gates it on state.accepted (a preceding fixLoop/reviseLoop). */
-export function commit(opts: { onlyIfAccepted?: boolean } = {}): Step {
+export function commit(opts: { onlyIfAccepted?: boolean; description?: string } = {}): Step {
+  preflightDescription("commit", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     if (opts.onlyIfAccepted && !state.accepted) return;
     if (!state.previous) throw new Error("commit() has nothing to commit — no preceding agent step produced an envelope");
@@ -362,9 +650,9 @@ export function commit(opts: { onlyIfAccepted?: boolean } = {}): Step {
         name: "commit",
         kind: "code",
         owner: "git",
-        description: opts.onlyIfAccepted
-          ? "Land the code only after the suite came back green"
-          : "Land the builder's changes, using the message it wrote",
+        description:
+          opts.description ??
+          (opts.onlyIfAccepted ? "Land the code only after the suite came back green" : "Land the builder's changes, using the message it wrote"),
       }),
       async (ph) => commitEnvelope(run, ph, state.previous as EnvelopeBase & { commit_message?: string }),
     );
@@ -373,11 +661,20 @@ export function commit(opts: { onlyIfAccepted?: boolean } = {}): Step {
 }
 
 /** Diff the working tree against a base ref — code, not judgement. `--base` (default "main") if opts.base is unset. */
-export function changes(opts: { base?: string } = {}): Step {
+export function changes(opts: { base?: string; description?: string } = {}): Step {
+  preflightDescription("changes", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     const base = opts.base ?? state.options["base"] ?? "main";
     const changeset = await run.phase(
-      makePhaseParams({ name: "changes", kind: "code", owner: "git", description: `Diff the working tree against ${base} — the change to be written up` }),
+      makePhaseParams({
+        name: "changes",
+        kind: "code",
+        owner: "git",
+        // The default names the base it actually diffed against, which is only
+        // known once --base is resolved — an override trades that for whatever
+        // the definition says, so it should say something at least as specific.
+        description: opts.description ?? `Diff the working tree against ${base} — the change to be written up`,
+      }),
       async (ph) => {
         const result = changesLib.capture(run, makeChangeCapture({ base }));
         logChangeset(ph, result);
@@ -396,34 +693,52 @@ export function changes(opts: { base?: string } = {}): Step {
 }
 
 /** Write up the captured change. Requires a preceding changes() step. */
-export function document(): Step {
+export function document(opts: { owner?: string; description?: string; retries?: number; extraGates?: string[] } = {}): Step {
+  const owner = opts.owner ?? "documenter";
+  const docGates = withExtraGates([gates.artifactsExist, gates.filesNonEmpty], opts.extraGates);
+  preflightDescription("document", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     if (!state.changeset) throw new Error("document() requires a preceding changes() step in the chain's step list");
     const envelope = await run.phase(
-      makePhaseParams({ name: "document", kind: "agent", owner: "documenter", retries: 1, description: "Turn the captured diff into a write-up an engineer can read" }),
+      makePhaseParams({
+        name: "document",
+        kind: "agent",
+        owner,
+        // Default 1, not 0: a write-up's gates check files the documenter
+        // claims it wrote, and "wrote the file somewhere else" is a mistake
+        // the same session fixes on a re-prompt. Historical behavior; kept as
+        // the default so an existing chain is unchanged.
+        retries: opts.retries ?? 1,
+        description: opts.description ?? "Turn the captured diff into a write-up an engineer can read",
+      }),
       (ph) =>
         ph.call(
           makeAgentCall({
             output_type: DocumentOutput,
             prompt: state.prompt,
             previous: changesLib.asEnvelope(state.changeset!, DOCUMENT_NOTES),
-            gates: [gates.artifactsExist, gates.filesNonEmpty],
+            gates: docGates,
           }),
         ),
     );
     state.previous = envelope;
   };
-  return makeStep(fn, { requiredAgents: ["documenter"], label: "documenter" });
+  return makeStep(fn, { requiredAgents: [owner], label: owner });
 }
 
 /** Decompose the spec in `prompt` into a feature/story tree — see `RefinedIssueSchema`'s doc comment. Gated so a malformed tree (wrong container/leaf kinds, an unresolved reference, a dependency cycle) re-prompts the same session before publishIssues() ever runs. */
-export function refine(): Step {
+export function refine(opts: { owner?: string; description?: string; retries?: number; extraGates?: string[] } = {}): Step {
+  preflightDescription("refine", opts.description);
   return agentStep({
     name: "refine",
-    owner: "refiner",
+    owner: opts.owner ?? "refiner",
     output_type: RefineOutput,
-    description: "Decompose the spec into a feature/story tree of vertical slices",
-    gates: [gates.refinementWellFormed],
+    description: opts.description ?? "Decompose the spec into a feature/story tree of vertical slices",
+    // refinementWellFormed is NOT in GATE_ALLOWLIST — it is meaningless on
+    // any other envelope type (it reads `issues`), so there is nothing to
+    // gain by letting a definition name it, and it stays non-removable here.
+    gates: withExtraGates([gates.refinementWellFormed], opts.extraGates),
+    retries: opts.retries ?? 0,
   });
 }
 
@@ -442,7 +757,8 @@ export function refine(): Step {
  * `spf refine` run (no daemon, no spec issue in play) still needs this step
  * to work standalone.
  */
-export function publishIssues(): Step {
+export function publishIssues(opts: { description?: string } = {}): Step {
+  preflightDescription("publish", opts.description);
   const fn = async (run: Run, state: ChainState) => {
     const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[] }) | null;
     if (!envelope || !Array.isArray(envelope.issues)) {
@@ -453,7 +769,7 @@ export function publishIssues(): Step {
         name: "publish",
         kind: "code",
         owner: "tracker",
-        description: "Create the feature/story tree on the tracker, in dependency order, and link each to its parent",
+        description: opts.description ?? "Create the feature/story tree on the tracker, in dependency order, and link each to its parent",
       }),
       async (ph) => {
         const tracker = refineLib.resolveAuthoringProvider(run.cfg);

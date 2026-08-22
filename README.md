@@ -274,6 +274,36 @@ spf plan "add a /health endpoint"                        # prints adw_id a1b2c3d
 spf build-test "implement the plan" --adw-id a1b2c3d4
 ```
 
+### Repo-local chains
+
+Every chain above is built in. A target repo can also compose its own out of
+the same step factories, with zero forking and zero build step, by dropping a
+file in `.spf/chains/*.yaml` — `spf init` scaffolds `.spf/chains/example.yaml`
+(fully commented out) showing the shape:
+
+```yaml
+# .spf/chains/ship-it.yaml — spf ship-it "<prompt>" / spf run ship-it "<prompt>"
+name: ship-it
+describe: plan, build, test, land — with our own reviewer in the loop
+steps:
+  - step: request
+  - step: plan
+    owner: architect
+  - step: build
+    extraGates: [jsonParses]   # additive only — a step's built-in gates can never be removed
+  - step: fixLoop
+    suite: test
+  - step: commit
+    onlyIfAccepted: true
+```
+
+It shows up in `spf list`/`spf doctor` exactly like a built-in, and runs on
+the identical `stepChain()` driver — there is no second interpreter. The full
+step vocabulary, the gate rules, and the `spf watch` main-anchor divergence
+(a chain edited on an issue branch is *not* what an in-flight `spf watch` run
+uses) are documented in the installed skill's "Repo-local chains" section
+(`.claude/skills/spf/cookbooks/authoring_chains.md`, after `spf init`).
+
 ---
 
 ## `spf watch`

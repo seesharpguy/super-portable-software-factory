@@ -311,8 +311,36 @@ export async function watchCommand(argv: string[]): Promise<number> {
   }
 
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
+    // WATCH DIVERGENCE: `findChain` here resolves against the registry
+    // `cli/index.ts`'s `main()` built ONCE, at daemon start, from the MAIN
+    // repo anchor (the `registerRepoChains(...)` call before the command
+    // switch). `opts.cwd` below is a per-issue WORKTREE, which may carry a
+    // different (or edited) `.spf/chains/`, but that file is never
+    // re-read here — this is deliberate, not a gap: the disposer stays the
+    // OPERATOR's, never the branch's, so an agent can't rewrite its own
+    // quality gate mid-run by editing a chain file as part of the change
+    // it's making. (Also documented in the `spf init` scaffold, since that's
+    // the one place an author is invited to edit a chain file at all.)
     const chainDef = findChain(cfg.watch.chain)!; // checked above
-    const ctx: ChainContext = { prompt: opts.prompt, config_paths: configPaths, adw_id: opts.adwId, cwd: opts.cwd, chain_name: chainDef.name };
+    const ctx: ChainContext = {
+      prompt: opts.prompt,
+      config_paths: configPaths,
+      adw_id: opts.adwId,
+      cwd: opts.cwd,
+      chain_name: chainDef.name,
+      // Every `spf watch` dispatch is unattended by definition — there is
+      // no human at a TTY to prompt, ever, for an issue claimed off a
+      // tracker poll. `chain_source` is undefined for a built-in chain,
+      // the resolved chain's `.spf/chains/*.yaml` path for a repo one.
+      unattended: true,
+      chain_source: chainDef.source,
+    };
+    // KNOWN LIMITATION (not fixed here): runChainDef is called below with no
+    // third `options` argument, so nothing --suite-shaped ever reaches this
+    // dispatch — `resolveRequiredSuites`/`resolveRequiredAgents` below both
+    // fall back to each chain's compiled-in/YAML-declared default. An
+    // unattended watch run therefore can't override a chain's suite the way
+    // an interactive `spf <chain> --suite <name>` can.
     const code = await runChainDef(chainDef, ctx);
     // Static for every chain but "prompt" (whose --agent flag `spf watch`
     // never passes) — resolved with no options, exactly like `runChainDef`
@@ -346,6 +374,11 @@ export async function watchCommand(argv: string[]): Promise<number> {
       cwd: opts.cwd,
       chain_name: chainDef.name,
       issue_id: opts.issueId,
+      // Same reasoning as runChain's ctx above — an unattended dispatch,
+      // with no --suite-shaped options reaching it either (same KNOWN
+      // LIMITATION).
+      unattended: true,
+      chain_source: chainDef.source,
     };
     const code = await runChainDef(chainDef, ctx);
     if (code !== 0) {

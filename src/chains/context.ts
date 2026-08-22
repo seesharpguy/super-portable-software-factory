@@ -27,4 +27,34 @@ export interface ChainContext {
    * ignores this field.
    */
   issue_id?: string | null;
+  /**
+   * True when no human is at the keyboard for this run — `spf watch`'s
+   * daemon lane, a cron/CI invocation — false for an interactive
+   * `spf <chain> "..."`.
+   *
+   * REQUIRED, deliberately: it is not a flag a call site may forget. Every
+   * ChainContext construction site has to state which lane it is, because
+   * "unattended" is what makes several safety rules non-negotiable rather
+   * than merely advisable — most concretely, a repo-local chain
+   * (`.spf/chains/*.yaml`) may only ADD gates, never drop a built-in one
+   * (see `steps.ts`'s GATE_ALLOWLIST comment): there is nobody watching the
+   * console to notice that `diffMatchesClaims` was quietly turned off. A
+   * boolean that defaults to `false` would make the dangerous lane the one
+   * you get by accident.
+   */
+  unattended: boolean;
+  /**
+   * Absolute path of the YAML file this chain was loaded from, when it is a
+   * repo-local chain (`.spf/chains/<name>.yaml` — see
+   * `chains/repo_chains.ts`). `undefined` for a built-in chain, which has no
+   * file: it IS spf's own code.
+   *
+   * `steps.startRun()` writes this into the trace as a single
+   * `chain_source` log event, so a session in the UI or in `spf trace` can
+   * always answer "whose chain definition ran this?" — the answer stops
+   * being obvious the moment a target repo can ship its own chains, and the
+   * trace is the only durable record (the YAML file itself may have been
+   * edited by the time anyone reads the run back).
+   */
+  chain_source?: string;
 }

@@ -3,6 +3,7 @@ import * as paths from "../../core/paths.ts";
 import { parseCli, resolvePrompt } from "../../core/utils.ts";
 import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
+import { isInteractive } from "../ask.ts";
 
 const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base", "issue", "suite"];
 
@@ -37,6 +38,18 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
     // every issue it creates — see ChainContext's doc comment); every
     // other chain ignores it, so it's harmless to always pass through.
     issue_id: options["issue"] ?? null,
+    // A real TTY (isInteractive(), from cli/ask.ts) is the one case an
+    // agent step could plausibly block on a human — everything else (a CI
+    // run, a piped `spf <chain>`, spf watch's own dispatch) is unattended.
+    // Nothing reads this yet; it exists so a future gate/prompt-shaping
+    // decision has a single source of truth instead of each site re-deriving
+    // "am I attended" its own way.
+    unattended: !isInteractive(),
+    // `undefined` for every built-in chain (ChainDefinition.source is only
+    // ever set for a chain loaded from `.spf/chains/*.yaml` — see
+    // chains/repo_chains.ts) — passed through unconditionally since a
+    // `string | undefined` field is exactly what ChainContext declares.
+    chain_source: chain.source,
   };
 
   const chainOptions: Record<string, string> = {};

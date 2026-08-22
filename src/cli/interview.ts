@@ -21,7 +21,7 @@ import { ThinkingLevelSchema } from "../core/data_types.ts";
 import { loadConfig } from "../core/agents.ts";
 import { BUILTIN_CONFIG_PATH } from "../core/paths.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../core/notify/notifier.ts";
-import { CHAINS } from "../chains/index.ts";
+import { allChains } from "../chains/index.ts";
 import type { Asker } from "./ask.ts";
 
 // ── detected context ────────────────────────────────────────────────────────
@@ -320,7 +320,13 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     });
     const labelPrefix = await asker.text("Label prefix", { default: "spf" });
     const baseBranch = await asker.text("Base branch", { default: ctx.currentBranch });
-    const chainChoices = CHAINS.map((c) => ({ value: c.name, label: c.name, hint: c.describe }));
+    // allChains(), not the built-in-only CHAINS: `registerRepoChains` already
+    // ran in main() before initCommand, so a pre-existing `.spf/chains/`
+    // repo chain is a legal watch.chain everywhere else (watch.ts resolves
+    // it via findChain, doctor.ts validates and labels it) — this picker is
+    // the one place a user chooses watch.chain, so it must offer the same
+    // set. The "(repo)" hint marker distinguishes it in the list.
+    const chainChoices = allChains().map((c) => ({ value: c.name, label: c.name, hint: c.source ? `${c.describe} (repo)` : c.describe }));
     const chain = await asker.select("Chain to run per issue", chainChoices, "plan-build-test");
 
     watch = { issue_provider: issueProvider, code_host: codeHost, repo, label_prefix: labelPrefix, chain, base_branch: baseBranch };
@@ -335,7 +341,7 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
         false,
       );
       if (enableRefine) {
-        const refineChainChoices = CHAINS.map((c) => ({ value: c.name, label: c.name, hint: c.describe }));
+        const refineChainChoices = allChains().map((c) => ({ value: c.name, label: c.name, hint: c.source ? `${c.describe} (repo)` : c.describe }));
         const refineChain = await asker.select("Chain to run per spec", refineChainChoices, "refine");
         watch.refine = { enabled: true, chain: refineChain };
       }

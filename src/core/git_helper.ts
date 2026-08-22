@@ -32,10 +32,18 @@ export function isRepoAt(cwd: string): boolean {
  * not inside one — ADWs run fine in a non-git dir; only a commit phase
  * requires a repo. Always absolute, so it is safe to hand to a subprocess
  * regardless of where the ADW was launched from.
+ *
+ * `isRepoAt` only proves `git rev-parse --git-dir` succeeds, which is also
+ * true inside a bare repo and inside a `.git/` directory itself — neither
+ * has a work tree, so `--show-toplevel` fails there even though `isRepoAt`
+ * said yes. That failure is not a bug to propagate: there is still an
+ * honest answer (`cwd` itself), so it falls back rather than throwing —
+ * this function's whole contract is "never throws, always returns some root."
  */
 export function findRepoRoot(cwd: string): string {
   if (isRepoAt(cwd)) {
-    return path.resolve(git(["rev-parse", "--show-toplevel"], cwd));
+    const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf-8" });
+    if (result.status === 0) return path.resolve(result.stdout.trim());
   }
   return path.resolve(cwd);
 }
