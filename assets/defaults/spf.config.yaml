@@ -34,6 +34,12 @@ defaults:
 observability:
   db: .spf/data/spf.db               # tracer writes here directly; the UI polls it
   poll_ms: 500                     # visualizer live-poll cadence
+  # Optional OpenTelemetry spans export (explicit config only; no ambient env activation)
+  # otel:
+  #   endpoint: https://your-otel-collector/v1/traces
+  #   service_name: spf                    # optional; default "spf"
+  #   headers:                             # optional; e.g. auth headers
+  #     Authorization: Bearer ...
 
 # No default quality checks or suites are shipped — an unconfigured chain
 # that needs one fails loudly at agents.validate() time (before anything

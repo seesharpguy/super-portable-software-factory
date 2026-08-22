@@ -13,6 +13,16 @@ import { Tracer } from "./tracer.ts";
 import type { SFConfig } from "./data_types.ts";
 import { engineerName, newId } from "./utils.ts";
 import { resolveNotifier } from "./notify/notifier.ts";
+import * as otel from "./otel.ts";
+
+/**
+ * How long a signalled run may spend pushing spans before it exits anyway.
+ * Short on purpose: someone who just pressed ^C is waiting, and an
+ * observability projection is never worth making a kill feel broken. The
+ * budget is enforced inside `otel.flushAll()` (a raced, unref'd deadline), so
+ * an unreachable collector costs exactly this and not one tick more.
+ */
+const SIGNAL_DRAIN_MS = 750;
 
 /**
  * A killed run still closes its own trace.
@@ -23,11 +33,32 @@ import { resolveNotifier } from "./notify/notifier.ts";
  * flight that is already dead. Handling the signal both finalizes here and
  * lets the phase's try/catch record the phase as failed on the way out
  * (best-effort: a signal can still land mid-write).
+ *
+ * SQLite is written FIRST and synchronously, exactly as before — the otel
+ * drain is appended after it and can only ever cost time, never correctness.
+ * (`notify` has no equivalent drain on this path: its in-flight webhooks are
+ * dropped on a signal today. Fixing that means touching the notifier's
+ * lifecycle, which is outside this change; only the otel path is drained here.)
+ * A second signal during the drain exits immediately — someone pressing ^C
+ * twice means "now", and a shutdown path that ignores that is a hang.
  */
 function finalizeWhenKilled(run: Run): void {
+  let draining = false;
   const handler = (signal: NodeJS.Signals) => {
+    const code = 128 + (signal === "SIGINT" ? 2 : 15);
+    if (draining) process.exit(code);
+    draining = true;
     run.tracer.sessionFinish(run.adw_id, false); // also closes process rows
-    process.exit(128 + (signal === "SIGINT" ? 2 : 15));
+    // Unconfigured (the default) exits SYNCHRONOUSLY, exactly as it did before
+    // otel existed — no extra tick between the signal and the exit for the
+    // repos that never opted in.
+    if (!run.tracer.otel) process.exit(code);
+    // Bounded and never-throwing: flushAll() swallows its own failures and
+    // resolves on its own deadline, so this always reaches process.exit().
+    void otel.flushAll(SIGNAL_DRAIN_MS).then(
+      () => process.exit(code),
+      () => process.exit(code),
+    );
   };
   process.on("SIGTERM", handler);
   process.on("SIGINT", handler);
@@ -48,7 +79,16 @@ export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string, chain
   const id = adwId || newId(8);
   const anchor = paths.resolveAnchor(cwd);
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
-  const tracer = new Tracer(dataPaths.db_path, path.join(dataPaths.sessions_dir, id, "events.jsonl"));
+  // `null` unless `observability.otel` is configured — no environment variable
+  // can turn this on (see core/otel.ts's EXPLICIT CONFIG ONLY). Constructed
+  // BEFORE the Tracer because the Tracer's write methods are the fan-out
+  // seams: SQLite stays the source of truth, otel is a projection off it, and
+  // registering here (module-level LIVE, exactly like resolveNotifier) is what
+  // lets the CLI's finally block and the signal handler above drain it without
+  // threading a handle through every call site.
+  const otelExporter = otel.resolveOtelExporter(cfg, { adwId: id, chainName: chainName || "adw" });
+  const tracer = new Tracer(dataPaths.db_path, path.join(dataPaths.sessions_dir, id, "events.jsonl"), otelExporter);
+
   const run = new Run({
     cfg,
     adwId: id,
