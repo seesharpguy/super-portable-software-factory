@@ -556,6 +556,35 @@ export const NotificationsConfigSchema = v.object({
 });
 export type NotificationsConfig = v.InferOutput<typeof NotificationsConfigSchema>;
 
+/**
+ * `simple_sdlc`'s human-signoff gate — see the ACCEPTED ADVERSARIAL
+ * AMENDMENTS on the review-accountability thread. `simple_sdlc.ts`'s
+ * `commit_build` predicate is the ONLY place in this codebase where an AI
+ * reviewer's `approved` flag gates a commit; `decideSignoff` (same file)
+ * turns that PROPOSAL into a human's DISPOSAL wherever a human is at the
+ * keyboard, and reads these two knobs when there isn't one.
+ *
+ * `require_human_signoff` defaults to FALSE for this release, deliberately:
+ * flipping it to fail-closed-by-default would break every unattended
+ * `simple-sdlc` run (`spf watch`, CI) the day this shipped, before `spf
+ * watch` itself is signoff-aware (its own human gate today is the PR merge,
+ * now informed by the reviewer digest — see `cli/commands/watch.ts`). An
+ * unattended run instead proceeds on the AI verdict alone with a LOUD
+ * one-time warning (`decideSignoff`'s `AI_ONLY_SIGNOFF_WARNING`) until that
+ * changes. Set `true` and an unattended run fails the phase CLOSED instead —
+ * see `decideSignoff`'s fail-closed branch — rather than silently
+ * auto-approving because nobody typed at a prompt that was never shown.
+ *
+ * `signoff_timeout_seconds` bounds the interactive prompt itself: expiry
+ * means NOT accepted (the confirm's own default), never an unbounded stdin
+ * read inside `run.phase()` — see `cli/ask.ts`'s `confirm(..., {timeoutMs})`.
+ */
+export const ReviewConfigSchema = v.object({
+  require_human_signoff: v.optional(v.boolean(), false),
+  signoff_timeout_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 300),
+});
+export type ReviewConfig = v.InferOutput<typeof ReviewConfigSchema>;
+
 export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
@@ -563,6 +592,7 @@ export const SFConfigSchema = v.object({
   quality: v.optional(QualityConfigSchema, () => v.parse(QualityConfigSchema, {})),
   watch: v.optional(WatchConfigSchema, () => v.parse(WatchConfigSchema, {})),
   notifications: v.optional(NotificationsConfigSchema, () => v.parse(NotificationsConfigSchema, {})),
+  review: v.optional(ReviewConfigSchema, () => v.parse(ReviewConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 

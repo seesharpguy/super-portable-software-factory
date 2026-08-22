@@ -48,6 +48,42 @@ export function findRepoRoot(cwd: string): string {
   return path.resolve(cwd);
 }
 
+export interface CommitterIdentity {
+  name: string;
+  email: string;
+}
+
+/**
+ * `git config user.name`/`user.email` at `repoRoot` — `undefined` (never a
+ * fallback literal) when either is unset, so a caller can tell "no identity
+ * configured" from "identity is the empty string."
+ *
+ * Deliberately NOT `utils.engineerName()`: that helper tries the
+ * `ENGINEER_NAME` env var (spoofable by an operator), then `git config
+ * user.name`, then `$USER`/`$USERNAME`, and finally falls back to the
+ * literal string `"engineer"` when nothing is set — fine for a phase's
+ * display `owner`, but a `Signed-off-by:` trailer is a git attestation, and
+ * this is the one thing on this branch that ends up in one (see
+ * `chains/simple_sdlc.ts`'s `decideSignoff` and `chains/steps.ts`'s
+ * `commitEnvelope`). A trailer needs the identity git itself would use for
+ * the commit — `undefined` here means the caller records the sign-off
+ * decision in the trace anyway and skips the trailer with a logged note,
+ * rather than inventing a name for it.
+ */
+export function committerIdentity(repoRoot: string): CommitterIdentity | undefined {
+  const name = gitConfigValue(repoRoot, "user.name");
+  const email = gitConfigValue(repoRoot, "user.email");
+  if (!name || !email) return undefined;
+  return { name, email };
+}
+
+/** `""` on anything short of a clean, non-empty value — unset, unreadable, or blank all read the same to a caller that only wants "do we have one?" */
+function gitConfigValue(repoRoot: string, key: string): string {
+  const result = spawnSync("git", ["config", "--get", key], { cwd: repoRoot, encoding: "utf-8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
 export interface GitHandle {
   currentBranch(): string;
   createBranch(name: string): string;

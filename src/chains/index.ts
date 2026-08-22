@@ -145,7 +145,7 @@ export const CHAINS: ChainDefinition[] = [
     describe: "the work is real and its shape is not obvious — plan, build, test, review, document; 3 commits",
     phases:
       "engineer(request) -> planner -> git(commit_plan) -> builder -> code(test) [-> builder(fix) -> code(test) ...] " +
-      "-> reviewer [-> builder(revise) -> reviewer ...] -> code(retest, if revised) -> git(commit_build) " +
+      "-> reviewer [-> builder(revise) -> reviewer ...] -> code(retest, if revised) -> engineer(signoff) -> git(commit_build) " +
       "-> code(changes) -> documenter -> git(commit_docs)",
     requiredAgents: simpleSdlc.REQUIRED_AGENTS,
     requiredSuites: simpleSdlc.REQUIRED_SUITES,
