@@ -45,6 +45,7 @@ phases`/`spf events` exist so nobody has to guess the schema again).
 | "add/retune an agent or model" | `roster.md` |
 | "add a chain / a phase / an output type / a gate" | `authoring_chains.md` |
 | "what is SPF" | `spf_overview.md` |
+| "fold a third-party review tool's findings into the reviewer" | `cookbooks/ocr_reviewer.md` |
 | envelope/gate/session contract | `references/handoff.md` |
 | trace schema, spend vs. context | `references/observability.md` |
 | config field reference | `references/config.md` |

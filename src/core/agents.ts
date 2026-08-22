@@ -94,7 +94,19 @@ function mergeAgentLists(base: any[], override: any[]): any[] {
   return merged;
 }
 
-/** `defaults`/`observability`/`quality`/`watch`/`notifications` merge key-by-key; `agents` merges by name. */
+/**
+ * `defaults`/`observability`/`quality`/`watch`/`notifications`/`review` merge
+ * key-by-key; `agents` merges by name.
+ *
+ * THE SILENT-DROP TRAP (adversarial history, not a hypothetical): this
+ * function returns a FIXED-SHAPE object literal — every top-level `SFConfig`
+ * key has to be named on BOTH sides of every merged field here, by hand, or
+ * a `.spf/spf.config.yaml` value for it is silently discarded before
+ * `v.parse(SFConfigSchema, raw)` ever sees it. Adding a key to
+ * `SFConfigSchema` without adding it here is exactly that bug — see
+ * `data_types.test.ts`'s merge-survival test for `review`, which is the
+ * regression guard this comment is here to justify.
+ */
 function mergeRawConfig(base: Record<string, any>, override: Record<string, any>): Record<string, any> {
   return {
     defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
@@ -104,6 +116,9 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     // channels is a whole-array replace on override, same as quality.checks —
     // you don't want an override's channels appended to the built-in's.
     notifications: { ...(base.notifications || {}), ...(override.notifications || {}) },
+    // review.require_human_signoff / review.signoff_timeout_seconds — see
+    // data_types.ts's ReviewConfigSchema doc comment for why this key exists.
+    review: { ...(base.review || {}), ...(override.review || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }

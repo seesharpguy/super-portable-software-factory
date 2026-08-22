@@ -106,6 +106,7 @@ launching anything.
 | Launch a chain, watch it, report on it | `cookbooks/run_adw.md` (after `how_to_prompt_for_the_eng.md`) |
 | Retune the roster, add an agent | `cookbooks/roster.md` |
 | Add or extend a chain | `cookbooks/authoring_chains.md` |
+| Fold a third-party review tool's findings into the reviewer's verdict | `cookbooks/ocr_reviewer.md` |
 | Envelope/gate/session contract | `references/handoff.md` |
 | Trace schema, spend vs. context | `references/observability.md` |
 | Full config field reference | `references/config.md` |

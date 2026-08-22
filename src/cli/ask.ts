@@ -22,7 +22,18 @@ export interface SelectChoice<T extends string> {
 export interface Asker {
   text(label: string, opts?: { default?: string; validate?: (value: string) => string | null }): Promise<string>;
   select<T extends string>(label: string, choices: SelectChoice<T>[], dflt: T): Promise<T>;
-  confirm(label: string, dflt: boolean): Promise<boolean>;
+  /**
+   * `opts.timeoutMs`, when given (including `0`, for "don't wait at all" —
+   * checked with `!== undefined`, never truthiness), bounds the wait: expiry
+   * resolves with `dflt` (never with `true` — a caller that wants "expiry
+   * means not approved" passes `dflt: false`, same as any other unanswered
+   * prompt) and prints a `timed out — using default (yes|no)` line, phrased
+   * from `dflt` itself, so the transcript never contradicts what was
+   * returned. Absent -> unbounded, unchanged from before this option existed
+   * (the only caller today that needs it is `simple_sdlc.ts`'s sign-off
+   * prompt — see `review.signoff_timeout_seconds`).
+   */
+  confirm(label: string, dflt: boolean, opts?: { timeoutMs?: number }): Promise<boolean>;
   /** Echo-suppressed. `current` (if any) is shown masked; an empty answer keeps it and resolves to `""`. */
   secret(label: string, opts?: { current?: string }): Promise<string>;
   note(text: string): void;
@@ -48,6 +59,35 @@ class MutableWritable extends Writable {
     if (!this.muted) process.stdout.write(chunk as Buffer);
     callback();
   }
+}
+
+/** Sentinel distinguishing "the timer fired" from any real answer, including "". */
+const TIMED_OUT = Symbol("timed-out");
+
+/**
+ * Race `promise` against a `ms` timer. On expiry resolves `TIMED_OUT` and
+ * lets `promise` keep running unobserved — `readline`'s `question()` has no
+ * cancel, so the only alternatives are leaving it pending (harmless: nothing
+ * is still awaiting its result once this returns) or never bounding the
+ * wait at all, which is exactly what `review.signoff_timeout_seconds` exists
+ * to rule out. `.unref()` so a pending prompt with a live timer never keeps
+ * the process alive on its own.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 export function createAsker(): Asker {
@@ -101,9 +141,15 @@ export function createAsker(): Asker {
       }
     },
 
-    async confirm(label, dflt) {
+    async confirm(label, dflt, opts) {
       const hint = dflt ? "Y/n" : "y/N";
-      const answer = (await raw(`${label} ${paint("dim", `[${hint}]`)}: `)).toLowerCase();
+      const pending = raw(`${label} ${paint("dim", `[${hint}]`)}: `);
+      const result = opts?.timeoutMs !== undefined ? await withTimeout(pending, opts.timeoutMs) : await pending;
+      if (result === TIMED_OUT) {
+        console.log(paint("yellow", `  timed out — using default (${dflt ? "yes" : "no"})`));
+        return dflt;
+      }
+      const answer = result.toLowerCase();
       if (!answer) return dflt;
       return answer === "y" || answer === "yes";
     },

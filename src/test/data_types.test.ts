@@ -25,6 +25,7 @@ import {
   NotificationsConfigSchema,
   PhaseParamsSchema,
   PlanOutput,
+  ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
   VerifyOutput,
@@ -119,6 +120,47 @@ test("notifications survives loadConfig's merge — key-by-key like observabilit
       ["slack"],
       "channels: a whole-array replace, not an append — same semantics as quality.checks",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ReviewConfigSchema: defaults to require_human_signoff=false, signoff_timeout_seconds=300", () => {
+  const parsed = v.parse(ReviewConfigSchema, {});
+  assert.equal(parsed.require_human_signoff, false, "this release fails OPEN by default — see the schema's own doc comment");
+  assert.equal(parsed.signoff_timeout_seconds, 300);
+});
+
+// The silent-drop trap: mergeRawConfig (core/agents.ts) is a FIXED-SHAPE
+// object literal, so a `review:` key in a real config file that isn't named
+// on both sides of that literal is dropped before SFConfigSchema ever sees
+// it — parsing would then succeed anyway, quietly, on the schema default.
+// This is adversarial history on this branch, not a hypothetical: it is
+// exactly the bug `observability`/`notifications` already guard against, and
+// `review` gets the same guard the day it is added.
+test("review survives loadConfig's merge — the silent-drop trap mergeRawConfig's fixed-shape literal sets, for a single config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-review-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, "review:\n  require_human_signoff: true\n  signoff_timeout_seconds: 45\n");
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.review.require_human_signoff, true, "a review: value from a real config file must reach SFConfig, not be dropped by mergeRawConfig's object literal");
+    assert.equal(cfg.review.signoff_timeout_seconds, 45);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review merges key-by-key across two layered config files, like observability/notifications", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-review-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "review:\n  require_human_signoff: false\n  signoff_timeout_seconds: 120\n");
+    writeFileSync(override, "review:\n  require_human_signoff: true\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.review.require_human_signoff, true, "override wins for the key it names");
+    assert.equal(cfg.review.signoff_timeout_seconds, 120, "unset in the override -> the base's value survives, key-by-key, not a whole-block replace");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
