@@ -175,6 +175,16 @@ See `core/permissions.ts` for the implementation — the snapshot/compare logic,
 
 ---
 
+## Isolation: post-hoc, not a sandbox
+
+Agent isolation in SPF is enforced **after the fact**, not upfront. This matters because the `tools:` capability list is not a sandbox — a `bash` tool can run `git checkout` to discard changes, and a `write` tool can reach any path, regardless of the allowlist you write. So permission is verified the way every other claim in this system is: the working tree is fingerprinted before an agent runs, then compared after. If the agent touched anything outside its `writes:` allowlist (or a `protected_files:` path it wasn't given access to), the phase fails and anything the agent *introduced* outside its allowlist is rolled back. What it cannot undo, it names: a file that was already dirty before the agent ran is left alone rather than discarded, and uncommitted work the agent reverted cannot be restored. And because the check is post-hoc and tree-scoped, nothing outside the working tree is in scope at all — a push, a network call, a write above `repo_root`. When running an agent on the claude_code backend, SPF spawns it with `--permission-mode bypassPermissions --dangerously-skip-permissions` because the backend has no need to enforce — SPF will enforce in code instead, within those bounds.
+
+Today, `spf watch`'s PR-merge is the only human accountability checkpoint: the daemon opens a PR for each automated run, and a human approves the merge. For any other workflow, this enforcement is the backbone of letting a bounded agent proposal survive code's inspection without a human having to read it in between — but it is bounded, not a sandbox, and the scope above is what a reviewer should actually rely on.
+
+See `core/permissions.ts` for the implementation — the snapshot/compare logic, not the config terms.
+
+---
+
 ## Phases: three lanes, one primitive
 
 Every run is a sequence of phases, and every phase is the same async scope no matter who owns it.
@@ -312,6 +322,29 @@ watch:
     base_url: https://your-domain.atlassian.net
     project_key: PROJ
 ```
+
+```yaml
+# .spf/spf.config.yaml — GitHub issues + Bitbucket PRs, in TWO DIFFERENT repos
+watch:
+  issue_provider: github
+  code_host: bitbucket
+  repo: workspace/repo_slug     # Bitbucket's repo — the CODE HOST always reads plain `repo`
+  issue_repo: owner/name        # GitHub's repo — only needed here, where issue tracker != code host
+  label_prefix: spf             # polls GitHub issues labeled spf:ready
+  chain: plan-build-test
+  base_branch: main
+```
+
+`repo` always names the code host's own repo; `issue_repo` overrides it for
+the issue-tracker side. This only matters for `issue_provider: github` +
+`code_host: bitbucket` — the one combination where they're genuinely
+different repos in different systems, not the same repo worn two ways
+(`github`+`github` is one repo by construction; `issue_provider: jira` never
+reads `repo` at all, so it's never ambiguous). Leave `issue_repo` unset
+everywhere else. `spf doctor` flags this specific combination when
+`issue_repo` is missing, since the silent failure mode — polling GitHub with
+the Bitbucket identifier — finds no matching issues and looks exactly like
+nothing being configured at all.
 
 ```bash
 spf watch init                # idempotently seed tracker state (no-op for Jira — see below); run this first

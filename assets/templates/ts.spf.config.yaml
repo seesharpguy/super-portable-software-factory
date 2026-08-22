@@ -61,6 +61,11 @@ agents:
 # Needs a GITHUB_TOKEN env var (classic PAT, repo scope) for the defaults below.
 # watch:
 #   repo: owner/name
+#   # issue_repo: owner/name   # ONLY for issue_provider: github + code_host: bitbucket,
+#   #                          # where the issue tracker and code host are genuinely
+#   #                          # different repos — repo above is then the BITBUCKET
+#   #                          # repo, and issue_repo is the GitHub one. Unused/unset
+#   #                          # for every other combination.
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main

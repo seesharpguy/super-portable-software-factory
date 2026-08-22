@@ -472,8 +472,25 @@ export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema
  * watch` startup, not here — an empty string parses fine (this schema has
  * no opinion on whether watch is even configured), matching the same
  * "fails loudly before anything spawns, not eagerly at parse time" pattern
- * `quality:` already uses. Its shape depends on `code_host`: "owner/name"
- * for github, "workspace/repo_slug" for bitbucket.
+ * `quality:` already uses. `repo` always names `code_host`'s own repo —
+ * its shape depends on `code_host`: "owner/name" for github,
+ * "workspace/repo_slug" for bitbucket. `resolveCodeHostProvider`
+ * (`cli/commands/watch.ts`) always reads it.
+ *
+ * `issue_repo` exists for exactly one combination where that single field
+ * stops being enough: `issue_provider: github` with `code_host: bitbucket`
+ * — GitHub-issues-against-a-Bitbucket-repo, a real setup this project
+ * explicitly supports, where the issue tracker and the code host are
+ * genuinely different repos in different systems, not the same repo worn
+ * two ways. Every other combination stays a single field: `issue_provider:
+ * github` + `code_host: github` is one repo by construction; `issue_provider:
+ * jira` never reads `repo` at all (it uses `jira.base_url`/`project_key`),
+ * so `repo` unambiguously belongs to whichever code host is configured.
+ * `resolveIssueProvider`'s github branch and `core/refine.ts`'s
+ * `resolveAuthoringProvider` (issue authoring always targets the issue
+ * tracker, never the code host) both read `issue_repo || repo` — leaving
+ * `issue_repo` unset is a complete no-op, so no existing config needs to
+ * change.
  */
 export const WatchIssueProviderSchema = v.picklist(["github", "jira"]);
 export type WatchIssueProviderKind = v.InferOutput<typeof WatchIssueProviderSchema>;
@@ -509,6 +526,7 @@ export const WatchConfigSchema = v.object({
   issue_provider: v.optional(WatchIssueProviderSchema, "github"),
   code_host: v.optional(WatchCodeHostSchema, "github"),
   repo: v.optional(v.string(), ""),
+  issue_repo: v.optional(v.string(), ""),
   label_prefix: v.optional(v.string(), "spf"),
   chain: v.optional(v.string(), "plan-build-test"),
   base_branch: v.optional(v.string(), "main"),
