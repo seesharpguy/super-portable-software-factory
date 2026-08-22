@@ -272,6 +272,17 @@ export async function watchCommand(argv: string[]): Promise<number> {
    */
   function linkDataDir(worktreePath: string): void {
     const target = path.join(worktreePath, ".spf", "data");
+    // Hard guard, independent of however `worktreePath` got resolved: a real
+    // self-referential .spf/data symlink was observed live once already
+    // (points at itself — every later `mkdirSync` through it throws ELOOP;
+    // see `paths.healBrokenDataDir` for the recovery side of this same bug).
+    // The exact trigger was never pinned down, but `worktreePath` resolving
+    // to the main repo's own `data_dir` can never be correct regardless of
+    // how it got there, so refuse outright rather than create it again.
+    if (path.resolve(target) === path.resolve(dataPaths.data_dir)) {
+      console.error(`watch: refusing to link ${target} to itself — worktree path resolved to the main repo's own data_dir`);
+      return;
+    }
     if (existsSync(target)) return;
     mkdirSync(path.dirname(target), { recursive: true });
     symlinkSync(dataPaths.data_dir, target, "dir");

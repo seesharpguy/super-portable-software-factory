@@ -17,7 +17,7 @@
  * way), with `assets/` a direct child of it.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { findRepoRoot } from "./git_helper.ts";
 
@@ -95,6 +95,47 @@ export interface DataPaths {
 }
 
 /**
+ * Self-heals one specific, previously-observed failure mode: `data_dir`
+ * existing as a broken symlink — self-referential (points at itself) or
+ * dangling (points at something that no longer exists) — instead of a real
+ * directory. `spf watch`'s `linkDataDir` guards against ever CREATING one of
+ * these now (see its comment in `cli/commands/watch.ts`), but a prior,
+ * unguarded build already left one behind on at least one real checkout, and
+ * that state persists across every later `spf` invocation until something
+ * removes it: `mkdirSync(data_dir, {recursive: true})` — the very first
+ * filesystem touch nearly every command makes, whether via `ensureDir`'s
+ * session dirs or `acquireLock`'s lockfile dir — throws `ELOOP` before
+ * anything else runs, with no recovery path of its own.
+ *
+ * This has to run HERE, in the one function every one of those call sites
+ * resolves `data_dir` through, rather than as a guard inside each of them
+ * individually — a fix duplicated at every call site is a fix that's one new
+ * call site away from being missed again.
+ *
+ * `lstatSync` (never follows the link itself) distinguishes "nothing here
+ * yet" (the ordinary first-run case — silently returns, nothing to heal)
+ * from "a symlink sits here." Only for the symlink case does `realpathSync`
+ * (which fully resolves it) get a chance to throw — `ELOOP` for a circular
+ * link, `ENOENT` for a dangling target — and only then is anything removed.
+ * A real directory never reaches the `realpathSync` call at all.
+ */
+function healBrokenDataDir(data_dir: string): void {
+  let entry;
+  try {
+    entry = lstatSync(data_dir);
+  } catch {
+    return; // nothing at this path at all — ordinary first run
+  }
+  if (!entry.isSymbolicLink()) return; // a real directory (or file) — not this bug
+  try {
+    realpathSync(data_dir);
+  } catch {
+    rmSync(data_dir);
+    console.error(`spf: removed a broken data_dir symlink at ${data_dir} (self-referential or dangling) — a fresh directory will be created in its place`);
+  }
+}
+
+/**
  * Anchor a config's own `data_dir`/`observability.db` (as loaded — relative
  * or absolute, whichever the YAML says) to `repo_root`.
  *
@@ -102,9 +143,13 @@ export interface DataPaths {
  * alwaysWritable()` matches `cfg.defaults.data_dir` against repo-relative git
  * output, so that field stays exactly as configured. This produces a
  * parallel, absolute set of paths for filesystem use instead of mutating it.
+ *
+ * Not otherwise side-effect-free: see `healBrokenDataDir` above, which every
+ * caller needs run before its own first `mkdirSync` against `data_dir`.
  */
 export function resolveDataPaths(anchor: RepoAnchor, rawDataDir: string, rawDbPath: string): DataPaths {
   const data_dir = path.resolve(anchor.repo_root, rawDataDir);
+  healBrokenDataDir(data_dir);
   const data_dir_rel = path.relative(anchor.repo_root, data_dir).split(path.sep).join("/");
   const db_path = path.resolve(anchor.repo_root, rawDbPath);
   const sessions_dir = path.resolve(path.dirname(db_path), "sessions");
