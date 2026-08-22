@@ -125,6 +125,34 @@ test("flue + openrouter: no pinned-agent overrides needed, provider key collecte
   assert.ok(!("watch" in config));
 });
 
+test("flue + ollama: keyless provider skips the API-key prompt entirely", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "flue", Provider: "ollama" },
+    text: { "Model id": "llama3" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    // Deliberately no `secret` entries: a keyless provider must never call
+    // asker.secret() at all — PROVIDER_ENV_KEYS.ollama is `[]`, so indexing
+    // [0] for a prompt label would be `undefined`, not skip the prompt.
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.defaults.coding_agent, "flue");
+  assert.equal(config.defaults.model, "ollama/llama3");
+  assert.deepEqual(result!.env, {}, "no API key to write for a keyless provider");
+  assert.deepEqual(result!.envExampleKeys, [], "no key name to record for a keyless provider");
+});
+
 test("watch(jira/bitbucket): collects exactly JIRA_* + BITBUCKET_*, never GITHUB_TOKEN", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({

@@ -18,7 +18,7 @@ import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
-import { findChain } from "../../chains/index.ts";
+import { findChain, resolveRequiredAgents } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
 
 interface Report {
@@ -46,6 +46,22 @@ export function doctorCommand(argv: string[]): number {
 
   const isRepo = isRepoAt(anchor.repo_root);
   check(report, "git repository", isRepo, isRepo ? "yes" : "no — commit phases and change capture will fail");
+
+  // Informational only: gitignoring .spf/ itself (as opposed to the usual
+  // .spf/data/, which SHOULD be ignored) silently defeats protected_files
+  // for everything under it, including chain files not written yet — git
+  // never sees them, so permissions.ts's tracked/dirty scan can't either.
+  if (isRepo && anchor.spf_dir) {
+    const ignored = spawnSync("git", ["check-ignore", "-q", ".spf"], { cwd: anchor.repo_root }).status === 0;
+    check(
+      report,
+      ".spf/ not gitignored",
+      true,
+      ignored
+        ? "WARNING: .spf/ itself is gitignored — this silently defeats protected_files for everything under it; ignore .spf/data/ instead, not .spf/"
+        : "good",
+    );
+  }
 
   const resolution = paths.resolveConfigPaths(anchor, options["config"]);
   check(report, "config resolution", true, `${resolution.source}: ${resolution.paths.join(" -> ")}`);
@@ -102,6 +118,8 @@ export function doctorCommand(argv: string[]): number {
         const envKeys = PROVIDER_ENV_KEYS[provider];
         if (!envKeys) {
           check(report, `${label} provider key`, true, `provider "${provider}" not in doctor's known list — skipped, not a failure`);
+        } else if (envKeys.length === 0) {
+          check(report, `${label} provider key`, true, `provider "${provider}" is keyless — no key required`);
         } else {
           const set = envKeys.find((k) => process.env[k]);
           check(report, `${label} provider key`, Boolean(set), set ? `${set} is set` : `none of ${envKeys.join(", ")} is set`);
@@ -182,7 +200,23 @@ export function doctorCommand(argv: string[]): number {
           : 'not set — Bitbucket app passwords are being removed; spf watch needs an Atlassian account email plus an API token instead; see README.md\'s "spf watch" section',
       );
     }
-    check(report, "watch.chain", Boolean(findChain(cfg.watch.chain)), findChain(cfg.watch.chain) ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
+    const watchChain = findChain(cfg.watch.chain);
+    check(report, "watch.chain", Boolean(watchChain), watchChain ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
+
+    // Informational only, never a failure: a chain that skips review and/or
+    // never commits is a legitimate choice (e.g. `scout`, `plan`) — this is
+    // here so an unattended `spf watch` posture is a visible fact, not a
+    // silent assumption.
+    if (watchChain) {
+      const hasReviewer = resolveRequiredAgents(watchChain, {}).includes("reviewer");
+      const hasCommitPhase = watchChain.phases.includes("commit");
+      check(
+        report,
+        "watch.chain review posture",
+        true,
+        `${hasReviewer ? "includes" : "does not include"} a reviewer; ${hasCommitPhase ? "includes" : "does not include"} a commit phase`,
+      );
+    }
 
     if (cfg.watch.refine.enabled) {
       check(

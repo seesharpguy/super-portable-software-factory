@@ -18,10 +18,6 @@
     "README.md",
     "LICENSE"
   ],
-  "exports": {
-    ".": "./dist/index.js",
-    "./core": "./dist/core/index.js"
-  },
   "engines": {
     "node": ">=22.19.0"
   },

@@ -91,14 +91,15 @@ function makeState(prompt: string, options: Record<string, string>, issueId: str
 export interface Step {
   (run: Run, state: ChainState): Promise<void>;
   requiredAgents?: string[] | ((options: Record<string, string>) => string[]);
-  requiredSuites?: string[];
+  /** Static for most quality/fixLoop steps; dynamic wherever --suite can override the compiled-in default (see qualityCheck/fixLoop). */
+  requiredSuites?: string[] | ((options: Record<string, string>) => string[]);
   /** Display fragment for derivePhases() — e.g. "planner", "git(commit)". */
   label?: string;
 }
 
 function makeStep(
   fn: (run: Run, state: ChainState) => Promise<void>,
-  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: string[]; label?: string } = {},
+  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: Step["requiredSuites"]; label?: string } = {},
 ): Step {
   const step = fn as Step;
   step.requiredAgents = meta.requiredAgents;
@@ -221,20 +222,34 @@ export function promptOnly(): Step {
   return makeStep(fn, { requiredAgents: (options) => [options["agent"] ?? "builder"], label: "<agent>" });
 }
 
-/** One deterministic quality block, standalone — never throws; sets state.accepted for run.finish() to check. */
-export function qualityCheck(opts: { suite: "test" | "all"; description?: string } = { suite: "all" }): Step {
+/**
+ * One deterministic quality block, standalone — never throws; sets
+ * state.accepted for run.finish() to check.
+ *
+ * `opts.suite` names any suite in `quality.suites`, not just "test"/"all" —
+ * those two keep their historical phase name ("test"/"quality") and
+ * description; any other configured suite name is used verbatim for both, so
+ * a chain naming a custom suite still reads truthfully in its trace and in
+ * `spf list`. `--suite` (see run.ts) overrides the compiled-in default at
+ * invocation time, the same way `promptOnly()` lets `--agent` override its
+ * owner.
+ */
+export function qualityCheck(opts: { suite: string; description?: string } = { suite: "all" }): Step {
+  const staticName = opts.suite === "all" ? "quality" : opts.suite;
   const fn = async (run: Run, state: ChainState) => {
+    const suiteName = state.options["suite"] ?? opts.suite;
+    const name = suiteName === "all" ? "quality" : suiteName;
     await run.phase(
       makePhaseParams({
-        name: opts.suite === "all" ? "quality" : "test",
+        name,
         kind: "code",
         owner: "quality",
         description:
           opts.description ??
-          (opts.suite === "all" ? "Run the deterministic quality blocks" : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
+          (suiteName === "all" ? "Run the deterministic quality blocks" : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
       }),
       async (ph) => {
-        const result = opts.suite === "all" ? quality.runQuality(run) : quality.runTests(run);
+        const result = quality.runSuite(run, suiteName);
         quality.record(ph, result);
         state.quality = result;
         state.accepted = result.passed;
@@ -242,20 +257,30 @@ export function qualityCheck(opts: { suite: "test" | "all"; description?: string
       },
     );
   };
-  return makeStep(fn, { requiredSuites: [opts.suite], label: opts.suite === "all" ? "code(quality)" : "code(test)" });
+  return makeStep(fn, {
+    requiredSuites: (options) => [options["suite"] ?? opts.suite],
+    label: `code(${staticName})`,
+  });
 }
 
 /**
  * Bounded check -> fix loop: a known command finds the failure, the builder
  * repairs it. Always guards the last iteration — a fix on the final attempt
  * is never re-verified, so it is never spawned. Sets state.accepted/reason.
+ *
+ * `opts.suite` names any suite in `quality.suites` — "all" alone keeps its
+ * historical "verify"/"verification" naming; every other suite (including
+ * the default, "test") is named for itself, exactly as in `qualityCheck()`.
+ * `--suite` (run.ts) overrides the compiled-in default at invocation time.
  */
-export function fixLoop(opts: { suite: "test" | "all"; max?: number; owner?: string } = { suite: "test" }): Step {
+export function fixLoop(opts: { suite: string; max?: number; owner?: string } = { suite: "test" }): Step {
   const max = opts.max ?? 3;
   const owner = opts.owner ?? "builder";
-  const stepName = opts.suite === "all" ? "verify" : "test";
-  const what = opts.suite === "all" ? "verification" : "tests";
+  const staticStepName = opts.suite === "all" ? "verify" : opts.suite;
   const fn = async (run: Run, state: ChainState) => {
+    const suiteName = state.options["suite"] ?? opts.suite;
+    const stepName = suiteName === "all" ? "verify" : suiteName;
+    const what = suiteName === "all" ? "verification" : suiteName === "test" ? "tests" : suiteName;
     let result: QualityResult | null = null;
     for (let i = 1; i <= max; i++) {
       result = await run.phase(
@@ -264,12 +289,12 @@ export function fixLoop(opts: { suite: "test" | "all"; max?: number; owner?: str
           kind: "code",
           owner: "quality",
           description:
-            opts.suite === "all"
+            suiteName === "all"
               ? "Lint, typecheck, and build before testing"
               : "Run the suite — a known command, so code runs it and no agent has to rediscover it",
         }),
         async (ph) => {
-          const r = opts.suite === "all" ? quality.runQuality(run) : quality.runTests(run);
+          const r = quality.runSuite(run, suiteName);
           quality.record(ph, r);
           return r;
         },
@@ -297,8 +322,8 @@ export function fixLoop(opts: { suite: "test" | "all"; max?: number; owner?: str
   };
   return makeStep(fn, {
     requiredAgents: [owner],
-    requiredSuites: [opts.suite],
-    label: `code(${stepName}) [-> ${owner}(fix) -> code(${stepName}) ...] bounded`,
+    requiredSuites: (options) => [options["suite"] ?? opts.suite],
+    label: `code(${staticStepName}) [-> ${owner}(fix) -> code(${staticStepName}) ...] bounded`,
   });
 }
 
@@ -463,10 +488,18 @@ export function deriveRequiredAgents(steps: Step[]): string[] | ((options: Recor
   };
 }
 
-export function deriveRequiredSuites(steps: Step[]): string[] {
-  const set = new Set<string>();
-  for (const s of steps) for (const suite of s.requiredSuites ?? []) set.add(suite);
-  return [...set];
+export function deriveRequiredSuites(steps: Step[]): string[] | ((options: Record<string, string>) => string[]) {
+  const dynamicSteps = steps.filter((s): s is Step & { requiredSuites: (o: Record<string, string>) => string[] } => typeof s.requiredSuites === "function");
+  const staticSteps = steps.filter((s): s is Step & { requiredSuites: string[] } => Array.isArray(s.requiredSuites));
+  if (dynamicSteps.length === 0) {
+    return [...new Set(staticSteps.flatMap((s) => s.requiredSuites))];
+  }
+  return (options: Record<string, string>) => {
+    const set = new Set<string>();
+    for (const s of staticSteps) for (const suite of s.requiredSuites) set.add(suite);
+    for (const s of dynamicSteps) for (const suite of s.requiredSuites(options)) set.add(suite);
+    return [...set];
+  };
 }
 
 /** A display string for `spf list` — derived so it can no longer drift from what actually runs. */
