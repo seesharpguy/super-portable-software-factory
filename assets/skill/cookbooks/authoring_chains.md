@@ -1,11 +1,86 @@
 # Authoring Chains
 
 Composing a new chain, extending an existing one, and adding the engine
-primitives a chain needs (an output type, a gate, a step) are one skill with
-three doors. All three live in `src/` inside the SPF package itself — there
-is no per-repo copy to edit, because code owns the loop and all repos trust the
-engine to sequence work the same way. Engine-level changes (a new gate, a new
-envelope type, a modified phase primitive) require forking the package itself.
+primitives a chain needs (an output type, a gate, a step) is one skill with
+four doors. Engine primitives (a new gate, a new envelope type, a modified
+phase primitive) live in `src/` inside the SPF package itself — those do
+require forking the package, because they change what every repo's chains
+can mean. But COMPOSING a chain out of the existing step factories does not:
+that's what a repo-local chain (below) is for. Read that section first if
+you just want your own chain in your own repo — reach for the rest of this
+document only once you've decided you need a new primitive.
+
+## Repo-local chains (`.spf/chains/*.yaml`)
+
+The zero-fork door: a `.spf/chains/*.yaml` file in a target repo names
+existing step factories from `spf`'s own `src/chains/steps.ts` and passes
+them params — never imports or runs code from the target repo. `spf init`
+scaffolds `.spf/chains/example.yaml`, fully commented out, showing the shape.
+
+```yaml
+# .spf/chains/ship-it.yaml — spf ship-it "<prompt>" / spf run ship-it "<prompt>"
+name: ship-it
+describe: plan, build, test, land — with our own reviewer in the loop
+steps:
+  - step: request               # every chain opens with this
+  - step: plan
+    owner: architect             # any agent named in spf.config.yaml
+  - step: build
+    retries: 2
+    extraGates: [jsonParses]     # additive — see below
+  - step: fixLoop
+    suite: test
+  - step: commit
+    onlyIfAccepted: true
+```
+
+**Shape.** One file, one chain — the filename is a handle a problem can point
+at. `steps` is a flat list; each entry names a `step:` and its params sit as
+FLAT SIBLINGS of `step:` — never nested under a `params:` key. Param names are
+exactly the step factory's `opts` keys, camelCase (`extraGates`, `fixExtraGates`,
+`onlyIfAccepted`, ...). An unknown param, an unknown step, or a param of the
+wrong type is a load-time problem naming the step index and what's allowed —
+never a silently-ignored typo and never a runtime surprise.
+
+**Step vocabulary** (`repo_chains.STEP_NAMES`) — the same factories the table
+in Step 2 below documents: `request`, `plan`, `build`, `scout`, `promptOnly`,
+`qualityCheck`, `fixLoop`, `reviseLoop`, `commit`, `changes`, `document`,
+`refine`, `publishIssues`.
+
+**Gates are additive only, and per-step.** A step's built-in gates
+(`diffMatchesClaims` on `build`, `verdictConsistent` on `reviseLoop`'s review
+phase, ...) are non-removable — there is no `gates:` param that replaces
+them, and there must never be one (see `GATE_ALLOWLIST`'s comment in
+`steps.ts` for why: the first thing anyone deletes under deadline pressure is
+the gate that keeps failing). `extraGates` can only ADD from an explicit
+allowlist SCOPED to what that param's envelope actually supports:
+`artifactsExist`/`filesNonEmpty`/`jsonParses` anywhere (they only read
+`envelope.artifacts`, present on every envelope); `diffMatchesClaims` only on
+a param whose phase produces a `BuildOutput` (`build.extraGates`,
+`fixLoop.fixExtraGates`, `reviseLoop.reviseExtraGates`); `verdictConsistent`
+only on `reviseLoop.extraGates` (the review phase, a `ReviewOutput`). Naming
+a gate outside its param's list is a load problem, not a chain that loads
+clean and then fails (or vacuously passes) its gate on every run.
+
+**Names are guarded.** A chain name must be lowercase letters/digits/`._-`
+(it's typed on the command line). It cannot collide with an `spf` subcommand
+(`run`, `list`, `init`, `watch`, ...) — `spf watch` would always run the
+daemon, never a same-named chain. Two repo-chain files can't claim the same
+`name` either: the trace's `chain_name` column has to keep meaning one thing.
+
+**The `spf watch` divergence.** `spf watch` registers `.spf/chains/` from the
+MAIN repo anchor ONCE, at daemon start — not per-issue, not per-worktree. A
+chain file edited on an issue branch (inside the worktree `spf watch` checks
+that branch out into) is NOT what runs for that issue; the daemon keeps using
+whatever `.spf/chains/` looked like when it started. This is deliberate: the
+disposer stays the OPERATOR's, never the branch's, which is exactly what
+keeps an agent from rewriting its own quality gate mid-run by editing a chain
+file as part of the change it's making.
+
+Everything below this section is about the OTHER three doors: designing a
+brand-new built-in chain, adding a step to the vocabulary above, or adding an
+engine primitive (gate/envelope type/phase primitive) — none of which a
+target repo needs, or can do, on its own.
 
 ## Step 1 — design the chain before writing code
 

@@ -127,7 +127,64 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 // shared project config, same as package.json. Only runtime/generated
 // content is ignored: session traces (data/), a hand-editable engine copy
 // (engine/, from `spf eject`), and secrets (.env).
+//
+// `.spf/chains/` is deliberately NOT in this list. A chain file is DATA
+// that decides what the disposer runs (see repo_chains.ts's module comment)
+// — the same trust boundary `defaults.protected_files` exists to guard.
+// Gitignoring it would let anyone (or any agent) rewrite what "spf plan-
+// build-test" or a watch.chain even means, invisibly to `git diff`/PR
+// review, in a repo that otherwise protects every other file that judges
+// agent output. Chain files stay tracked so `protected_files` covers the
+// chain that judges the agents, not just the code it judges.
 const GITIGNORE_ENTRIES = [".spf/data/", ".spf/engine/", ".env"];
+
+/**
+ * Scaffolded once by `spf init` — fully commented out, so every line is a
+ * `#` comment and `parseYaml` reads the whole file as an empty document;
+ * `loadOne` (repo_chains.ts) treats that as "declares no chain" and skips it
+ * silently — no chain registered, but also no problem reported against
+ * spf's own scaffold. It exists to show the shape (naming existing
+ * `chains/steps.ts` factories as data, never importing repo code — params
+ * are flat siblings of `step:`, never nested under a `params:` key) and to
+ * carry the one divergence an author needs to know before writing a real
+ * one.
+ */
+export const EXAMPLE_CHAIN_YAML = `# .spf/chains/example.yaml — a repo-local chain, loaded as DATA.
+#
+# This file NAMES existing step factories from spf's own chains/steps.ts
+# (request, plan, build, fixLoop, commit, ...) — it never imports or runs
+# code from this repo. "Agent proposes, code disposes," and the code that
+# disposes is always SPF's own, packaged code; a chain file only ever picks
+# which of ITS steps run, in which order, with which params. See
+# .claude/skills/spf/cookbooks/authoring_chains.md (installed by \`spf init\`
+# into THIS repo) for the full step vocabulary — its "Repo-local chains"
+# section is written for exactly this file.
+#
+# WATCH DIVERGENCE: \`spf watch\` registers chains from the MAIN repo anchor
+# once, at daemon start — not per-issue, not per-worktree. A chain file
+# edited on an issue branch (inside the worktree \`spf watch\` checks that
+# branch out into) is NOT what runs for that issue; the daemon keeps using
+# whatever \`.spf/chains/\` looked like in the main repo when it started. The
+# disposer stays the OPERATOR's, never the branch's — exactly the property
+# that keeps an agent from being able to rewrite its own quality gate mid-run
+# by editing a chain file as part of the change it's making.
+#
+# Uncomment and edit to register this chain (spf list / spf doctor will
+# then show it). Every field below is required unless noted.
+#
+# name: example                  # spf example "<prompt>" / spf run example "<prompt>"
+# describe: small build+fix example chain — build, then a bounded test-fix loop
+# steps:
+#   - step: request               # every chain opens with this
+#   - step: build
+#     fromPlan: false              # no preceding plan() step in this chain
+#   - step: fixLoop
+#     suite: test                  # must name a key under quality.suites in spf.config.yaml
+#     owner: builder               # must name an agent in the roster (cfg.agents)
+#     max: 3                       # optional — defaults to 3 if omitted
+#   - step: commit
+#     onlyIfAccepted: true
+`;
 
 const GENERATED_HEADER = `# .spf/spf.config.yaml — written by \`spf init\`'s interview, merged ON TOP of
 # spf's packaged built-in defaults. Only what you changed is here; run
@@ -141,6 +198,18 @@ export async function initCommand(argv: string[]): Promise<number> {
   const anchor = paths.resolveAnchor(options["cwd"]);
   const sfDir = path.join(anchor.repo_root, ".spf");
   mkdirSync(sfDir, { recursive: true });
+
+  // Scaffold `.spf/chains/` unconditionally, on every path below (interview
+  // or not) — same idempotent shape as installSkill(): never overwrites a
+  // file that's already there (an author may have started editing the
+  // example, or written their own chains alongside it), so this is always
+  // safe to run again on a repo that already has one.
+  const chainsDir = path.join(sfDir, "chains");
+  mkdirSync(chainsDir, { recursive: true });
+  const exampleChainPath = path.join(chainsDir, "example.yaml");
+  if (!existsSync(exampleChainPath)) {
+    writeFileSync(exampleChainPath, EXAMPLE_CHAIN_YAML);
+  }
 
   // Idempotent (a no-op once the skill is already up to date, a `.new`
   // sibling rather than an overwrite for a locally-edited file) — safe to

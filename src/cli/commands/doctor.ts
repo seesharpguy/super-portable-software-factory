@@ -19,7 +19,7 @@ import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
-import { findChain, resolveRequiredAgents } from "../../chains/index.ts";
+import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
 
 interface Report {
@@ -37,6 +37,13 @@ interface Report {
 function check(report: Report, name: string, ok: boolean, detail: string, severity?: "info" | "warn"): void {
   report.checks.push({ name, ok, detail, severity });
   if (!ok) report.ok = false;
+}
+
+/** Same helper as `list.ts`'s — trims a repo chain's absolute `source` path down to the `.spf/chains/...` fragment worth printing. Small enough, and file-local enough, that sharing it isn't worth a new module. */
+function repoChainLabel(source: string): string {
+  const marker = path.join(".spf", "chains");
+  const idx = source.lastIndexOf(marker);
+  return idx === -1 ? source : source.slice(idx);
 }
 
 type ProbeResult = { ok: true; status: number } | { ok: false; error: string };
@@ -333,6 +340,47 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     check(report, `quality suite "${suiteName}"`, missing.length === 0, missing.length === 0 ? names.join(", ") : `names unknown check(s): ${missing.join(", ")}`);
   }
 
+  // Repo-local chains (`.spf/chains/*.yaml`, registered as DATA — see
+  // `chains/repo_chains.ts` — never as imported repo code): already merged
+  // into the registry by `cli/index.ts`'s `main()` before any command runs,
+  // so `allChains()`/`repoChainProblems()` here reflect exactly what `spf
+  // list` and `spf run`/`spf <chain>` would resolve, not a re-parse of our
+  // own. A malformed chain file is a real ✗, not informational — an operator
+  // wrote a chain they cannot run, and that is exactly the "fails silently
+  // otherwise" class of problem this command exists to surface.
+  for (const problem of repoChainProblems()) {
+    check(report, `repo chain ${problem.file}`, false, problem.message);
+  }
+  for (const chain of allChains().filter((c) => c.source !== undefined)) {
+    const owners = resolveRequiredAgents(chain, {});
+    const missingOwners = owners.filter((o) => !cfg.agents.some((a) => a.name === o));
+    check(
+      report,
+      `repo chain "${chain.name}" owners`,
+      missingOwners.length === 0,
+      missingOwners.length === 0 ? owners.join(", ") || "(none)" : `unknown agent(s): ${missingOwners.join(", ")} — not in cfg.agents`,
+    );
+
+    const suiteNames = resolveRequiredSuites(chain, {});
+    const missingSuites = suiteNames.filter((s) => !(s in cfg.quality.suites));
+    const missingChecks = missingSuites.length === 0 ? suiteNames.flatMap((s) => cfg.quality.suites[s].filter((n) => !cfg.quality.checks.some((c) => c.name === n))) : [];
+    check(
+      report,
+      `repo chain "${chain.name}" suites`,
+      missingSuites.length === 0 && missingChecks.length === 0,
+      missingSuites.length > 0
+        ? `unknown suite(s): ${missingSuites.join(", ")} — not in cfg.quality.suites`
+        : missingChecks.length > 0
+          ? `suite(s) name unknown check(s): ${missingChecks.join(", ")}`
+          : suiteNames.join(", ") || "(none)",
+    );
+
+    // Informational: the derived sequence itself, same string `spf list`
+    // shows — printed here so the chain's author can eyeball what they
+    // actually wrote without a second command.
+    check(report, `repo chain "${chain.name}" phases`, true, chain.phases, "info");
+  }
+
   // A protected_files pattern matching nothing anywhere in the trace is
   // usually a stale convention (e.g. an old adws/... pattern) that silently
   // stopped protecting anything.
@@ -391,15 +439,33 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           : 'not set — Bitbucket app passwords are being removed; spf watch needs an Atlassian account email plus an API token instead; see README.md\'s "spf watch" section',
       );
     }
+    // findChain() consults built-ins first, then the repo-chain registry
+    // (registered by cli/index.ts's main() before doctorCommand ever runs)
+    // — a watch.chain naming a `.spf/chains/*.yaml` chain resolves here the
+    // same way it would for `spf watch` itself, no special-casing needed.
     const watchChain = findChain(cfg.watch.chain);
-    check(report, "watch.chain", Boolean(watchChain), watchChain ? cfg.watch.chain : `"${cfg.watch.chain}" is not a registered chain`);
+    check(
+      report,
+      "watch.chain",
+      Boolean(watchChain),
+      watchChain ? `${cfg.watch.chain}${watchChain.source ? ` (repo: ${repoChainLabel(watchChain.source)})` : ""}` : `"${cfg.watch.chain}" is not a registered chain`,
+    );
 
     // Informational only, never a failure: a chain that skips review and/or
     // never commits is a legitimate choice (e.g. `scout`, `plan`) — this is
     // here so an unattended `spf watch` posture is a visible fact, not a
     // silent assumption.
     if (watchChain) {
-      const hasReviewer = resolveRequiredAgents(watchChain, {}).includes("reviewer");
+      // Structural, not name-coupled: `reviseLoop`'s derived label is always
+      // `${reviewer} [-> ${builder}(revise) -> ${reviewer} ...] bounded` (see
+      // steps.ts), so this holds for a built-in chain and for a repo chain
+      // that overrides `reviewer`/`builder` to something other than the
+      // literal agent named "reviewer" — the same owner-override feature
+      // this changeset added everywhere else. Matching on the literal name
+      // "reviewer" would report "does not include a reviewer" for a chain
+      // that is entirely built around a review loop, the moment its reviewer
+      // is renamed.
+      const hasReviewer = watchChain.phases.includes("(revise)");
       const hasCommitPhase = watchChain.phases.includes("commit");
       check(
         report,
@@ -410,11 +476,12 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     }
 
     if (cfg.watch.refine.enabled) {
+      const refineChain = findChain(cfg.watch.refine.chain);
       check(
         report,
         "watch.refine.chain",
-        Boolean(findChain(cfg.watch.refine.chain)),
-        findChain(cfg.watch.refine.chain) ? cfg.watch.refine.chain : `"${cfg.watch.refine.chain}" is not a registered chain`,
+        Boolean(refineChain),
+        refineChain ? `${cfg.watch.refine.chain}${refineChain.source ? ` (repo: ${repoChainLabel(refineChain.source)})` : ""}` : `"${cfg.watch.refine.chain}" is not a registered chain`,
       );
       check(
         report,
