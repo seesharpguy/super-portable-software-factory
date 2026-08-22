@@ -194,6 +194,82 @@ test("watch(jira/bitbucket): collects exactly JIRA_* + BITBUCKET_*, never GITHUB
   assert.equal(result!.env.GITHUB_TOKEN, undefined, "neither provider needs GitHub — must not ask for or write GITHUB_TOKEN");
 });
 
+test("watch(github issues + bitbucket code): asks two repo questions and writes issue_repo separately from repo", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Model (Claude": "sonnet",
+      Authentication: "login",
+      "Issue tracker": "github",
+      "Code host": "bitbucket",
+      "Chain to run": "plan-build-test",
+    },
+    text: {
+      "Code repo, where PRs open (workspace/repo_slug)": "acme-workspace/widgets-code",
+      "Issue repo, where spf:ready issues live (owner/name)": "acme/widgets-issues",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": true,
+      "Also enable the refine lane": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { GITHUB_TOKEN: "ghp_x", BITBUCKET_API_TOKEN: "bb-token" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.watch.issue_provider, "github");
+  assert.equal(config.watch.code_host, "bitbucket");
+  assert.equal(config.watch.repo, "acme-workspace/widgets-code", "repo is the CODE HOST's repo");
+  assert.equal(config.watch.issue_repo, "acme/widgets-issues", "issue_repo overrides repo for the issue tracker side");
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.equal(cfg.watch.repo, "acme-workspace/widgets-code");
+  assert.equal(cfg.watch.issue_repo, "acme/widgets-issues");
+});
+
+test("watch(github issues + github code): a single repo answers both, issue_repo stays unset", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Model (Claude": "sonnet",
+      Authentication: "login",
+      "Issue tracker": "github",
+      "Code host": "github",
+      "Chain to run": "plan-build-test",
+    },
+    text: { "Repo (owner/name)": "acme/widgets" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": true,
+      "Also enable the refine lane": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { GITHUB_TOKEN: "ghp_x" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.watch.repo, "acme/widgets");
+  assert.equal(config.watch.issue_repo, undefined, "the single-repo case never writes issue_repo at all");
+});
+
 test("declining the final confirm returns null — nothing to write", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({ defaultConfirm: false }); // every confirm, including the final one, says no

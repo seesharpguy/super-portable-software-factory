@@ -41,8 +41,16 @@ export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider 
         `the refine lane needs "github" (see jira_provider.ts's module comment on why Jira isn't wired up yet)`,
     );
   }
-  if (!cfg.watch.repo.trim()) {
-    throw new Error(`watch.repo is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
+  // Issue authoring always targets the ISSUE tracker's repo — `issue_repo`
+  // if set, falling back to plain `repo` (the common case: issue_provider
+  // and code_host are both github, so they're the same repo). Reading
+  // `repo` alone would be wrong for a github-issues + bitbucket-code setup,
+  // where `repo` names the BITBUCKET repo (see WatchConfigSchema's doc
+  // comment) — this would try to create GitHub issues against a Bitbucket
+  // identifier.
+  const repo = cfg.watch.issue_repo.trim() || cfg.watch.repo.trim();
+  if (!repo) {
+    throw new Error(`watch.repo (or watch.issue_repo, if code_host names a different repo) is not configured — add it to spf.config.yaml's watch: section, e.g. "owner/name"`);
   }
   const token = process.env["GITHUB_TOKEN"];
   if (!token) {
@@ -50,7 +58,7 @@ export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider 
       'GITHUB_TOKEN is not set — the refine lane needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo)',
     );
   }
-  return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
+  return new GitHubProvider(repo, cfg.watch.label_prefix, token);
 }
 
 function typeLabel(labelPrefix: string, kind: string): string {

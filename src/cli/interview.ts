@@ -282,16 +282,31 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       "github",
     );
     const repoHint = codeHost === "bitbucket" ? "workspace/repo_slug" : "owner/name";
-    const repo = await asker.text(`Repo (${repoHint})`, {
+    // github issues + bitbucket code is the one combination where a single
+    // repo field is ambiguous — they're two different repos in two
+    // different systems, not one repo worn two ways (github+github is one
+    // repo by construction; jira never reads `repo` at all). Ask a second,
+    // explicitly-labeled question only in that one case.
+    const splitRepo = issueProvider === "github" && codeHost === "bitbucket";
+    const repo = await asker.text(splitRepo ? `Code repo, where PRs open (${repoHint})` : `Repo (${repoHint})`, {
       default: codeHost === "github" ? ctx.repoSlug ?? "" : "",
       validate: (val) => (val.includes("/") && val.split("/").filter(Boolean).length === 2 ? null : `must be "${repoHint}"`),
     });
+    let issueRepo = "";
+    if (splitRepo) {
+      asker.note("GitHub issues and the Bitbucket code repo are different repos here — spf watch needs both.");
+      issueRepo = await asker.text("Issue repo, where spf:ready issues live (owner/name)", {
+        default: ctx.repoSlug ?? "",
+        validate: (val) => (val.includes("/") && val.split("/").filter(Boolean).length === 2 ? null : `must be "owner/name"`),
+      });
+    }
     const labelPrefix = await asker.text("Label prefix", { default: "spf" });
     const baseBranch = await asker.text("Base branch", { default: ctx.currentBranch });
     const chainChoices = CHAINS.map((c) => ({ value: c.name, label: c.name, hint: c.describe }));
     const chain = await asker.select("Chain to run per issue", chainChoices, "plan-build-test");
 
     watch = { issue_provider: issueProvider, code_host: codeHost, repo, label_prefix: labelPrefix, chain, base_branch: baseBranch };
+    if (issueRepo) watch.issue_repo = issueRepo;
 
     // Issue authoring (create + link a hierarchy) is only implemented on
     // GitHubProvider today — see jira_provider.ts's module comment — so
