@@ -31,8 +31,17 @@ Location comes from `observability.db` in `spf.config.yaml`, default
 | `phase_end` | the block exits; carries the resolved status |
 | `error` | a throw inside a phase block |
 
-`parent_id` nests spans, so an agent phase expands into its tool-call spans
-in the UI.
+`parent_id` is reserved and structurally empty today — SPF's phases are flat
+siblings, and nothing writes nesting into it. The UI reconstructs phase/
+tool-call nesting from `phase_id` plus agent-call bracketing instead of
+reading `parent_id`.
+
+**Optional OTel export.** When `observability.otel.endpoint` is set in
+`spf.config.yaml`, a lossy, allowlisted projection of phase/agent/tool spans
+(status, model, token/cost counts, gate results — never prompts, envelopes,
+tool arguments, or source code) is also pushed to an OTLP/HTTP collector,
+fire-and-forget. SQLite remains the source of truth regardless; see
+`config.md`'s `observability.otel.*` rows for the field reference.
 
 **Spend is itemized per phase.** `agent_end.usage` carries tokens *and*
 dollars for each component Flue reports (matching pi-ai's field names

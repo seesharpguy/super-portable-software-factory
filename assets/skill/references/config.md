@@ -83,6 +83,11 @@ agents:
 |---|---|---|
 | `db` | path | The trace sqlite db. Default `.spf/data/spf.db`. |
 | `poll_ms` | int | UI live-poll cadence. Default `500`. |
+| `otel.endpoint` | string | OTLP/HTTP collector endpoint (e.g., `https://your-host/v1/traces`). Omit to disable OTel export. |
+| `otel.headers` | object | Optional HTTP headers (e.g., auth tokens). Each value is a string. |
+| `otel.service_name` | string | Optional service name in exported spans. Default `spf`. |
+
+**No ambient env activation**: OTEL export requires explicit `observability.otel` config — the `OTEL_EXPORTER_OTLP_ENDPOINT` shell variable is never consulted. An unrelated shell env variable must not become a data-egress switch.
 
 ### `quality`
 

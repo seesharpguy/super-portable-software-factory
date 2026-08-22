@@ -451,9 +451,38 @@ export const ConfigDefaultsSchema = v.object({
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
+/**
+ * OpenTelemetry span export — OFF unless this block exists, and `endpoint` is
+ * required BY THIS SCHEMA rather than defaulted, because presence of the block
+ * IS the activation switch. No ambient environment variable can turn export on
+ * (notably NOT `OTEL_EXPORTER_OTLP_ENDPOINT`): an unrelated shell variable must
+ * never become a data-egress switch. See `core/otel.ts`'s header for the full
+ * set of constraints, including the attribute allowlist that keeps repo source
+ * code (tool args, prompts, envelopes, the request text) off the wire.
+ *
+ * `endpoint` is URL-validated so a typo fails at config load rather than as a
+ * silent per-run export failure. Either the full OTLP traces path
+ * (`https://collector:4318/v1/traces`) or a bare origin (`/v1/traces` is
+ * appended — see `resolveTracesUrl`). `headers` is where a collector's auth
+ * token goes; its VALUES are treated as secrets and never logged.
+ */
+export const OTelConfigSchema = v.object({
+  endpoint: v.pipe(v.string(), v.url()),
+  headers: v.optional(v.record(v.string(), v.string()), undefined),
+  service_name: v.optional(v.string(), "spf"),
+});
+export type OTelConfig = v.InferOutput<typeof OTelConfigSchema>;
+
 export const ObservabilityConfigSchema = v.object({
   db: v.optional(v.string(), ".spf/data/spf.db"),
   poll_ms: v.optional(v.number(), 500),
+  // Absent by default. `agents.ts`'s mergeRawConfig spreads `observability`
+  // field-by-field, so this nested object merges as a WHOLE-OBJECT replace on
+  // override — an override that sets `otel:` replaces the base's entirely,
+  // which is the semantics you want for an endpoint + its headers (a
+  // half-merged pair of the two would send tokens to the wrong collector).
+  // Pinned by a merge-survival test in src/test/data_types.test.ts.
+  otel: v.optional(OTelConfigSchema),
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;
 

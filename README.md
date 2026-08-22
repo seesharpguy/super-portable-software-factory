@@ -489,6 +489,34 @@ genuinely informative, just worth expecting.
 Full field reference: `spf install-skill`'s installed skill
 (`references/config.md`).
 
+## Observability
+
+Every run produces a complete trace: all events, phases, agent calls, and tool invocations stream into SQLite as they happen. The local trace stays the source of truth — prompts, envelopes, tool arguments, and your source code never leave the machine. Token counts and costs ride alongside.
+
+```bash
+spf ui                           # browser-based visualizer over the trace
+spf events <adw_id> --follow    # live event stream, tailable
+```
+
+The default export is SQLite only (`.spf/data/spf.db`). Optionally, you can export **spans only** (phase/agent/tool timing and allowlisted metadata) to an OpenTelemetry collector for integration with a trace UI or observability platform:
+
+```yaml
+observability:
+  db: .spf/data/spf.db
+  poll_ms: 500
+  otel:
+    endpoint: https://your-otel-collector/v1/traces
+    service_name: spf                    # optional; default "spf"
+    headers:                             # optional; e.g. auth headers
+      Authorization: Bearer ...
+```
+
+OTEL export is **explicit config only** — an unrelated shell variable cannot become a data-egress switch. OTEL is strictly a spans-only export: each phase is a span with child spans for agent calls and tool calls, annotated with phase status, agent model, token/cost counts, and gate results. This export never blocks a run: if the collector is slow or unreachable, SPF continues normally and logs a single line per run when export fails (not one per batch), and reports the number of dropped spans on the final flush as `spf.otel.dropped_spans` for the backend to surface. The complete trace stays in SQLite regardless.
+
+**Attribute allowlist**: only phase name/kind/owner/status, chain name, adw_id, agent name/model/coding_agent, gate name + passed + violation count, token counts and cost, and durations. Prompts, envelopes, tool arguments, and your source code never leave — that guarantee is enforced in code, not just in documentation.
+
+See `assets/skill/references/config.md`'s `observability` section for the full field reference.
+
 ## What's in this repo
 
 ```
