@@ -28,6 +28,8 @@ import {
   ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
+  TierSchema,
+  TieringConfigSchema,
   VerifyOutput,
   WatchConfigSchema,
   makePhaseParams,
@@ -317,5 +319,139 @@ test("agentEnv: filters the operator environment down to the allowlist plus the 
     else process.env["MY_API_KEY"] = savedApiKey;
     if (savedSecret === undefined) delete process.env["SECRET_TOKEN"];
     else process.env["SECRET_TOKEN"] = savedSecret;
+  }
+});
+
+// ── tiering (SPF #14) — merge survival ───────────────────────────────────────
+//
+// The same silent-drop trap `review`/`notifications`/`observability.otel`
+// already guard against: `mergeRawConfig` (core/agents.ts) is a FIXED-SHAPE
+// object literal, so a top-level `tiering:` key not named on both sides of
+// it is dropped before `SFConfigSchema` ever sees it, and parsing then
+// succeeds anyway on the schema default — quietly wrong, not a crash.
+
+test("TieringConfigSchema defaults: enabled=false, tiers=[], roles={}; TierSchema's coding_agent defaults to flue", () => {
+  const parsed = v.parse(TieringConfigSchema, {});
+  assert.equal(parsed.enabled, false, "OFF by default — absence must be a total no-op");
+  assert.deepEqual(parsed.tiers, []);
+  assert.deepEqual(parsed.roles, {});
+
+  const tier = v.parse(TierSchema, { name: "scout", model: "ollama/granite4.1:8b" });
+  assert.equal(tier.coding_agent, "flue", "same default as AgentConfigSchema's own coding_agent field");
+});
+
+test("tiering: survives loadConfig's merge for a single config file — not dropped by mergeRawConfig's fixed-shape literal", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-tiering-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(
+      configPath,
+      "tiering:\n" +
+        "  enabled: true\n" +
+        "  tiers:\n" +
+        "    - {name: scout, coding_agent: flue, model: ollama/granite4.1:8b}\n" +
+        "  roles:\n" +
+        "    scout: scout\n",
+    );
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.tiering.enabled, true, "a tiering: value from a real config file must reach SFConfig, not be dropped by mergeRawConfig");
+    assert.deepEqual(cfg.tiering.tiers, [{ name: "scout", coding_agent: "flue", model: "ollama/granite4.1:8b" }]);
+    assert.deepEqual(cfg.tiering.roles, { scout: "scout" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tiering merges key-by-key across two layered config files — an override that only flips enabled keeps the base's tiers/roles", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-tiering-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "tiering:\n" +
+        "  enabled: false\n" +
+        "  tiers:\n" +
+        "    - {name: scout, coding_agent: flue, model: ollama/granite4.1:8b}\n" +
+        "    - {name: builder, coding_agent: flue, model: ollama/qwen3.8:27b-mlx}\n" +
+        "  roles:\n" +
+        "    scout: scout\n" +
+        "    documenter: scout\n" +
+        "    planner: builder\n" +
+        "    builder: builder\n" +
+        "    refiner: builder\n" +
+        "    reviewer: builder\n",
+    );
+    writeFileSync(override, "tiering:\n  enabled: true\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.tiering.enabled, true, "override wins for the key it names");
+    assert.deepEqual(
+      cfg.tiering.tiers.map((t) => t.name),
+      ["scout", "builder"],
+      "unset in the override -> the base's ladder survives, key-by-key, not a whole-block replace",
+    );
+    assert.deepEqual(cfg.tiering.roles, {
+      scout: "scout",
+      documenter: "scout",
+      planner: "builder",
+      builder: "builder",
+      refiner: "builder",
+      reviewer: "builder",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tiering.tiers is a whole-list replace on override — a repo's own ladder replaces the base's wholesale, not an unordered splice of both", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-tiering-merge-list-replace-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "tiering:\n  tiers:\n    - {name: scout, model: google/gemini-3.6-flash}\n    - {name: builder, model: fireworks/accounts/fireworks/models/kimi-k3}\n",
+    );
+    writeFileSync(override, "tiering:\n  tiers:\n    - {name: local, model: ollama/granite4.1:8b}\n");
+    const cfg = loadConfig([base, override]);
+    assert.deepEqual(
+      cfg.tiering.tiers.map((t) => t.name),
+      ["local"],
+      "the override's own ladder replaces the base's entirely — same semantics as quality.checks/notifications.channels",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tiering.roles is a whole-object replace on override — a half-merged role map would route some agents by the base's ladder and some by the override's", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-tiering-merge-roles-replace-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "tiering:\n  roles:\n    scout: scout\n    builder: builder\n");
+    writeFileSync(override, "tiering:\n  roles:\n    reviewer: deep\n");
+    const cfg = loadConfig([base, override]);
+    assert.deepEqual(cfg.tiering.roles, { reviewer: "deep" }, "the override's roles map replaces the base's entirely, not a merge of both");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tiering: is NOT back-filled onto agents — a tiering: block leaves every cfg.agents[i] without a tiering key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-tiering-no-backfill-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(
+      configPath,
+      "tiering:\n  enabled: true\n  tiers:\n    - {name: scout, model: ollama/granite4.1:8b}\n  roles:\n    builder: scout\n" +
+        "agents:\n  - name: builder\n    prompt_engineering: {system: s.md, user: u.md}\n",
+    );
+    const cfg = loadConfig([configPath]);
+    for (const agent of cfg.agents) {
+      assert.ok(!("tiering" in agent), `agent ${agent.name} must not carry a tiering key — it is a RUN-scoped config, not a per-agent setting`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

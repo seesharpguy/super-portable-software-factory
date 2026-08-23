@@ -206,7 +206,7 @@ export function trailerFor(outcome: SignoffOutcome, identity: CommitterIdentity 
 
 export async function main(ctx: ChainContext): Promise<number> {
   const { prompt } = ctx;
-  const run = startRun(ctx, REQUIRED_AGENTS, REQUIRED_SUITES);
+  const run = await startRun(ctx, REQUIRED_AGENTS, REQUIRED_SUITES);
   const baseline = run.git.rev("HEAD"); // pinned before this run commits anything
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {

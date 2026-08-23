@@ -17,6 +17,7 @@ import * as agentFlue from "./agent_flue.ts";
 import * as paths from "./paths.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
+import { effectiveAgent, type TierResolution } from "./tiering.ts";
 import {
   GateReport,
   UsageBreakdown,
@@ -194,6 +195,15 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     // review.require_human_signoff / review.signoff_timeout_seconds — see
     // data_types.ts's ReviewConfigSchema doc comment for why this key exists.
     review: { ...(base.review || {}), ...(override.review || {}) },
+    // tiering.enabled / .tiers / .roles — key-by-key at this level, so a repo
+    // that only flips `enabled` keeps the base's tiers/roles. `tiers` is a
+    // whole-LIST replace on override (like quality.checks and
+    // notifications.channels): a repo that declares its own ladder replaces
+    // the packaged one wholesale rather than getting an unordered splice of
+    // both. `roles` is a whole-OBJECT replace for the same reason — a
+    // half-merged role map would route some agents by the base's ladder and
+    // some by the override's. Pinned by src/test/data_types.test.ts.
+    tiering: { ...(base.tiering || {}), ...(override.tiering || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }
@@ -312,6 +322,65 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
       }
     }
   }
+  // Tiering (SPF #14) — every check below lives inside this ONE guard. A
+  // disabled ladder is not a config error, it is a config that is off: none
+  // of this fires for `enabled: false`, no matter what `tiers`/`roles` say —
+  // the same reason the packaged ladder + roles map surviving key-by-key
+  // merge into a repo that never opted in must not fail every chain.
+  if (cfg.tiering.enabled) {
+    // cfg-global: every declared rung must be well-formed for its OWN
+    // declared backend — the same branch this function already runs for
+    // agent.model, just keyed off the tier's coding_agent instead.
+    for (const tier of cfg.tiering.tiers) {
+      if (tier.coding_agent === "flue") {
+        try {
+          agentFlue.resolveModel(tier.model);
+        } catch (error) {
+          problems.push(`tiering.tiers[${JSON.stringify(tier.name)}]: ${(error as Error).message}`);
+        }
+      } else if (!tier.model.trim()) {
+        problems.push(`tiering.tiers[${JSON.stringify(tier.name)}]: model is empty`);
+      }
+    }
+    // cfg-global: `enabled: true` with nothing to route is a silent no-op —
+    // the same reason an unconfigured quality.suites entry above is an
+    // error rather than a quiet pass-through.
+    if (cfg.tiering.tiers.length === 0) {
+      problems.push("tiering.enabled is true but tiering.tiers is empty — declare at least one rung or set tiering.enabled: false");
+    }
+    if (Object.keys(cfg.tiering.roles).length === 0) {
+      problems.push("tiering.enabled is true but tiering.roles is empty — name at least one role or set tiering.enabled: false");
+    }
+    // Scoped to `required` — same precedent as the per-agent loop above
+    // (`:256`/`:277-288`): a `roles` key naming a role no phase in this run
+    // will dispatch is neither routed nor validated. This is what lets the
+    // packaged six-name `roles` map survive key-by-key merge into a repo
+    // with a pruned/renamed roster without failing every chain.
+    for (const name of required) {
+      const tierName = cfg.tiering.roles[name];
+      if (tierName === undefined) continue; // precedence: not named in roles -> untouched, nothing to check
+      const tier = cfg.tiering.tiers.find((t) => t.name === tierName);
+      if (!tier) {
+        problems.push(`tiering.roles.${name} names tier ${JSON.stringify(tierName)}, which is not declared in tiering.tiers`);
+        continue;
+      }
+      const agent = cfg.agents.find((a) => a.name === name);
+      if (!agent) continue; // already reported above by the per-agent loop's own resolve() failure
+      // Rule T — the backend-compatibility rule (§4.4A). A tier changes an
+      // agent's `model` and NOTHING else, so a role is routable by a tier
+      // only when their backends agree; a mismatch is a named error, never
+      // a silent skip, because a config that says "route this role by tier"
+      // and then quietly does not is the failure mode this codebase already
+      // refuses for suites.
+      if (agent.coding_agent !== tier.coding_agent) {
+        problems.push(
+          `agent ${JSON.stringify(name)} (coding_agent: ${agent.coding_agent}) is routed by tiering.roles to tier ${JSON.stringify(tier.name)} ` +
+            `(coding_agent: ${tier.coding_agent}) — a tier's model only speaks its own backend's vocabulary; declare a ` +
+            `${agent.coding_agent} rung for ${JSON.stringify(name)} or remove it from tiering.roles`,
+        );
+      }
+    }
+  }
   if (problems.length > 0) {
     throw new Error("config validation failed:\n- " + problems.join("\n- "));
   }
@@ -331,6 +400,13 @@ interface RunForAgents {
   session_dir: string;
   context_handoff_dir: string;
   agent_map: Record<string, { session_id: string; model: string; coding_agent: string }>;
+  /**
+   * Set once by `startRun` (`src/chains/steps.ts`), null until then. Optional
+   * here — a structural interface must not force every present and future
+   * test fake to carry it — and `effectiveAgent`'s own `?? base.model`
+   * fallback already handles absence. See `core/tiering.ts`.
+   */
+  tiering?: TierResolution | null;
   tracer: {
     event: (record: ReturnType<typeof makeEventRecord>) => string;
     processStart: (adwId: string, kind: string, name: string, pid: number, command: string) => void;
@@ -352,7 +428,14 @@ interface RunForAgents {
 
 /** One agent call: render prompts -> pi run -> typed parse -> gates -> envelope. */
 export async function execute(run: RunForAgents, phase: Phase, call: AgentCall): Promise<EnvelopeBase> {
-  const agent = resolve(run.cfg, phase.params.owner);
+  // The single dispatch-site change tiering makes: one effective AgentConfig,
+  // `model` and ONLY `model` possibly overridden (rule T — `coding_agent` is
+  // never touched here). Every downstream reader below (`agent_start`'s
+  // payload, `run.console.agentStarted`, the actual `AgentRequest`,
+  // `agentSessionId`'s reuse comparison, the traced `agent_sessions.model`
+  // column, `run.saveAgentMap`) becomes consistent for free. See
+  // `core/tiering.ts`'s `effectiveAgent`.
+  const agent = effectiveAgent(run, resolve(run.cfg, phase.params.owner));
   const agentDir = path.join(run.session_dir, agent.name);
   mkdirSync(agentDir, { recursive: true });
 

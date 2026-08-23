@@ -692,6 +692,62 @@ export const ReviewConfigSchema = v.object({
 });
 export type ReviewConfig = v.InferOutput<typeof ReviewConfigSchema>;
 
+/**
+ * Risk-tiered per-role model routing — SPF #14. One rung of a ladder:
+ * `name` is what `tiering.roles` points at, `model` speaks EXACTLY the same
+ * vocabulary as an agent's own `model:` for that backend (provider/model-id
+ * for flue, Claude Code's bare alias/full-name for claude_code) — there is
+ * deliberately no per-provider table, since for flue the provider is
+ * already the first segment of the value.
+ *
+ * `coding_agent` declares WHICH BACKEND'S VOCABULARY this rung's `model`
+ * speaks — same picklist and same default as `AgentConfigSchema`'s own
+ * field (`:409`), reused rather than restated. A tier changes an agent's
+ * `model` and NOTHING else (`coding_agent` stays the agent's own, always),
+ * so a rung can only route roles whose `coding_agent` matches its own — see
+ * `core/tiering.ts`'s rule T, enforced by `agents.ts`'s `validate()`.
+ */
+export const TierSchema = v.object({
+  name: v.pipe(v.string(), v.minLength(1)),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
+  model: v.pipe(v.string(), v.minLength(1)),
+});
+export type Tier = v.InferOutput<typeof TierSchema>;
+
+/**
+ * OFF by default, and `enabled: false`/absent is a TOTAL no-op: every agent
+ * dispatches at exactly the model its roster entry names, byte-identical to
+ * before this key existed — same discipline `max_run_cost`/`max_run_tokens`
+ * hold themselves to (`ConfigDefaultsSchema`'s own comment above).
+ *
+ * TOP-LEVEL (`SFConfigSchema` below), deliberately NOT nested under
+ * `defaults:` — `agents.ts`'s `loadConfig` back-fill loop copies a FIXED
+ * list of `defaults` keys DOWN onto every agent that hasn't set them, and
+ * `AgentConfigSchema` is a non-strict `v.object`, so a stray copy would be
+ * silently STRIPPED at parse rather than rejected (see
+ * `ConfigDefaultsSchema`'s "THE BACK-FILL TRAP" comment — `max_run_cost`/
+ * `max_run_tokens` needed an explicit never-add-this-to-the-list comment to
+ * survive exactly that trap). A top-level key sits outside that loop
+ * entirely, so the trap cannot apply here at all.
+ *
+ * `tiers` is the ladder, WEAKEST FIRST: a risk level shifts every routed
+ * role UP or DOWN this list by the same step, so order is the whole
+ * semantics — a SEQUENCE states that unambiguously where a mapping's key
+ * order would be parser-dependent.
+ *
+ * `roles` is the baseline tier per ROLE (an agent name). Naming an agent
+ * here IS the operator's statement "route this one by tier" — so the
+ * resolved tier wins over that agent's own `model:`. An agent NOT named
+ * here is never retiered: its `model:` stands, untouched. See
+ * `core/tiering.ts`'s `resolveTiering` for the full precedence rule.
+ */
+export const TieringConfigSchema = v.object({
+  enabled: v.optional(v.boolean(), false),
+  tiers: v.optional(v.array(TierSchema), () => []),
+  roles: v.optional(v.record(v.string(), v.string()), () => ({})),
+});
+export type TieringConfig = v.InferOutput<typeof TieringConfigSchema>;
+
 export const SFConfigSchema = v.object({
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
@@ -700,6 +756,7 @@ export const SFConfigSchema = v.object({
   watch: v.optional(WatchConfigSchema, () => v.parse(WatchConfigSchema, {})),
   notifications: v.optional(NotificationsConfigSchema, () => v.parse(NotificationsConfigSchema, {})),
   review: v.optional(ReviewConfigSchema, () => v.parse(ReviewConfigSchema, {})),
+  tiering: v.optional(TieringConfigSchema, () => v.parse(TieringConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 

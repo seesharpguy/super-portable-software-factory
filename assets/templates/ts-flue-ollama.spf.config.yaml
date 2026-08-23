@@ -65,3 +65,28 @@ agents:
     # a 3B model — a lighter tag here is a real, not merely theoretical,
     # option.
     model: ollama/granite4.1:8b
+
+# Risk-tiered per-role model routing (SPF #14) — ON, local only. The two
+# tags below are the MEASURED ones (last session, live on localhost:11434)
+# and they ALREADY appear in this template today — ollama/qwen3.8:27b-mlx at
+# :48 (defaults.model), :58 (planner), :60 (reviewer) and
+# ollama/granite4.1:8b at :67 (documenter). This block introduces no new
+# model string.
+tiering:
+  enabled: true
+  # coding_agent: flue matches this template's `defaults.coding_agent: flue`
+  # (:46) — every roster agent here is flue, so every role is routable by
+  # these rungs. Stated explicitly rather than left to the default, because
+  # it is the field that keeps a rung from being handed to a backend that
+  # cannot parse it (rule T — see assets/skill/references/config.md's
+  # "tiering" section).
+  tiers:
+    - { name: scout,   coding_agent: flue, model: ollama/granite4.1:8b }    # cheap read/summarize/triage
+    - { name: builder, coding_agent: flue, model: ollama/qwen3.8:27b-mlx }  # first-attempt implementation
+  roles:
+    scout: scout
+    documenter: scout
+    planner: builder
+    builder: builder
+    refiner: builder
+    reviewer: builder
