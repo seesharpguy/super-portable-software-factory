@@ -52,6 +52,74 @@ observability:
 #       test: [test]
 #       all: [test, lint]
 
+# OFF by default, and absence/false is a TOTAL no-op: every agent dispatches
+# at exactly the model its roster entry names, byte-identically to before
+# this key existed. Same discipline as max_run_cost/max_run_tokens
+# (data_types.ts:463-491): a repo that upgrades must not silently start
+# routing its phases to different models.
+#
+# Turning it on is a deliberate edit, or `spf init --template ts-flue-ollama`
+# (the one packaged template whose two rungs are MEASURED). `spf init`'s
+# interview does NOT write this block — see config.md's "tiering" section
+# for why.
+tiering:
+  enabled: false
+
+  # The ladder, WEAKEST FIRST. A SEQUENCE, not a mapping: order is the whole
+  # semantics here (a risk level shifts every routed role UP or DOWN this
+  # list), and a YAML sequence states order unambiguously where a mapping
+  # would make it depend on the parser preserving key order.
+  #
+  # `coding_agent` (default "flue", the same default an agent's own field
+  # uses) declares WHICH BACKEND'S VOCABULARY this rung's `model` speaks. It
+  # is not optional in spirit: a tier changes an agent's `model` and NOTHING
+  # else — `coding_agent` is a per-agent field and always stays the agent's
+  # own — so a rung can only route roles whose backend matches. See
+  # config.md's "tiering" section for rule T, and note that this is what
+  # makes "validated by the same backend branch agents.validate() uses" an
+  # answerable question: the branch is the TIER's declared backend.
+  #
+  # `model` then speaks EXACTLY the same vocabulary as an agent's own `model:`
+  # for that backend — provider/model-id for flue, Claude Code's bare alias for
+  # claude_code. There is deliberately no per-provider table: for flue the
+  # provider is already the first segment of the value.
+  #
+  # WHEN tiering.enabled, `spf doctor` runs the SAME provider-key and
+  # model-shape checks over these rungs that it already runs over
+  # cfg.agents[].model — a rung naming a provider whose key is unset is a
+  # green doctor and a first-dispatch failure otherwise. When tiering is
+  # DISABLED (which is this file's shipped state) doctor does not look at
+  # `tiers` at all, so shipping this populated ladder cannot fail `spf
+  # doctor` in a repo that never opted in.
+  tiers:
+    - { name: scout,   coding_agent: flue, model: google/gemini-3.6-flash }
+    - { name: builder, coding_agent: flue, model: fireworks/accounts/fireworks/models/kimi-k3 }
+    - { name: deep,    coding_agent: flue, model: openai/gpt-5.6-terra }
+
+  # Baseline tier per ROLE (an agent name). Naming an agent here IS the
+  # operator's statement "route this one by tier" — so the resolved tier wins
+  # over that agent's own `model:`. An agent NOT named here is never retiered:
+  # its `model:` stands, untouched. That is the whole precedence rule.
+  #
+  # A key naming an agent this repo's roster does not define is NOT a global
+  # error — it is only reported for a chain that actually requires that
+  # agent. A pruned or renamed roster must not fail every chain.
+  #
+  # NOTE for the two packaged templates that set `defaults.coding_agent:
+  # claude_code` (ts, ts-cc): this `roles` map and the flue-shaped `tiers`
+  # above survive into their effective config through key-by-key merge. That
+  # is harmless while `enabled: false`. Flip `enabled: true` there without
+  # also declaring your own ladder and validate() fails LOUDLY by name on the
+  # backend mismatch (rule T) rather than dispatching a `fireworks/...` id
+  # through Claude Code.
+  roles:
+    scout:      scout
+    documenter: scout
+    planner:    builder
+    builder:    builder
+    refiner:    builder
+    reviewer:   deep
+
 agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3

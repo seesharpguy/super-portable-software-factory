@@ -131,6 +131,25 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 # review:
 #   require_human_signoff: false   # true = an unattended simple-sdlc run fails closed instead of committing on the reviewer's verdict alone
 #   signoff_timeout_seconds: 300
+
+# Uncomment to route roles to cheaper/stronger models by a run-global risk
+# signal (chain kind + prompt length) — OFF by default, and absence/false is
+# a TOTAL no-op: every agent dispatches at exactly the model its roster
+# entry names. \`spf init --template ts-flue-ollama\` ships this ON with two
+# MEASURED local tags; this starter leaves it off and commented because no
+# tag below has been measured against YOUR roster. See
+# assets/skill/references/config.md's "tiering" section for the full
+# mechanism (the ladder walk, rule T, the availability probe) before turning
+# this on — \`spf doctor\` checks these rungs the same way it checks
+# cfg.agents[].model, but ONLY once enabled: true.
+# tiering:
+#   enabled: true
+#   tiers:
+#     - { name: cheap,  coding_agent: flue, model: google/gemini-3.6-flash }
+#     - { name: strong, coding_agent: flue, model: openai/gpt-5.6-terra }
+#   roles:
+#     builder: cheap
+#     reviewer: strong
 `;
 
 // .spf/spf.config.yaml and .spf/prompt_engineering/ stay tracked — they're

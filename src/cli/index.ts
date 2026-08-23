@@ -13,6 +13,7 @@ import * as paths from "../core/paths.ts";
 import { findChain, registerRepoChains, repoChainProblems } from "../chains/index.ts";
 import { loadRepoChains } from "../chains/repo_chains.ts";
 import { dispatchChain, usageFor } from "./commands/run.ts";
+import { estimateCommand } from "./commands/estimate.ts";
 import { listCommand } from "./commands/list.ts";
 import { initCommand } from "./commands/init.ts";
 import { installSkillCommand } from "./commands/install-skill.ts";
@@ -34,6 +35,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
   spf fanout <chain> "<prompt>" [--n 3]     best-of-N: N isolated attempts, one deterministic winner branch — YOU merge it, spf never does
   spf fanout --clean <base-adw-id>          remove leftover worktrees/branches from a killed or discarded fanout run
+  spf estimate <chain> "<prompt>" [--n N]   read-only: planned model routing + a token/cost projection from real trace history — starts nothing, exits 3 if there's no history yet
   spf init [--force] [--yes] [--template <name>] [--no-skills]  interview to seed .spf/spf.config.yaml + .env, and install the Claude Code skill unless --no-skills (--yes/--template skip the interview, not the skill install)
   spf install-skill [--user] [--force]      (re)install the Claude Code skill by hand — spf init already does this
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
@@ -149,6 +151,9 @@ export async function main(): Promise<void> {
       }
       case "fanout":
         process.exitCode = await fanoutCommand(rest);
+        return;
+      case "estimate":
+        process.exitCode = await estimateCommand(rest);
         return;
       case "list":
         process.exitCode = listCommand();

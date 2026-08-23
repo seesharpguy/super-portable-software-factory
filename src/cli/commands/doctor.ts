@@ -19,6 +19,7 @@ import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core
 import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
+import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
@@ -309,7 +310,14 @@ export async function doctorCommand(argv: string[]): Promise<number> {
   // handled in the per-agent loop below) but DO have a server that might
   // simply not be running — worth a reachability probe the same way
   // ANTHROPIC_BASE_URL gets one above.
-  const usesOllamaFlue = cfg.agents.some((a) => a.coding_agent !== "claude_code" && a.model.startsWith("ollama/"));
+  // Tiering (SPF #14): an ollama/* ladder rung reaches for the same server
+  // whether or not any cfg.agents[] entry itself names one — gated on
+  // tiering.enabled so a disabled (or never-opted-into) ladder can't turn on
+  // a probe nobody asked for. Without this, an all-hosted roster paired with
+  // an ollama ladder got NO reachability probe at all (integration point 18a).
+  const usesOllamaFlue =
+    cfg.agents.some((a) => a.coding_agent !== "claude_code" && a.model.startsWith("ollama/")) ||
+    (cfg.tiering.enabled && cfg.tiering.tiers.some((t) => t.coding_agent !== "claude_code" && t.model.startsWith("ollama/")));
   if (usesOllamaFlue && !flags["no-probe"]) {
     // `ollamaBaseUrl()` (ollama_provider.ts) is the SAME default-substitution
     // logic `registerOllamaModel` uses for a real dispatch, including
@@ -366,6 +374,133 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     const isKnownToolName = agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : isKnownFlueToolName;
     for (const toolName of agent.tools ?? []) {
       if (!isKnownToolName(toolName)) check(report, `${label} tool "${toolName}"`, false, "not a known tool name");
+    }
+  }
+
+  // Tiering (SPF #14) — three checks, ALL gated on tiering.enabled: a
+  // disabled (or never-opted-into) ladder must be invisible to `spf doctor`,
+  // the same gate agents.validate() uses (see the "roster + suites
+  // validate" check above, which already fails loudly on a rule-T backend
+  // mismatch for the whole roster — nothing here duplicates that failure,
+  // this section only adds VISIBILITY on top of it). Without this gate,
+  // `spf init --template ts && spf doctor` would fail on three unset
+  // provider keys for a ladder that is off and will never dispatch
+  // (integration point 18's own regression note).
+  if (cfg.tiering.enabled) {
+    // 18(b): the SAME provider-key check the per-agent loop above just ran,
+    // over cfg.tiering.tiers[].model instead of cfg.agents[].model,
+    // branching on the TIER's OWN declared coding_agent (never an agent's —
+    // a tier changes `model` and nothing else, see core/tiering.ts's rule
+    // T). Without this, a hosted rung naming a provider whose key is unset
+    // is a green doctor and a first-dispatch failure.
+    for (const tier of cfg.tiering.tiers) {
+      const tierLabel = `tiering tier "${tier.name}"`;
+      if (tier.coding_agent === "claude_code") {
+        check(
+          report,
+          `${tierLabel} provider key`,
+          true,
+          process.env["ANTHROPIC_API_KEY"] ? "ANTHROPIC_API_KEY is set" : "ANTHROPIC_API_KEY not set — fine if authenticated via `claude login` instead",
+        );
+      } else {
+        try {
+          const [provider] = resolveModel(tier.model);
+          const envKeys = PROVIDER_ENV_KEYS[provider];
+          if (!envKeys) {
+            check(report, `${tierLabel} provider key`, true, `provider "${provider}" not in doctor's known list — skipped, not a failure`);
+          } else if (envKeys.length === 0) {
+            check(report, `${tierLabel} provider key`, true, `provider "${provider}" is keyless — no key required`);
+          } else {
+            const set = envKeys.find((k) => process.env[k]);
+            check(report, `${tierLabel} provider key`, Boolean(set), set ? `${set} is set` : `none of ${envKeys.join(", ")} is set`);
+          }
+        } catch (error) {
+          check(report, `${tierLabel} model`, false, (error as Error).message);
+        }
+      }
+    }
+
+    // 18(c): the resolved ladder, each routed role's effective model, and
+    // the served-tag report — imports probeServedOllamaTags FROM
+    // core/tiering.ts (not doctor's own probeGet, which discards the
+    // response body that's the only part that matters here).
+    //
+    // chainName/prompt are deliberately "" — an unlisted chain name weighs
+    // 0 and a zero-word prompt weighs -1, summing to -1, which classifies
+    // as "standard" (short of the -2 "low" needs). That reports the
+    // LADDER'S OWN baseline resolution (step 0 — no risk shift), not any
+    // one chain's risk-shifted view; a risk-shifted projection for a real
+    // chain+prompt is `spf estimate`'s job, not doctor's. `required` is the
+    // WHOLE roster, matching the "roster + suites validate" call above —
+    // every routed role doctor's job covers, not just what one chain needs.
+    const servedOllamaTags = flags["no-probe"] ? null : await probeServedOllamaTags(cfg);
+    const resolution = resolveTiering({
+      cfg,
+      chainName: "",
+      prompt: "",
+      servedOllamaTags,
+      required: cfg.agents.map((a) => a.name),
+    });
+    check(
+      report,
+      "tiering ladder",
+      true,
+      cfg.tiering.tiers.length > 0 ? cfg.tiering.tiers.map((t) => `${t.name}(${t.coding_agent}:${t.model})`).join(" -> ") : "(no tiers declared)",
+      "info",
+    );
+    // FULL routing map — an entry for every routed role including the ones
+    // whose effective model equals their configured one (integration point
+    // 18c: "roles whose effective equals their configured model" still
+    // print), never a diff.
+    for (const [agentName, route] of Object.entries(resolution.routing)) {
+      check(
+        report,
+        `tiering role "${agentName}"`,
+        true,
+        `-> tier "${route.tier}" (${route.effective})${route.configured === route.effective ? " [unchanged from configured]" : ` (was ${route.configured})`}`,
+        "info",
+      );
+    }
+    // One line per note resolveTiering produced (an unserved tag, a rule-T
+    // backend mismatch, an unknown tier name, ...) — resolveTiering never
+    // assigns severity (agents.validate() owns that; this call only owns
+    // detection), so every note here is informational: the hard failure for
+    // a rule-T mismatch or a malformed rung already came from the "roster +
+    // suites validate" check above, on the SAME resolveTiering-adjacent
+    // detection agents.validate() runs. This just names it again, in context.
+    for (const note of resolution.notes) {
+      check(report, "tiering note", true, note, "warn");
+    }
+
+    // Served-tag report, fail-open in the SAME direction the probe itself
+    // does: a stopped/unreachable server reports "could not check" once,
+    // never per-rung "not served" — flagging every rung as unserved on a
+    // probe failure would look identical to the prefix-strip bug
+    // core/tiering.ts's usable() guards against, and is exactly the outcome
+    // fail-open exists to prevent.
+    const ollamaTiers = cfg.tiering.tiers.filter((t) => t.coding_agent !== "claude_code" && t.model.startsWith("ollama/"));
+    if (ollamaTiers.length > 0) {
+      if (servedOllamaTags === null) {
+        check(
+          report,
+          "tiering served-tag probe",
+          true,
+          flags["no-probe"] ? "skipped (--no-probe)" : "could not check — Ollama server unreachable (fail-open: nothing is dropped this run)",
+          "warn",
+        );
+      } else {
+        for (const tier of ollamaTiers) {
+          const tag = tier.model.slice("ollama/".length);
+          const served = servedOllamaTags.has(tag);
+          check(
+            report,
+            `tiering tier "${tier.name}" served`,
+            true,
+            served ? `"${tag}" is in \`ollama list\`` : `"${tag}" is NOT in \`ollama list\` — a run will walk down to a lower usable rung`,
+            served ? "info" : "warn",
+          );
+        }
+      }
     }
   }
 

@@ -12,10 +12,10 @@ always shows the resolved, merged result for the repo you're in.
 1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
 2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
-   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`
+   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`/`tiering`
    merge key-by-key — `notifications.channels` replaces wholesale, same as
-   `quality.checks`; `agents` merges by `name`: a matching name patches that
-   entry, a new name appends).
+   `quality.checks` and `tiering.tiers`/`tiering.roles`; `agents` merges by
+   `name`: a matching name patches that entry, a new name appends).
 3. An explicit `--config <path>` replaces both — standalone, no built-in
    underneath it.
 
@@ -249,6 +249,111 @@ recorded explicit "yes," built from `git config user.name`/`user.email` at
 the repo (never `ENGINEER_NAME`/`$USER`, which are spoofable and fall back to
 the literal string `"engineer"`) — an unattended run's AI-only commit never
 carries one, because nobody said yes to attest to.
+
+### `tiering`
+
+Risk-tiered per-role model routing (SPF #14) — a run-global cost/strength
+shift on top of the static roster, decided ONCE at run start from signals
+code can read without asking an agent anything (the chain's name and the
+prompt's word count), never re-evaluated mid-run. **OFF by default, and
+`enabled: false`/absent is a TOTAL no-op**: every agent dispatches at
+exactly the model its roster entry names, byte-identical to before this key
+existed — the same discipline `defaults.max_run_cost`/`max_run_tokens` hold
+themselves to.
+
+**Top-level, not nested under `defaults:`.** `loadConfig`'s back-fill loop
+copies a fixed list of `defaults` keys down onto every agent that hasn't set
+them, and a stray copy would be silently *stripped* at parse rather than
+rejected — a top-level key sits outside that loop entirely, so the trap
+cannot apply here. Merges **key-by-key** with a base config, same as
+`review`/`notifications`: a repo that only flips `enabled: true` keeps the
+base's `tiers`/`roles`; `tiers` and `roles` are each a **whole replace** on
+override (a repo's own ladder replaces the packaged one wholesale, never an
+unordered splice of both).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | Default `false`. `true` turns on the ladder walk described below; `false` (or the key absent) is a total no-op, checked nowhere and dispatched nowhere. |
+| `tiers` | array, WEAKEST FIRST | The ladder. A risk level shifts every routed role UP or DOWN this list by the same step — order is the whole semantics, which is why this is a sequence and not a mapping. Default `[]`. |
+| `tiers[].name` | string | What `roles` values point at. |
+| `tiers[].coding_agent` | `"flue"` \| `"claude_code"` | Which backend's vocabulary this rung's `model` speaks. Default `flue`, same default an agent's own `coding_agent` uses. A tier changes an agent's `model` and **nothing else** — `coding_agent` always stays the agent's own — so a rung can only route roles whose backend matches (**rule T**, below). |
+| `tiers[].model` | string | Same vocabulary as an agent's own `model:` for that backend: `provider/model-id` for `flue`, Claude Code's bare alias/full name for `claude_code`. No per-provider table — for `flue` the provider is already the string's first segment. |
+| `roles` | map of agent name -> tier name | The baseline tier per **role**. Naming an agent here is the operator's statement "route this one by tier" — the resolved tier then wins over that agent's own `model:`. An agent **not** named here is never retiered; its `model:` stands, untouched. That is the whole precedence rule. Default `{}`. |
+
+```yaml
+tiering:
+  enabled: true
+  tiers:
+    - { name: cheap,  coding_agent: flue, model: ollama/granite4.1:8b }
+    - { name: strong, coding_agent: flue, model: ollama/qwen3.8:27b-mlx }
+  roles:
+    scout:    cheap
+    builder:  strong
+    reviewer: strong
+```
+
+**The risk signal.** Two integer-weighted signals, summed: the chain's own
+kind (`scout`/`prompt`/`document`/`quality` weigh `-1`; `simple-sdlc`/
+`plan-build-test-quality`/`refine` weigh `+1`; everything else, including
+every repo-local `.spf/chains/*.yaml` chain, weighs `0`) and the prompt's
+word count (`-1` at ≤60 words, `+1` at ≥400, `0` between). The sum
+classifies to `low`/`standard`/`high`: reaching `high` needs only one
+signal to agree (a long prompt forces `high` outright), reaching `low`
+needs both to agree — demoting a role a rung is the expensive mistake (a
+wrong answer, a whole re-run); promoting one is the cheap mistake (some
+extra tokens), so the classifier is deliberately asymmetric toward the
+cheap failure. `standard` (step `0`) leaves every role on its configured
+baseline rung.
+
+**Rule T — the backend-compatibility rule.** `coding_agent` is a per-agent
+field and model vocabulary is backend-dependent, so a tier is only usable
+for a role whose `coding_agent` matches the tier's own declared
+`coding_agent`. `enabled: true` on a repo that inherited the packaged
+flue-shaped ladder (every repo does, via key-by-key merge, until it
+declares its own) while running a `claude_code` roster fails **loudly, by
+name** at `agents.validate()` time, before anything spawns — never a silent
+skip, and never a `fireworks/...` id handed to Claude Code.
+
+**Degradation.** A rung that is unusable — a model tag `probeServedOllamaTags`
+found absent from a local Ollama server's `/models` list, or a rule-T
+backend mismatch — is walked **down**, never up: a degradation must never
+silently escalate spend. If every rung at or below the target is unusable,
+the role dispatches on its own configured `model:` unchanged, plus one noted
+line. The availability probe **fails open**: an unreachable server drops
+nothing rather than silently downgrading every agent to the bottom rung.
+
+**Visibility.** Because a retiered agent's *configured* `model:` (what
+`spf.config.yaml` says) and its *effective* model (what actually dispatched)
+can now disagree, every run traces one `tiering` log event carrying the full
+resolved routing, and prints one console line per retiered agent
+(`[spf] tiering <agent> <tier> (<configured> -> <effective>) risk=<risk>`).
+`spf doctor` reports the same resolved ladder and every routed role's
+effective model when `tiering.enabled` — see below.
+
+`spf init`'s interview does not write this block: it collects one model for
+the whole roster, and a `tiering` block over a single-model roster is a
+no-op by construction. `spf init --template ts-flue-ollama` is the one
+packaged template that ships it **on**, with two tags measured live against
+a real local Ollama server; the non-interactive starter (`--yes` / piped
+stdin) shows the shape commented out. Every other packaged template
+inherits the built-in default's populated-but-`enabled: false` ladder
+through key-by-key merge — harmless until a repo opts in, and invisible to
+`spf doctor` until it does (see below).
+
+**`spf doctor`**, only when `cfg.tiering.enabled` — a disabled ladder is
+invisible to doctor, on purpose, so a repo that never opted in (which is
+every packaged template except `ts-flue-ollama`, plus every `spf init`
+starter) can't fail on an unset provider key for a rung that will never
+dispatch:
+
+- the same provider-key check the roster gets, run over `tiers[].model`
+  instead, branching on **the tier's own** `coding_agent`;
+- the `OLLAMA_BASE_URL` reachability probe now also fires for an `ollama/*`
+  rung even when no `cfg.agents[]` entry itself names one;
+- a new report section: the resolved ladder, every routed role's effective
+  model (including roles whose effective model equals their configured
+  one), any degradation note, and — probed the same way `probeServedOllamaTags`
+  does, fail-open — which `ollama/*` rungs are and aren't in `ollama list`.
 
 ### `agents[]`
 

@@ -49,6 +49,7 @@ import * as quality from "../core/quality.ts";
 import * as agentsCfg from "../core/agents.ts";
 import * as session from "../core/session.ts";
 import * as refineLib from "../core/refine.ts";
+import * as tiering from "../core/tiering.ts";
 import { DOCUMENT_NOTES } from "../core/prompts.ts";
 import {
   BuildOutput,
@@ -132,8 +133,14 @@ function makeStep(
 
 // ── layer 1: the shared prologue ────────────────────────────────────────
 
-/** The identical loadConfig -> validate -> session.ensure prologue every chain repeated. */
-export function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Run {
+/**
+ * The identical loadConfig -> validate -> session.ensure prologue every
+ * chain repeated. `async` since the tiering availability probe below is an
+ * awaited `fetch` — firing it unawaited would let `agents.execute` read
+ * `run.tiering` before the probe resolved. Both call sites are already
+ * inside `async` functions, so this stays a one-token change for each.
+ */
+export async function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Promise<Run> {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
   const run = session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name);
@@ -155,6 +162,45 @@ export function startRun(ctx: ChainContext, requiredAgents: string[], requiredSu
       makeEventRecord({ adw_id: run.adw_id, type: "log", name: "chain_source", payload: { source: ctx.chain_source } }),
     );
   }
+
+  // Tiering resolution (SPF #14) — one more run-scoped fact, computed once,
+  // before any phase opens, beside chain_source above. `risk`/`signals` are
+  // always computed (a pure function of chain name + prompt); `routing`/
+  // `notes` are only ever non-empty when `cfg.tiering.enabled` — see
+  // `resolveTiering`'s own no-op guarantee.
+  const servedOllamaTags = await tiering.probeServedOllamaTags(cfg);
+  run.tiering = tiering.resolveTiering({
+    cfg,
+    chainName: ctx.chain_name,
+    prompt: ctx.prompt,
+    servedOllamaTags,
+    required: requiredAgents,
+  });
+  run.tracer.event(
+    makeEventRecord({
+      adw_id: run.adw_id,
+      type: "log",
+      name: "tiering",
+      payload: {
+        risk: run.tiering.risk,
+        signals: run.tiering.signals,
+        routing: run.tiering.routing,
+        notes: run.tiering.notes,
+      },
+    }),
+  );
+  // One console line per RETIERED agent (changedModels — not per routing
+  // entry: a role whose tier resolves to the model it was already
+  // configured with is not news). Routed through the existing
+  // `Console.note()` — no new Console method. This is what reconciles
+  // `run.cfg.agents[].model` (which keeps the configured value) with
+  // `agent_sessions.model` (which records the effective one) for a human
+  // reading the console when the two disagree.
+  for (const [agentName, effective] of Object.entries(tiering.changedModels(run.tiering))) {
+    const route = run.tiering.routing[agentName]!;
+    run.console.note(`[spf] tiering ${agentName} ${route.tier} (${route.configured} -> ${effective}) risk=${run.tiering.risk}`);
+  }
+
   return run;
 }
 
@@ -895,7 +941,7 @@ export async function runSteps(
   steps: Step[],
   options: Record<string, string> = {},
 ): Promise<number> {
-  const run = startRun(ctx, requiredAgents, requiredSuites);
+  const run = await startRun(ctx, requiredAgents, requiredSuites);
   const state = makeState(ctx.prompt, options, ctx.issue_id ?? null);
   for (const step of steps) {
     await step(run, state);

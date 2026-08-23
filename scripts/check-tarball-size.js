@@ -3,15 +3,15 @@
  * Tarball size gate, run in CI after `npm run build`. `npm pack --dry-run
  * --json` reports the real size without writing a .tgz to disk. Budget
  * verified against this package's build with `dist/test` excluded from
- * `files` (450.8kB packed / 1259.7kB unpacked): ≤475 KB packed, ≤1.325 MB
- * unpacked — ~5% headroom so a modest PR doesn't trip CI, without silently
- * regressing back toward shipping compiled test files.
+ * `files` (478.5kB packed / 1342.6kB unpacked, after tiering #14): ≤500 KB
+ * packed, ≤1.41 MB unpacked — ~5% headroom so a modest PR doesn't trip CI,
+ * without silently regressing back toward shipping compiled test files.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 475_000;
-const UNPACKED_BUDGET = 1_325_000;
+const PACKED_BUDGET = 500_000;
+const UNPACKED_BUDGET = 1_410_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the

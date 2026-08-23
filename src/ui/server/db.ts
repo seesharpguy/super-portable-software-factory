@@ -393,6 +393,88 @@ export class SfDb {
       .get();
     return row?.n ?? 0;
   }
+
+  /**
+   * `spf estimate`'s one read: every session that ran EXACTLY `chainName`
+   * (never a joined one — see below), each with its per-phase token totals,
+   * most recent first. Also reports how many joined sessions (`adw_name`
+   * like `"a + b"`, `core/tracer.ts:215`) named `chainName` as one of their
+   * components — real history that cannot be attributed to this one chain
+   * alone (both chains' phases share one continuing `seq`), so it is
+   * counted for the "excluded" message rather than silently absent.
+   *
+   * Guarded by `hasColumn("sessions", "adw_name")` — a MIGRATED column
+   * (`core/tracer.ts:109-116`) — rather than `optionalColumn`: this method
+   * FILTERS on `adw_name`, and a `WHERE` clause naming a column an older db's
+   * `sessions` table does not have is a SQLite error, not a no-match.
+   * Short-circuiting to the empty shape here is what lets an old db read as
+   * cold start (estimate's case 3) instead of crashing.
+   *
+   * No `LIMIT` at the SQL level: capping at 20 and collapsing fanout
+   * siblings both depend on which of `success`-only vs any-status qualifies
+   * first (`spf estimate`'s own sample-selection order), which is a decision
+   * `estimate.ts` makes, not this method.
+   */
+  chainPhaseHistory(chainName: string): { sessions: ChainHistorySession[]; joinedExcluded: number } {
+    if (!this.hasColumn("sessions", "adw_name")) return { sessions: [], joinedExcluded: 0 };
+
+    const joinedRow = this.db
+      .query<{ n: number }, [string, string, string, string]>(
+        `SELECT COUNT(*) AS n FROM sessions
+          WHERE adw_name != ? AND (adw_name LIKE ? OR adw_name LIKE ? OR adw_name LIKE ?)`,
+      )
+      .get(chainName, `${chainName} + %`, `% + ${chainName}`, `% + ${chainName} + %`);
+
+    const sessionRows = this.db
+      .query<{ adw_id: string; status: string | null; started_at: string | null; total_tokens: number | null; total_cost: number | null }, [string]>(
+        `SELECT adw_id, status, started_at, total_tokens, total_cost
+           FROM sessions WHERE adw_name = ? ORDER BY started_at DESC, rowid DESC`,
+      )
+      .all(chainName);
+
+    if (sessionRows.length === 0) return { sessions: [], joinedExcluded: joinedRow?.n ?? 0 };
+
+    const ids = sessionRows.map((r) => r.adw_id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const phaseRows = this.db
+      .query<{ adw_id: string; name: string; seq: number; tokens: number | null }, string[]>(
+        `SELECT p.adw_id, p.name, p.seq, e.tokens
+           FROM phases p LEFT JOIN events e ON e.phase_id = p.phase_id AND e.type = 'agent_end'
+          WHERE p.adw_id IN (${placeholders})
+          ORDER BY p.seq ASC`,
+      )
+      .all(...ids);
+
+    const phasesByAdw = new Map<string, { name: string; seq: number; tokens: number }[]>();
+    for (const row of phaseRows) {
+      const list = phasesByAdw.get(row.adw_id);
+      const entry = { name: row.name, seq: row.seq, tokens: row.tokens ?? 0 };
+      if (list) list.push(entry);
+      else phasesByAdw.set(row.adw_id, [entry]);
+    }
+
+    const sessions: ChainHistorySession[] = sessionRows.map((row) => ({
+      adw_id: row.adw_id,
+      status: row.status ?? "fail",
+      started_at: row.started_at,
+      total_tokens: row.total_tokens ?? 0,
+      total_cost: row.total_cost ?? 0,
+      phases: phasesByAdw.get(row.adw_id) ?? [],
+    }));
+
+    return { sessions, joinedExcluded: joinedRow?.n ?? 0 };
+  }
+}
+
+/** One EXACT-match session's history, as `chainPhaseHistory` returns it — `spf estimate`'s raw material. */
+export interface ChainHistorySession {
+  adw_id: string;
+  status: string;
+  started_at: string | null;
+  total_tokens: number;
+  total_cost: number;
+  /** In `phases.seq` order; one entry per phase iteration (e.g. `fix_1`, `fix_2`), not yet loop-normalized. */
+  phases: { name: string; seq: number; tokens: number }[];
 }
 
 function clamp(value: number, min: number, max: number): number {

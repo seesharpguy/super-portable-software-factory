@@ -16,6 +16,7 @@ import { makeGit, type GitHandle } from "./git_helper.ts";
 import { Console } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import { makeEventRecord, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
+import type { TierResolution } from "./tiering.ts";
 import { ensureDir, nowIso } from "./utils.ts";
 import type { Notifier } from "./notify/notifier.ts";
 
@@ -95,6 +96,13 @@ export class Run {
   session_dir: string;
   context_handoff_dir: string;
   agent_map: Record<string, AgentMapEntry>;
+  /**
+   * Set once by `startRun` (`src/chains/steps.ts`), before any phase opens —
+   * `null` until then. Not a `RunInit` field: it is computed FROM the `Run`
+   * (it needs `run.tracer`/`run.console` to trace and print its own
+   * finding), not passed into its construction. See `core/tiering.ts`.
+   */
+  tiering: TierResolution | null = null;
   private seq: number; // a joined run continues the sequence
   private agentMapPath: string;
 
