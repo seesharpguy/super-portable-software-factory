@@ -7,6 +7,13 @@
  * tree -> publish those as real issues -> done/blocked. A spec is not
  * individually workable, so this lane never opens a PR — it hands the build
  * lane its next batch of `ready`-able work instead (see `core/refine.ts`).
+ * When the refiner raises material ambiguity instead of a tree, this lane
+ * loops through a human instead of guessing or blocking: `escalateSpec`
+ * posts the questions and moves the spec to `needs-feedback`; a human
+ * answers in the issue's comments and adds `continue-refinement`;
+ * `claimSpecs` resumes it — the SAME `adw_id`, comment thread folded into
+ * the prompt (`buildSpecPrompt`) — for as many rounds as it takes. See
+ * `provider.ts`'s `WatchState` doc comment for the full state diagram.
  *
  * Provider-agnostic (drives whatever `IssueProvider` it's given) and
  * chain-agnostic (drives whatever `runChain`/`runRefine` callback it's
@@ -37,7 +44,7 @@
  */
 import path from "node:path";
 import type { GitHandle } from "./git_helper.ts";
-import type { CodeHostProvider, Issue, IssueProvider, WatchMarker } from "./issues/provider.ts";
+import type { CodeHostProvider, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./issues/provider.ts";
 import type { NotifyEvent } from "./notify/channel.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
@@ -68,13 +75,32 @@ export interface RefinedIssueRef {
   isLeaf: boolean;
 }
 
+/**
+ * One open question the refiner raised instead of a tree — mirrors
+ * `RefineQuestionSchema` (`core/data_types.ts`) field-for-field, kept as its
+ * own local shape rather than importing that type, the same way
+ * `RefinedIssueRef` above mirrors `RefinedIssue` rather than importing it:
+ * this module stays deliberately decoupled from the chain layer (see the
+ * module doc comment), reading only what `escalateSpec`'s comment needs.
+ */
+export interface RefinedQuestionRef {
+  id: string;
+  question: string;
+  why_it_matters: string;
+  options: string[];
+  recommendation: string;
+  evidence: string[];
+}
+
 export interface RefineRunResult {
   accepted: boolean;
   adwId: string;
   /** Shown to the engineer via a `blocked` comment on a failed/no-op run. */
   detail: string;
-  /** What `steps.publishIssues()` created, read back from its side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted`. */
+  /** What `steps.publishIssues()` created, read back from its side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run escalated instead of publishing. */
   created: RefinedIssueRef[];
+  /** What the refiner is asking, read back from its own side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run published a tree instead of escalating; `gates.refinementWellFormed` guarantees `created` and `questions` are never both non-empty. */
+  questions: RefinedQuestionRef[];
 }
 
 export interface WatchDeps {
@@ -251,10 +277,16 @@ export async function reconcileOrphans(deps: WatchDeps, state: WatchRunState): P
  * the ids `WatchMarker.refined` recorded, and the comment degrades to a
  * bare list of `#id`s rather than blocking on a re-fetch.
  */
-async function finishSpec(deps: WatchDeps, issue: Issue, created: Array<{ id: string; title?: string; kind?: string }>): Promise<void> {
+async function finishSpec(
+  deps: WatchDeps,
+  issue: Issue,
+  created: Array<{ id: string; title?: string; kind?: string }>,
+  rounds = 0,
+): Promise<void> {
+  const roundsNote = rounds > 0 ? ` (after ${rounds} round${rounds === 1 ? "" : "s"} of feedback)` : "";
   const body =
     created.length > 0
-      ? `spf watch refined this spec into ${created.length} issue(s):\n\n` +
+      ? `spf watch refined this spec into ${created.length} issue(s)${roundsNote}:\n\n` +
         created.map((c) => (c.title ? `- #${c.id} (${c.kind}): ${c.title}` : `- #${c.id}`)).join("\n") +
         `\n\nPromote any of them to \`${deps.labelPrefix}:ready\` when it's worth building.`
       : `spf watch refined this spec but the refiner produced no issues.`;
@@ -268,15 +300,130 @@ async function finishSpec(deps: WatchDeps, issue: Issue, created: Array<{ id: st
   if (!deps.dryRun) {
     await deps.provider.comment(issue, body);
     await deps.provider.transition(issue, "done");
+    // Best-effort and never fatal: publishing already succeeded and the spec
+    // is already `done` by the time this runs, so a tracker that can't close
+    // (or a `closeIssue` that isn't implemented at all — see `IssueProvider`'s
+    // doc comment) must not turn a successfully refined spec into `blocked`.
+    await deps.provider.closeIssue?.(issue).catch((error) => {
+      deps.log(`watch: spec ${issue.id}: closeIssue failed — left open, still \`${deps.labelPrefix}:done\`: ${(error as Error).message}`);
+    });
+  }
+}
+
+const MAX_THREAD_CHARS = 20_000;
+
+/**
+ * Render the spec issue's comment thread for the refiner's prompt, replacing
+ * the previous bare `title\n\nbody` — the whole reason a human's answer
+ * could never reach a resumed run before this feature. When `feedback` names
+ * the timestamp of the most recent question comment, everything at or after
+ * it is surfaced as "answers to your open questions" (what a resumed run
+ * most needs to read); everything earlier is "earlier discussion" — context,
+ * not necessarily an answer. A spec that has never been escalated (no
+ * `feedback`) has no such split: any pre-existing comments are all "earlier
+ * discussion".
+ *
+ * Truncates the RENDERED thread, not the comment list, to roughly
+ * `MAX_THREAD_CHARS`, dropping the oldest comments first — an explicit
+ * "N earlier comment(s) omitted" line, never a silent truncation.
+ *
+ * Exported and pure (no provider, no I/O) so it's directly unit-testable.
+ */
+export function buildSpecPrompt(issue: Issue, comments: IssueComment[], feedback?: WatchMarker["feedback"]): string {
+  const header = `${issue.title}\n\n${issue.body}`.trim();
+  if (comments.length === 0) return header;
+
+  const render = (list: IssueComment[]): string => list.map((c) => `**@${c.author}** (${c.created_at}):\n${c.body.trim()}`).join("\n\n");
+
+  let kept = comments;
+  let dropped = 0;
+  while (render(kept).length > MAX_THREAD_CHARS && kept.length > 1) {
+    kept = kept.slice(1);
+    dropped++;
+  }
+
+  const askedAt = feedback?.asked_at ? Date.parse(feedback.asked_at) : null;
+  const answers = askedAt !== null ? kept.filter((c) => Date.parse(c.created_at) >= askedAt) : [];
+  const earlier = askedAt !== null ? kept.filter((c) => Date.parse(c.created_at) < askedAt) : kept;
+
+  const parts: string[] = [];
+  if (dropped > 0) parts.push(`_... ${dropped} earlier comment(s) omitted for length._`);
+  if (answers.length > 0) parts.push(`### Answers to your open questions (round ${feedback!.rounds})\n\n${render(answers)}`);
+  if (earlier.length > 0) parts.push(`### Earlier discussion\n\n${render(earlier)}`);
+  if (parts.length === 0) return header;
+
+  return `${header}\n\n## Discussion on the spec issue\n\n${parts.join("\n\n")}`;
+}
+
+/**
+ * The refine lane's own finishing move for "the refiner can't proceed
+ * without a human" — the escalation twin of `finishSpec` above. Posts every
+ * question as its own rich comment section (the question, why it matters,
+ * the options considered, its recommendation, and the evidence it read — so
+ * a human can often answer in a word or two), records the round in the
+ * marker so a resumed run's prompt (`buildSpecPrompt`) can tell "answers"
+ * from "earlier discussion", and moves the spec to `needs-feedback` rather
+ * than `blocked` — the refiner correctly refusing to guess is a legitimate
+ * outcome, not a failure. `marker` is spread first so `worktree`/`branch`
+ * (just written by the caller) survive into the marker this writes.
+ */
+async function escalateSpec(
+  deps: WatchDeps,
+  issue: Issue,
+  marker: WatchMarker,
+  questions: RefinedQuestionRef[],
+  adwId: string,
+  round: number,
+): Promise<void> {
+  const body =
+    `## spf needs your input (round ${round})\n\n` +
+    questions
+      .map((q) => {
+        const lines = [`### ${q.question}`];
+        if (q.why_it_matters) lines.push(`**Why it matters:** ${q.why_it_matters}`);
+        if (q.options.length > 0) lines.push(`**Options considered:**\n${q.options.map((o) => `- ${o}`).join("\n")}`);
+        if (q.recommendation) lines.push(`**Recommendation:** ${q.recommendation}`);
+        if (q.evidence.length > 0) lines.push(`**Evidence:**\n${q.evidence.map((e) => `- ${e}`).join("\n")}`);
+        return lines.join("\n\n");
+      })
+      .join("\n\n---\n\n") +
+    `\n\n---\n\nAnswer inline, then add the \`${deps.labelPrefix}:continue-refinement\` label — refinement resumes from where it left off (adw_id \`${adwId}\`).`;
+
+  deps.notify({
+    // "error" level, not "info" — this is the same class of event as
+    // issue_blocked ("spf needs a human"), and it belongs on an `errors`-scope
+    // channel just as much as an `all`-scope one.
+    kind: "spec_needs_feedback",
+    level: "error",
+    title: `spec ${issue.id} needs feedback`,
+    detail: `${questions.length} question(s), round ${round}.`,
+    fields: [
+      ["issue", issue.id],
+      ["title", issue.title],
+      ["chain", deps.refineChain],
+      ["adw_id", adwId],
+      ["round", String(round)],
+    ],
+  });
+
+  if (!deps.dryRun) {
+    await deps.provider.comment(issue, body);
+    await deps.provider.writeMarker(issue, { ...marker, feedback: { rounds: round, asked_at: new Date().toISOString() } });
+    await deps.provider.transition(issue, "needs-feedback");
   }
 }
 
 /**
  * The refine lane's own `reconcileOrphans` — a `refining`-labeled spec this
- * process isn't tracking is either a completed publish that crashed before
- * its own `transition(issue, "done")` ran (resume: finish it, no re-run),
- * or a genuine orphan (retry up to `MAX_ORPHAN_ATTEMPTS`, then give up).
- * A no-op entirely when `watch.refine` is off — see `WatchDeps.refineEnabled`.
+ * process isn't tracking is one of three things: a completed publish that
+ * crashed before its own `transition(issue, "done")` ran (resume: finish it,
+ * no re-run), a completed escalation that crashed before its own
+ * `transition(issue, "needs-feedback")` ran (resume: finish THAT transition,
+ * no re-asking — `escalateSpec` writes the marker's `feedback` before it
+ * transitions, so seeing `feedback` on a still-`refining` spec can only mean
+ * that last step didn't complete), or a genuine orphan (retry up to
+ * `MAX_ORPHAN_ATTEMPTS`, then give up). A no-op entirely when `watch.refine`
+ * is off — see `WatchDeps.refineEnabled`.
  */
 export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): Promise<void> {
   if (!deps.refineEnabled) return;
@@ -286,7 +433,19 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
     const marker = await deps.provider.readMarker(issue);
     if (marker?.refined && marker.refined.length > 0) {
       deps.log(`watch: spec ${issue.id} orphaned after publish already completed — finishing`);
-      await finishSpec(deps, issue, marker.refined.map((id) => ({ id })));
+      await finishSpec(deps, issue, marker.refined.map((id) => ({ id })), marker.feedback?.rounds ?? 0);
+      continue;
+    }
+    if (marker?.feedback) {
+      deps.log(`watch: spec ${issue.id} orphaned after asking round ${marker.feedback.rounds} — finishing the transition to needs-feedback`);
+      deps.notify({
+        kind: "spec_needs_feedback",
+        level: "error",
+        title: `spec ${issue.id} needs feedback`,
+        detail: `Round ${marker.feedback.rounds}.`,
+        fields: [["issue", issue.id], ["title", issue.title], ["round", String(marker.feedback.rounds)]],
+      });
+      if (!deps.dryRun) await deps.provider.transition(issue, "needs-feedback");
       continue;
     }
     const attempt = (marker?.attempt ?? 0) + 1;
@@ -477,7 +636,7 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     const existingMarker = await deps.provider.readMarker(issue);
     if (existingMarker?.refined && existingMarker.refined.length > 0) {
       deps.log(`watch: spec ${issue.id}: a previous attempt already published ${existingMarker.refined.length} issue(s) — finishing without re-running the refiner`);
-      await finishSpec(deps, issue, existingMarker.refined.map((id) => ({ id })));
+      await finishSpec(deps, issue, existingMarker.refined.map((id) => ({ id })), existingMarker.feedback?.rounds ?? 0);
       return;
     }
 
@@ -488,9 +647,20 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     deps.git.fetch("origin", deps.baseBranch);
     deps.git.worktreeAdd(worktreePath, branch, `origin/${deps.baseBranch}`);
     deps.linkDataDir(worktreePath);
-    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
+    // Spread existingMarker (not a bare object) so a spec resuming after a
+    // prior escalation carries its `feedback` (round count, last-asked-at)
+    // through to whatever this run writes next — escalateSpec below and the
+    // final writeMarker on a successful publish both build on this object.
+    const marker: WatchMarker = { ...existingMarker, worktree: worktreePath, branch, attempt: 0 };
+    await deps.provider.writeMarker(issue, marker);
 
-    const prompt = `${issue.title}\n\n${issue.body}`.trim();
+    // The comment thread is what makes this a HUMAN-in-the-loop, not just a
+    // one-shot prompt: a resumed run needs the human's answers, and
+    // buildSpecPrompt tells them apart from any earlier discussion using
+    // existingMarker.feedback.asked_at (unset on a spec that's never been
+    // escalated, in which case every comment is "earlier discussion").
+    const comments = await deps.provider.listComments(issue);
+    const prompt = buildSpecPrompt(issue, comments, existingMarker?.feedback);
     const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id, chainOptions: deps.chainOptions });
 
     if (!result.accepted) {
@@ -508,8 +678,18 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
       return;
     }
 
-    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0, refined: result.created.map((c) => c.id) });
-    await finishSpec(deps, issue, result.created);
+    // Mutually exclusive by construction — gates.refinementWellFormed
+    // guarantees a `questions`-bearing envelope publishes no `issues` — so
+    // this branches before, never alongside, the publish path below.
+    if (result.questions.length > 0) {
+      const round = (existingMarker?.feedback?.rounds ?? 0) + 1;
+      await escalateSpec(deps, issue, marker, result.questions, adwId, round);
+      cleanupWorktree(deps, { worktree: worktreePath, branch });
+      return;
+    }
+
+    await deps.provider.writeMarker(issue, { ...marker, refined: result.created.map((c) => c.id) });
+    await finishSpec(deps, issue, result.created, existingMarker?.feedback?.rounds ?? 0);
     cleanupWorktree(deps, { worktree: worktreePath, branch });
   } catch (error) {
     const message = (error as Error).message;
@@ -554,11 +734,30 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
   }
 }
 
-/** Claim as many `spec-ready` specs as `refineConcurrency` allows, and kick off `runSpec` for each in the background. A no-op when `watch.refine` is off. */
-export async function claimSpecs(deps: WatchDeps, state: WatchRunState): Promise<void> {
+/**
+ * Claim as many specs in `from` as `refineConcurrency` allows, and kick off
+ * `runSpec` for each in the background. A no-op when `watch.refine` is off.
+ *
+ * `from` defaults to `spec-ready` (a fresh spec) but `tick()` also calls this
+ * with `"continue-refinement"` — a human's signal that they've answered a
+ * prior round's questions and refinement should resume. Both share this same
+ * function (and `state.refining`'s budget) rather than a second copy of the
+ * claim loop, the same way the build lane's `claim()` itself takes a
+ * parameterized `{from, to}` rather than a hardcoded `ready -> working`.
+ *
+ * Known, deliberate wart: `claim()` only removes `from`'s label, so while a
+ * resumed run is in flight the issue briefly still carries
+ * `<prefix>:needs-feedback` alongside the (now claimed) `refining` state that
+ * replaced `continue-refinement`. Nothing polls `needs-feedback` on its own,
+ * and the run's own terminating `transition()` — to `needs-feedback` again,
+ * `done`, or `blocked` — strips every state label from the fresh snapshot it
+ * reads at that point, so this self-heals on the very next transition rather
+ * than needing a second mutator alongside `transition()`.
+ */
+export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: WatchState = "spec-ready"): Promise<void> {
   if (!deps.refineEnabled) return;
   if (state.refining.size >= deps.refineConcurrency) return;
-  const eligible = await deps.provider.listInState("spec-ready");
+  const eligible = await deps.provider.listInState(from);
   for (const issue of eligible) {
     if (state.refining.size >= deps.refineConcurrency) break;
     if (state.refining.has(issue.id)) continue;
@@ -566,7 +765,7 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState): Promise
       deps.log(`watch: [dry-run] would claim spec ${issue.id} (${issue.title}) and run refine chain "${deps.refineChain}"`);
       continue;
     }
-    const claimed = await deps.provider.claim(issue, { from: "spec-ready", to: "refining" });
+    const claimed = await deps.provider.claim(issue, { from, to: "refining" });
     if (!claimed) {
       deps.log(`watch: spec ${issue.id} lost the claim race this tick — skipping`);
       continue;
@@ -591,11 +790,19 @@ function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => v
   };
 }
 
-/** One poll tick: reconcile both lanes, finish reviews, then claim both lanes — each stage independently caught, so one stage's error never blocks the rest. */
+/**
+ * One poll tick: reconcile both lanes, finish reviews, then claim both
+ * lanes — each stage independently caught, so one stage's error never blocks
+ * the rest. `claimSpecs` runs twice: resumed specs (`continue-refinement`,
+ * a human who already answered and is waiting) before fresh ones
+ * (`spec-ready`) — both share `state.refining`'s budget, so
+ * `refine.concurrency` still caps the lane as a whole either way.
+ */
 export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void> {
   await reconcileOrphans(deps, state).catch(tickErrorHandler(deps, "reconcileOrphans"));
   await reconcileRefining(deps, state).catch(tickErrorHandler(deps, "reconcileRefining"));
   await finishReviews(deps).catch(tickErrorHandler(deps, "finishReviews"));
+  await claimSpecs(deps, state, "continue-refinement").catch(tickErrorHandler(deps, "claimSpecs(resume)"));
   await claimSpecs(deps, state).catch(tickErrorHandler(deps, "claimSpecs"));
   await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));
 }

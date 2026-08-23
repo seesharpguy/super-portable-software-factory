@@ -180,6 +180,24 @@ additionally gets `<prefix>:refined`, so a human can review and promote it to
 `<prefix>:ready` when it's worth building — the refine lane never
 auto-promotes anything.
 
+The `refine` chain grounds its decomposition with a `scout` phase before the
+refiner runs, so `scout` is a required agent for it — a roster that pruned
+it fails `spf watch` startup by name.
+
+The refine lane's own state machine has an extra loop beyond
+`spec-ready → refining → done`/`blocked`: when the refiner raises material
+ambiguity instead of a tree (see `assets/prompts/refiner/system.md`'s "Ask,
+don't decide"), the spec moves to `<prefix>:needs-feedback` with a comment
+naming its questions, instead of publishing anything. A human answers in the
+issue's comments and adds `<prefix>:continue-refinement`; `spf watch` claims
+that label back into `refining` and resumes the **same** `adw_id` — the
+comment thread (split into "answers to your open questions" and "earlier
+discussion") is folded into the resumed prompt, and the refiner's own
+coding-agent session continues rather than starting cold. This can loop any
+number of rounds. `spf watch init` must be re-run after upgrading to this
+version to seed the two new labels. Once a spec is fully published it's also
+closed on the tracker (GitHub only, best-effort), not just labeled `done`.
+
 ### `notifications`
 
 Optional outbound push for unattended work — `spf watch`'s daemon lifecycle,
@@ -191,7 +209,7 @@ default; adding it is entirely additive.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `events` | `"off"` \| `"errors"` \| `"all"` | The whole filter. `off` (default): nothing. `errors`: only failed runs/phases, blocked issues, watch errors. `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus errors. |
+| `events` | `"off"` \| `"errors"` \| `"all"` | The whole filter. `off` (default): nothing. `errors`: only failed runs/phases, blocked issues, watch errors, and a spec needing feedback (`spec_needs_feedback` — `error`-level on purpose, same class as a blocked issue). `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus errors. |
 | `timeout_ms` | int | Per-request timeout for a channel's HTTP POST. Default `5000`. |
 | `channels[]` | array | See below. |
 

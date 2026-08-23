@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {
   branchNameFor,
+  buildSpecPrompt,
   claimNewWork,
   claimSpecs,
   createWatchState,
@@ -19,6 +20,7 @@ import type {
   CodeHostProvider,
   EnsureLabelsResult,
   Issue,
+  IssueComment,
   IssueProvider,
   PrRef,
   PrStatus,
@@ -46,6 +48,7 @@ interface FakeEntry {
   issue: Issue;
   state: WatchState;
   marker: WatchMarker | null;
+  comments: IssueComment[];
 }
 
 /** In-memory fake — exactly the seam `provider.ts` exists for. */
@@ -54,9 +57,26 @@ class FakeProvider implements IssueProvider {
   ensureLabelsCalls = 0;
   transitions: Array<{ id: string; to: WatchState; detail?: string }> = [];
   claimCalls: string[] = [];
+  closedIssues: string[] = [];
+  /** Set to make `closeIssue` reject — for asserting a failed close never blocks `finishSpec`. */
+  closeIssueError: Error | null = null;
+  private nextCommentSeq = 1;
 
   addIssue(id: string, title: string, state: WatchState = "ready", marker: WatchMarker | null = null): void {
-    this.entries.set(id, { issue: { id, title, body: "", labels: [`spf:${state}`] }, state, marker });
+    this.entries.set(id, { issue: { id, title, body: "", labels: [`spf:${state}`] }, state, marker, comments: [] });
+  }
+
+  /**
+   * Seed a comment directly onto an issue's thread — the fake's equivalent of
+   * a human (or a prior `spf watch` run) posting on the tracker, for tests
+   * that need a resumed run's `listComments` to see it. `createdAt` defaults
+   * to a synthetic, strictly-increasing timestamp (not the real clock) so
+   * ordering across several `addComment` calls in one test is deterministic.
+   */
+  addComment(issueId: string, author: string, body: string, createdAt?: string): void {
+    const entry = this.entries.get(issueId)!;
+    const created_at = createdAt ?? new Date(this.nextCommentSeq * 1000).toISOString();
+    entry.comments.push({ id: String(this.nextCommentSeq++), author, created_at, body });
   }
 
   async ensureLabels(): Promise<EnsureLabelsResult> {
@@ -82,12 +102,21 @@ class FakeProvider implements IssueProvider {
     this.entries.get(issue.id)!.state = to;
     this.transitions.push({ id: issue.id, to, detail });
   }
-  async comment(_issue: Issue, _body: string): Promise<void> {}
+  async comment(issue: Issue, body: string): Promise<void> {
+    this.addComment(issue.id, "spf", body);
+  }
   async readMarker(issue: Issue): Promise<WatchMarker | null> {
     return this.entries.get(issue.id)?.marker ?? null;
   }
   async writeMarker(issue: Issue, marker: WatchMarker): Promise<void> {
     this.entries.get(issue.id)!.marker = marker;
+  }
+  async listComments(issue: Issue): Promise<IssueComment[]> {
+    return this.entries.get(issue.id)?.comments ?? [];
+  }
+  async closeIssue(issue: Issue): Promise<void> {
+    if (this.closeIssueError) throw this.closeIssueError;
+    this.closedIssues.push(issue.id);
   }
 }
 
@@ -153,7 +182,7 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     refineEnabled: false,
     refineConcurrency: 1,
     refineChain: "refine",
-    runRefine: async (opts): Promise<RefineRunResult> => ({ accepted: true, adwId: opts.adwId, detail: "", created: [] }),
+    runRefine: async (opts): Promise<RefineRunResult> => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] }),
     worktreesDir: "/tmp/spf-watch-test-worktrees",
     linkDataDir: () => {},
     dryRun: false,
@@ -608,6 +637,7 @@ test("claimSpecs: claims a spec-ready spec, publishes, and finishes it to done w
         { id: "200", title: "Owner invites by email", kind: "story", isLeaf: true },
         { id: "199", title: "Invitations feature", kind: "feature", isLeaf: false },
       ],
+      questions: [],
     }),
   });
 
@@ -649,7 +679,7 @@ test("claimSpecs: dry-run claims no spec and never calls runRefine", async () =>
     dryRun: true,
     runRefine: async (opts) => {
       called = true;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
     },
   });
 
@@ -666,7 +696,7 @@ test("claimSpecs: a rejected refine chain blocks the spec with the failure detai
   const state = createWatchState();
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
-    runRefine: async (opts) => ({ accepted: false, adwId: opts.adwId, detail: "refiner failed gates", created: [] }),
+    runRefine: async (opts) => ({ accepted: false, adwId: opts.adwId, detail: "refiner failed gates", created: [], questions: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -685,7 +715,7 @@ test("claimSpecs: a re-claimed spec whose marker already lists published issues 
     refineEnabled: true,
     runRefine: async (opts) => {
       called = true;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
     },
   });
 
@@ -727,6 +757,23 @@ test("reconcileRefining: a refining spec with no marker retries up to the cap, t
   assert.match(provider.transitions.at(-1)?.detail ?? "", /Gave up after 2 orphaned refine attempts/);
 });
 
+test("reconcileRefining: a refining spec whose marker already has feedback finishes the transition to needs-feedback, without re-asking", async () => {
+  const provider = new FakeProvider();
+  // Simulates a crash between escalateSpec's writeMarker and its own
+  // transition() call: the marker's feedback was written (and the question
+  // comment posted) but the spec is still labeled "refining".
+  provider.addIssue("153", "crashed mid-escalation", "refining", { feedback: { rounds: 1, asked_at: new Date(1000).toISOString() } });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+
+  await reconcileRefining(makeDeps(provider, codeHost, { refineEnabled: true, notify }), state);
+
+  assert.deepEqual(provider.transitions, [{ id: "153", to: "needs-feedback", detail: undefined }]);
+  assert.deepEqual(events.map((e) => e.kind), ["spec_needs_feedback"]);
+  assert.equal(events[0]!.level, "error");
+});
+
 test("reconcileRefining: a disabled refine lane is a complete no-op", async () => {
   const provider = new FakeProvider();
   provider.addIssue("152", "should be ignored", "refining", null);
@@ -750,7 +797,7 @@ test("claim -> refine -> published fires issue_claimed then spec_refined, both i
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
     notify,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "500", title: "A story", kind: "story", isLeaf: true }] }),
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "500", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -758,6 +805,212 @@ test("claim -> refine -> published fires issue_claimed then spec_refined, both i
 
   assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "spec_refined"]);
   assert.ok(events.every((e) => e.level === "info"));
+});
+
+// ── human-in-the-loop escalation ─────────────────────────────────────────
+
+function sampleQuestion(overrides: Partial<{ id: string; question: string }> = {}) {
+  return {
+    id: "Q1",
+    question: "Should invitations expire?",
+    why_it_matters: "Changes the schema and the cleanup job.",
+    options: ["7-day expiry", "never expire"],
+    recommendation: "7-day expiry, matching the existing session TTL",
+    evidence: ["src/core/session.ts"],
+    ...overrides,
+  };
+}
+
+test("claimSpecs: a refiner that raises questions escalates instead of publishing — needs-feedback, one notify, marker.feedback set, nothing created", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("200", "Ambiguous spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const { events, notify } = collectNotifications();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    notify,
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()] }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.equal(provider.entries.get("200")!.state, "needs-feedback");
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["needs-feedback"]);
+  assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "spec_needs_feedback"]);
+  assert.equal(events[1]!.level, "error", "spec_needs_feedback is the same class of event as issue_blocked — must reach an errors-scope channel");
+  const marker = provider.entries.get("200")!.marker;
+  assert.equal(marker?.feedback?.rounds, 1);
+  assert.ok(marker?.feedback?.asked_at);
+  assert.equal(marker?.refined, undefined, "an escalating round must not also record a publish");
+  const comment = provider.entries.get("200")!.comments.at(-1)!;
+  assert.match(comment.body, /Should invitations expire\?/);
+  assert.match(comment.body, /Why it matters.*Changes the schema/s);
+  assert.match(comment.body, /7-day expiry, matching the existing session TTL/);
+  assert.match(comment.body, /spf:continue-refinement/, "must tell the human which label resumes refinement");
+});
+
+test("claimSpecs: continue-refinement resumes the SAME adw_id as the original run, and leaves spec-ready specs untouched", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("201", "Escalated spec", "continue-refinement", { feedback: { rounds: 1, asked_at: new Date(1000).toISOString() } });
+  provider.addIssue("202", "Untouched fresh spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const seenAdwIds: string[] = [];
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => {
+      seenAdwIds.push(opts.adwId);
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "600", title: "Resolved story", kind: "story", isLeaf: true }], questions: [] };
+    },
+  });
+
+  await claimSpecs(deps, state, "continue-refinement");
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["201"], "must not touch the spec-ready spec when claiming continue-refinement");
+  assert.deepEqual(seenAdwIds, ["spec-201"], "the adw_id is deterministic from the issue id — a resume is the SAME id, not a new one");
+  assert.equal(provider.entries.get("202")!.state, "spec-ready", "untouched");
+});
+
+test("claimSpecs: a second escalation round increments marker.feedback.rounds, re-enters needs-feedback, and threads the human's answer into the resumed prompt", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("203", "Still ambiguous after round 1", "continue-refinement", { feedback: { rounds: 1, asked_at: new Date(1000).toISOString() } });
+  provider.addComment("203", "alice", "Let's go with 7-day expiry.");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const seenPrompts: string[] = [];
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => {
+      seenPrompts.push(opts.prompt);
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion({ id: "Q2", question: "And what about invitations already sent?" })] };
+    },
+  });
+
+  await claimSpecs(deps, state, "continue-refinement");
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.equal(provider.entries.get("203")!.state, "needs-feedback");
+  assert.equal(provider.entries.get("203")!.marker?.feedback?.rounds, 2);
+  assert.match(seenPrompts[0]!, /Let's go with 7-day expiry\./, "the human's answer must reach the resumed prompt");
+});
+
+test("tick: continue-refinement and spec-ready specs share the same refine.concurrency budget, resumed spec claimed first", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("210", "waiting for an answer", "continue-refinement", { feedback: { rounds: 1, asked_at: new Date(1000).toISOString() } });
+  provider.addIssue("211", "brand new spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    refineConcurrency: 1,
+    runRefine: () => new Promise(() => {}), // never resolves — keeps the claim "in flight" for this assertion
+  });
+
+  await tick(deps, state);
+
+  assert.equal(state.refining.size, 1);
+  assert.deepEqual(provider.claimCalls, ["210"], "the resumed spec must be claimed first, using up the shared budget");
+  assert.equal(provider.entries.get("211")!.state, "spec-ready", "no budget left for the fresh spec this tick");
+});
+
+test("claimSpecs: dry-run never claims or runs an escalating spec either", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("212", "dry run escalation", "continue-refinement", { feedback: { rounds: 1, asked_at: new Date(1000).toISOString() } });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let called = false;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    dryRun: true,
+    runRefine: async (opts) => {
+      called = true;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()] };
+    },
+  });
+
+  await claimSpecs(deps, state, "continue-refinement");
+
+  assert.equal(called, false);
+  assert.equal(provider.entries.get("212")!.state, "continue-refinement");
+});
+
+test("finishSpec: closes the issue on the tracker once a spec is fully published", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("220", "Ready to close", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "700", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(provider.closedIssues, ["220"]);
+});
+
+test("finishSpec: a closeIssue that rejects still leaves the spec transitioned to done — a failed close never un-does a successful publish", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("221", "Close fails", "spec-ready");
+  provider.closeIssueError = new Error("tracker rejected the close");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "701", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.equal(provider.entries.get("221")!.state, "done");
+  assert.deepEqual(provider.closedIssues, []);
+});
+
+// ── buildSpecPrompt ──────────────────────────────────────────────────────
+
+function specIssue(overrides: Partial<Issue> = {}): Issue {
+  return { id: "1", title: "A spec", body: "Some body text.", labels: [], ...overrides };
+}
+
+function specComment(author: string, created_at: string, body: string): IssueComment {
+  return { id: `${author}-${created_at}`, author, created_at, body };
+}
+
+test("buildSpecPrompt: no comments falls back to the plain title/body", () => {
+  assert.equal(buildSpecPrompt(specIssue(), []), "A spec\n\nSome body text.");
+});
+
+test("buildSpecPrompt: with no prior escalation, every comment is 'earlier discussion'", () => {
+  const prompt = buildSpecPrompt(specIssue(), [specComment("bob", "2020-01-01T00:00:00.000Z", "Some early context.")]);
+  assert.match(prompt, /## Discussion on the spec issue/);
+  assert.match(prompt, /### Earlier discussion\n\n\*\*@bob\*\* \(2020-01-01T00:00:00\.000Z\):\nSome early context\./);
+  assert.ok(!prompt.includes("Answers to your open questions"));
+});
+
+test("buildSpecPrompt: comments at/after feedback.asked_at are the answers section; earlier ones stay 'earlier discussion', answers rendered first", () => {
+  const comments = [
+    specComment("bob", "2020-01-01T00:00:00.000Z", "Pre-escalation context."),
+    specComment("alice", "2020-01-02T00:00:00.000Z", "Go with 7-day expiry."),
+  ];
+  const prompt = buildSpecPrompt(specIssue(), comments, { rounds: 1, asked_at: "2020-01-01T12:00:00.000Z" });
+
+  assert.match(prompt, /### Answers to your open questions \(round 1\)\n\n\*\*@alice\*\*/);
+  assert.match(prompt, /### Earlier discussion\n\n\*\*@bob\*\*/);
+  assert.ok(prompt.indexOf("Answers to your open questions") < prompt.indexOf("Earlier discussion"), "answers must be surfaced before earlier discussion");
+});
+
+test("buildSpecPrompt: an oversized thread drops the oldest comments first and says so explicitly, never silently", () => {
+  const comments = Array.from({ length: 5 }, (_, i) => specComment(`user${i}`, `2020-01-0${i + 1}T00:00:00.000Z`, "x".repeat(6000)));
+  const prompt = buildSpecPrompt(specIssue(), comments);
+
+  assert.match(prompt, /_\.\.\. \d+ earlier comment\(s\) omitted for length\._/);
+  assert.ok(!prompt.includes("user0"), "the oldest comment must be the one dropped");
+  assert.ok(prompt.includes("user4"), "the newest comment must survive");
 });
 
 // ── escapeForMarkup / truncateDigest / formatReviewDigest ───────────────────
@@ -874,7 +1127,7 @@ test("claimSpecs: threads deps.chainOptions through to runRefine's opts, same as
     chainOptions: { agent: "flue" },
     runRefine: async (opts) => {
       seenOptions = opts.chainOptions;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
     },
   });
 

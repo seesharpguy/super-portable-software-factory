@@ -138,6 +138,15 @@ export const CHAINS: ChainDefinition[] = [
 
   stepChain("refine", "decompose a product spec into a feature/story-or-bug tree of tracker issues — spf watch's spec-ready lane", [
     steps.request(),
+    // Grounds the decomposition in code that actually exists, rather than
+    // leaving "explore the codebase" as prose the refiner may or may not
+    // follow (see assets/prompts/refiner/system.md). Its ScoutOutput flows
+    // into refine() as `previous` — agentStep() threads state.previous into
+    // every agent phase, and refiner/user.md already renders it as
+    // {{previous_envelope}}. This makes `scout` a required agent for this
+    // chain: a roster that pruned it fails agents.validate() by name at
+    // `spf watch` startup, same as any other missing required agent.
+    steps.scout({ description: "Map the subsystems this spec touches — change nothing" }),
     steps.refine(),
     steps.publishIssues(),
   ]),

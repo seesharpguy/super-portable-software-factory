@@ -6,13 +6,21 @@ on:
   pull_request:
     branches: [main]
 
-# No `tags:` trigger here on purpose: this repo's release flow always pushes
-# the version-bump commit and its tag together in one `git push origin main
-# vX.Y.Z`, which is two ref updates and therefore two separate push events —
-# a `tags:` filter would start a second full run for the same commit. The
-# `check-tag` job below detects the tag from the single branch-triggered run
-# instead. (A bare tag push, with no branch push alongside it, won't trigger
-# CI at all under this scheme — not a flow this repo uses.)
+# No `tags:` trigger here on purpose: the ONLY thing that ever pushes a
+# version tag in this repo is the `check-tag` job below, once a version bump
+# has landed on `main` and tests/pack have passed there. Triggering on
+# `tags:` too would start a second, redundant run for a tag `check-tag` just
+# pushed itself.
+#
+# `scripts/tag-release.js` (`npm run tag:*`) no longer creates a tag at all —
+# it just bumps the version and commits, runnable from a feature branch (open
+# a PR, merge it normally) or directly on `main`. A tag created before a PR
+# merge couldn't survive it anyway: none of GitHub's merge methods (merge
+# commit, squash, rebase) preserve the original commit's SHA onto `main`, so
+# a pre-merge tag would end up pointing at an ancestor of `main`, never its
+# tip. `check-tag` instead runs on the post-merge `push` to `main`, compares
+# `package.json`'s version against the last released tag, and creates the new
+# one itself if it moved — merge-method-proof by construction.
 
 jobs:
   test:
@@ -53,8 +61,16 @@ jobs:
       - run: npm pack --dry-run
 
   check-tag:
-    name: check for a version tag on this commit
+    name: tag a version bump on main
     runs-on: ubuntu-latest
+    # Gated on both: never tag a commit whose build/pack we haven't verified
+    # (a broken version bump must not leave a real release tag behind), and
+    # never run on a `pull_request` trigger (that would tag a PR's merge-ref
+    # commit before the PR has actually landed on `main`).
+    needs: [test, pack]
+    if: github.event_name == 'push'
+    permissions:
+      contents: write # to create and push the release tag
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -64,8 +80,17 @@ jobs:
           fetch-tags: true
       - id: tag
         run: |
-          TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          VERSION="v$(node -p "require('./package.json').version")"
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "$VERSION already exists — not a new release."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" -m "$VERSION"
+            git push origin "$VERSION"
+            echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
 
   publish:
     name: publish (npm, trusted publishing)

@@ -30,13 +30,36 @@
  * `refined` is not a lane state at all — it never appears on the left of a
  * `transition()` call. It is the terminal label a generated LEAF issue
  * (story/bug/task) gets, marking it awaiting a human's promotion to `ready`.
- * All eight still live in one `WatchState` union (not two separate unions)
+ *
+ * `needs-feedback`/`continue-refinement` are the refine lane's human-in-the-
+ * loop loop, layered onto the same three states: a `refining` run whose
+ * refiner raised material ambiguity (see `RefineOutput.questions`) posts its
+ * questions and moves the spec to `needs-feedback` (`watch.ts`'s
+ * `escalateSpec`) instead of either finishing or blocking. A human answers in
+ * the issue's comments, then adds `continue-refinement` — `claimSpecs`
+ * accepts an optional `from` state precisely so it can claim
+ * `continue-refinement -> refining` the same way it claims
+ * `spec-ready -> refining`, resuming the SAME `adw_id` (deterministic from
+ * the issue id) with the comment thread folded into the prompt. This can
+ * loop any number of rounds; there is no cap.
+ *
+ * All ten still live in one `WatchState` union (not several separate unions)
  * because `transition()`'s "strip every `<prefix>:<state>` label, then add
  * one" logic (see `github_provider.ts`/`jira_provider.ts`) has to know about
  * every one of them to strip correctly, and `ensureLabels()` seeds all of
  * them from one `STATES` array.
  */
-export type WatchState = "ready" | "working" | "review" | "done" | "blocked" | "spec-ready" | "refining" | "refined";
+export type WatchState =
+  | "ready"
+  | "working"
+  | "review"
+  | "done"
+  | "blocked"
+  | "spec-ready"
+  | "refining"
+  | "refined"
+  | "needs-feedback"
+  | "continue-refinement";
 
 export interface Issue {
   /** Opaque tracker identifier: a GitHub issue number stringified ("42"), a Jira key ("PROJ-123"). */
@@ -54,6 +77,16 @@ export interface Issue {
    * create/fetch with that field available.
    */
   internal_id?: string;
+}
+
+/** One comment on an issue, as read back for the refine lane's escalation loop — see `IssueProvider.listComments`. */
+export interface IssueComment {
+  id: string;
+  /** Display handle — GitHub's `user.login`, Jira's `author.displayName`. */
+  author: string;
+  /** ISO 8601, verbatim from the tracker. */
+  created_at: string;
+  body: string;
 }
 
 export interface PrRef {
@@ -78,6 +111,14 @@ export interface PrStatus {
  * whose marker already lists them skips creation entirely — `to-tickets`
  * (the skill this lane's prompt is ported from) has no such guard and
  * duplicates every ticket on a re-run; this is what closes that gap.
+ *
+ * `feedback` is the refine lane's human-in-the-loop cursor: `rounds` counts
+ * how many times this spec has been escalated (so a resumed run's summary
+ * comment can say "answered after 2 rounds"), and `asked_at` is the ISO
+ * timestamp of the most recent question comment — `watch.ts`'s
+ * `buildSpecPrompt` uses it to split the issue's comment thread into
+ * "answers to the open questions" versus "earlier discussion" when building
+ * the resumed run's prompt.
  */
 export interface WatchMarker {
   worktree?: string;
@@ -85,6 +126,7 @@ export interface WatchMarker {
   pr?: number;
   attempt?: number;
   refined?: string[];
+  feedback?: { rounds: number; asked_at: string };
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */
@@ -135,6 +177,23 @@ export interface IssueProvider {
   comment(issue: Issue, body: string): Promise<void>;
   readMarker(issue: Issue): Promise<WatchMarker | null>;
   writeMarker(issue: Issue, marker: WatchMarker): Promise<void>;
+  /**
+   * Oldest-first, the hidden marker comment excluded — the refine lane's
+   * escalation loop reads a human's answers back out of the thread (see
+   * `watch.ts`'s `buildSpecPrompt`). Every other seam on this interface is
+   * write-only towards comments (`comment()`, and `transition()`'s own
+   * `detail`); this is the one read.
+   */
+  listComments(issue: Issue): Promise<IssueComment[]>;
+  /**
+   * Close the issue as completed, where the tracker has such a concept.
+   * Optional, like `IssueAuthoringProvider`'s methods below: the label IS the
+   * state machine (see `transition()` above), and closing is a courtesy on
+   * top of `<prefix>:done`, never something `spf watch` itself reads back —
+   * a tracker (or a caller) that skips this leaves the spec `done` and open,
+   * exactly as every state before this feature existed already behaved.
+   */
+  closeIssue?(issue: Issue): Promise<void>;
 }
 
 /**

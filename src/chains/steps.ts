@@ -68,6 +68,7 @@ import {
   type GateFn,
   type QualityResult,
   type RefinedIssue,
+  type RefineQuestion,
   type ReviewOutputT,
 } from "../core/data_types.ts";
 import type { ChangeSet } from "../core/data_types.ts";
@@ -843,10 +844,19 @@ export function refine(opts: { owner?: string; description?: string; retries?: n
     output_type: RefineOutput,
     description: opts.description ?? "Decompose the spec into a feature/story tree of vertical slices",
     // refinementWellFormed is NOT in GATE_ALLOWLIST — it is meaningless on
-    // any other envelope type (it reads `issues`), so there is nothing to
-    // gain by letting a definition name it, and it stays non-removable here.
+    // any other envelope type (it reads `issues`/`questions`), so there is
+    // nothing to gain by letting a definition name it, and it stays
+    // non-removable here.
+    //
+    // retries: 1, not 0 — this gate's own doc comment says a violation
+    // "re-prompts the SAME refiner session before publishIssues() ever
+    // runs." With 0 retries that was never true: agents.ts throws
+    // GateFailure on the first violation and the whole spec goes straight to
+    // spf:blocked with no correction round-trip. The mutual-exclusion rule
+    // between `issues` and `questions` (see refinementWellFormed) makes that
+    // mismatch more likely to bite in practice, not less.
     gates: withExtraGates([gates.refinementWellFormed], opts.extraGates),
-    retries: opts.retries ?? 0,
+    retries: opts.retries ?? 1,
   });
 }
 
@@ -857,21 +867,34 @@ export function refine(opts: { owner?: string; description?: string; retries?: n
  * rendering) is `core/refine.ts`'s job; this step is sequencing only, per
  * SKILL.md's "chains stay thin" rule. Requires a preceding refine() step.
  *
- * Writes what it created to `<context_handoff_dir>/refine_publish.json` —
- * the side channel `cli/commands/watch.ts`'s `runRefine` reads after the
- * chain returns, since a chain's own return value is just an exit code.
- * `spf watch`'s own marker/comment/transition bookkeeping for the spec
- * issue lives entirely in `core/watch.ts`'s `runSpec`, never here — a bare
- * `spf refine` run (no daemon, no spec issue in play) still needs this step
- * to work standalone.
+ * When the refiner raised material ambiguity instead of a tree
+ * (`envelope.questions` non-empty — `gates.refinementWellFormed` already
+ * guarantees `issues` is empty whenever that's true), this publishes
+ * nothing: it writes those questions to
+ * `<context_handoff_dir>/refine_questions.json` instead of
+ * `refine_publish.json` and returns. That is a successful phase outcome, not
+ * a failure — escalating to a human is a legitimate way for this chain to
+ * end, same as publishing a tree is.
+ *
+ * Writes what it created (or asked) to `<context_handoff_dir>/`, one of
+ * `refine_publish.json` or `refine_questions.json` — the side channel
+ * `cli/commands/watch.ts`'s `runRefine` reads after the chain returns, since
+ * a chain's own return value is just an exit code. `spf watch`'s own
+ * marker/comment/transition bookkeeping for the spec issue (including
+ * posting the questions and moving it to `needs-feedback`) lives entirely in
+ * `core/watch.ts`'s `runSpec`/`escalateSpec`, never here — a bare `spf
+ * refine` run (no daemon, no spec issue in play) still needs this step to
+ * work standalone, and just leaves the questions on disk for a human to
+ * read.
  */
 export function publishIssues(opts: { description?: string } = {}): Step {
   preflightDescription("publish", opts.description);
   const fn = async (run: Run, state: ChainState) => {
-    const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[] }) | null;
+    const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[]; questions?: RefineQuestion[] }) | null;
     if (!envelope || !Array.isArray(envelope.issues)) {
       throw new Error("publishIssues() requires a preceding refine() step in the chain's step list");
     }
+    const questions = envelope.questions ?? [];
     await run.phase(
       makePhaseParams({
         name: "publish",
@@ -880,6 +903,11 @@ export function publishIssues(opts: { description?: string } = {}): Step {
         description: opts.description ?? "Create the feature/story tree on the tracker, in dependency order, and link each to its parent",
       }),
       async (ph) => {
+        if (questions.length > 0) {
+          writeFileSync(path.join(run.context_handoff_dir, "refine_questions.json"), JSON.stringify(questions, null, 2));
+          ph.log({ escalated: questions.length });
+          return;
+        }
         const tracker = refineLib.resolveAuthoringProvider(run.cfg);
         const created = await refineLib.publish(tracker, envelope.issues!, {
           labelPrefix: run.cfg.watch.label_prefix,
