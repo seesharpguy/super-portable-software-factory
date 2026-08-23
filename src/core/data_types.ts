@@ -605,6 +605,22 @@ export const WatchConfigSchema = v.object({
   base_branch: v.optional(v.string(), "main"),
   poll_ms: v.optional(v.number(), 60_000),
   concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),
+  /**
+   * Threaded straight through as `runChainDef`'s `options` argument for
+   * every unattended `spf watch` dispatch (build lane AND refine lane) —
+   * the exact same `Record<string, string>` shape an interactive `spf
+   * <chain> --suite <name>` builds in `cli/commands/run.ts`'s
+   * `dispatchChain` (e.g. `{suite: "strict"}`, `{agent: "..."}`). Fixes the
+   * KNOWN LIMITATION called out in PR #20: `cli/commands/watch.ts`'s
+   * `runChain`/`runRefine` wrappers used to call `runChainDef` with no
+   * options at all, so nothing --suite-shaped could ever reach a chain run
+   * `spf watch` dispatched — see `cli/commands/watch.ts`. Empty by default,
+   * so an existing `watch:` config's behavior is unchanged by upgrading.
+   * Whole-object replace on merge, like `jira`/`refine` above and
+   * `observability.otel` — see `agents.ts`'s `mergeRawConfig` and
+   * `data_types.test.ts`'s merge-survival test for this field.
+   */
+  chain_options: v.optional(v.record(v.string(), v.string()), () => ({})),
   jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
   refine: v.optional(WatchRefineConfigSchema, () => v.parse(WatchRefineConfigSchema, {})),
 });

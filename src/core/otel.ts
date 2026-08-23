@@ -92,15 +92,41 @@
  * silently (see `parseTraceparent`) — a malformed variable must degrade to
  * "own root", never to an error.
  *
- * LIFECYCLE (copied from `notify/notifier.ts`'s discipline). A module-level
- * LIVE registry holds every exporter this process created; `flushAll()` is
- * awaited in `src/cli/index.ts`'s existing `finally` block next to
- * `notify.flushAll()`, AND `session.ts`'s signal handler runs a bounded,
- * timeout-capped drain before its `process.exit(128+n)` (notify does NOT do
- * that second one today — its in-flight webhooks are dropped on SIGTERM; only
- * the otel path is fixed here, on purpose, to keep this change to one seam).
- * Send failures log ONE line for the life of the exporter, with the endpoint
- * and every header VALUE redacted, and are then swallowed.
+ * LIFECYCLE (copied from `notify/notifier.ts`'s discipline, with one
+ * addition `notify` doesn't need — see RUN-SCOPED CLEANUP below). A
+ * module-level LIVE registry holds every exporter this process created;
+ * `flushAll()` is awaited in `src/cli/index.ts`'s existing `finally` block
+ * next to `notify.flushAll()`, AND `session.ts`'s signal handler runs a
+ * bounded, timeout-capped drain before its `process.exit(128+n)` (notify
+ * drains there too, via `drainAll()`, both racing the same budget
+ * concurrently — see #25). Send failures log ONE line for the life of the exporter,
+ * with the endpoint and every header VALUE redacted, and are then swallowed.
+ *
+ * RUN-SCOPED CLEANUP (#26). `notify`'s `LIVE` array has the same
+ * unbounded-growth problem under a long-lived daemon (tracked as #31, not
+ * fixed here). `spf watch` breaks the one-session-per-process assumption
+ * both registries were written under: its daemon loop runs many sessions
+ * in-process, one per claimed issue, and every one of them calls
+ * `resolveOtelExporter` — with no removal path, that was one exporter (plus
+ * its bounded span queue, its buffered-event maps, its open-agent-call
+ * tracking) held forever per issue processed, for the life of the daemon.
+ * `LIVE` is therefore keyed by adw_id (not a plain array) so a finished run
+ * can be found and dropped by id, and `releaseOtelExporter(adwId)` — called
+ * from `chains/index.ts`'s `runChain()`, the one call site every dispatch
+ * (one-shot CLI and `spf watch` alike) passes through on its way out,
+ * success or thrown error alike — drains that one exporter and removes it.
+ * Draining BEFORE removing matters: the removal itself must never be the
+ * reason a run's final root span goes unsent (that guarantee is what
+ * `flushAll()` already gave the one-shot CLI path, and this must not weaken
+ * it). And it must not run any EARLIER than "this run's own dispatch has
+ * fully settled" — a signal can still land while the run is in flight, and
+ * `session.ts`'s handler drains the GLOBAL registry, so an exporter removed
+ * before its run is actually done would silently stop being reachable from
+ * that drain. A one-shot invocation with no explicit `--adw-id` is a
+ * harmless no-op here (the registry key is the RESOLVED id `session.ensure`
+ * mints, which `runChain()`'s caller never sees) — that process exits right
+ * after anyway, so the existing end-of-process `flushAll()` still covers it
+ * exactly as it always did.
  *
  * BACKPRESSURE. `tracer.event()` fires per tool call on a hot path, so raw
  * promise-per-span fire-and-forget is a memory bug, not a style choice.
@@ -838,9 +864,10 @@ function clip(value: string | null | undefined, limit = 200): string {
   return text.length <= limit ? text : text.slice(0, limit);
 }
 
-// ── module-level lifecycle (mirrors notify/notifier.ts's LIVE + flushAll) ───
+// ── module-level lifecycle (mirrors notify/notifier.ts's LIVE + flushAll,
+//    keyed by adw_id — see RUN-SCOPED CLEANUP above) ─────────────────────────
 
-const LIVE: OtelExporter[] = [];
+const LIVE = new Map<string, OtelExporter>();
 
 /**
  * Build an exporter from `cfg.observability.otel`, or `null` when it is
@@ -848,6 +875,14 @@ const LIVE: OtelExporter[] = [];
  * call site is `otel?.record...()` and never a conditional branch. `null` is
  * the default for every repo that has not configured an endpoint, and no
  * environment variable can change that (see EXPLICIT CONFIG ONLY).
+ *
+ * Registered under `opts.adwId` — the RESOLVED id (`session.ensure`'s own
+ * `id`, never a caller's possibly-null `ctx.adw_id`) — which is exactly the
+ * key `releaseOtelExporter` below looks it up by. A second registration
+ * under an id that's still live (in practice: a bug elsewhere, since adw_id
+ * is meant to be unique per in-flight run) replaces the map entry; the
+ * orphaned exporter's own queue still drains itself on its own unref'd
+ * timer, just unreachable from `flushAll()` from that point on.
  */
 export function resolveOtelExporter(
   cfg: SFConfig,
@@ -862,7 +897,7 @@ export function resolveOtelExporter(
     log: opts.log,
     env: opts.env,
   });
-  LIVE.push(exporter);
+  LIVE.set(opts.adwId, exporter);
   return exporter;
 }
 
@@ -873,10 +908,38 @@ export function resolveOtelExporter(
  * handler. Never throws.
  */
 export async function flushAll(budgetMs?: number): Promise<void> {
-  await Promise.all(LIVE.map((exporter) => exporter.drain(budgetMs)));
+  await Promise.all([...LIVE.values()].map((exporter) => exporter.drain(budgetMs)));
+}
+
+/**
+ * The counterpart to `resolveOtelExporter`: drain and forget the one
+ * exporter registered for `adwId`, so a long-lived process (`spf watch`'s
+ * daemon loop) doesn't hold one exporter per run forever (see #26 / the
+ * RUN-SCOPED CLEANUP note above). Called from `chains/index.ts`'s
+ * `runChain()` once a run's own dispatch has fully settled — success or
+ * thrown error alike.
+ *
+ * A no-op, not an error, when `adwId` is falsy (a one-shot invocation with
+ * no explicit `--adw-id` — its caller never learns the id `session.ensure`
+ * actually minted, so it cannot ask for this by id; that process exits
+ * right after anyway and `flushAll()` still covers it) or when nothing is
+ * registered under it (otel unconfigured, or already released). Draining
+ * BEFORE deleting the map entry, never after: this run's exporter must stay
+ * reachable from a concurrent `flushAll()` (a signal landing on some OTHER
+ * still-in-flight run, under `spf watch`'s concurrency) for the full
+ * duration of ITS OWN drain, and removing the entry first would let that
+ * concurrent drain skip an exporter that has not actually finished sending
+ * yet.
+ */
+export async function releaseOtelExporter(adwId: string | null | undefined, budgetMs?: number): Promise<void> {
+  if (!adwId) return;
+  const exporter = LIVE.get(adwId);
+  if (!exporter) return;
+  await exporter.drain(budgetMs);
+  LIVE.delete(adwId);
 }
 
 /** Tests only: forget every registered exporter so cases cannot leak into each other. */
 export function resetLiveForTest(): void {
-  LIVE.length = 0;
+  LIVE.clear();
 }

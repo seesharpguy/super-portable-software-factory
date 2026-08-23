@@ -33,6 +33,8 @@
 import type { ChainContext } from "./context.ts";
 import * as steps from "./steps.ts";
 import * as simpleSdlc from "./simple_sdlc.ts";
+import * as otel from "../core/otel.ts";
+import * as session from "../core/session.ts";
 
 export interface ChainDefinition {
   /** The name typed on the CLI: `spf <name> "..."`. */
@@ -229,8 +231,31 @@ export function resolveRequiredSuites(chain: ChainDefinition, options: Record<st
  * CLI dispatch sites (`spf <chain>` and `spf watch`) go through this, never
  * `chain.run(...)` directly — the whole reason to route through here is that
  * a `steps`-only chain has no `run` to call.
+ *
+ * Also the one call site both dispatch paths share on the way OUT — success
+ * or thrown error alike, `finally` runs either way — which is what makes it
+ * the right seam for `otel.releaseOtelExporter()` (see otel.ts's RUN-SCOPED
+ * CLEANUP note / #26): a `spf watch` daemon calls this once per issue, in
+ * the same process, for as long as it runs, so a run's exporter has to be
+ * dropped here rather than living until the whole daemon exits. `session.
+ * finalize()` is the same idea for the run itself — it stops the process-
+ * wide signal handler from reaching this (now finished) run, and closes its
+ * Tracer's sqlite handle, so a long `spf watch` daemon does not hold every
+ * issue it has ever processed reachable for the rest of its life.
  */
 export async function runChain(chain: ChainDefinition, ctx: ChainContext, options: Record<string, string> = {}): Promise<number> {
-  if (chain.run) return chain.run(ctx, options);
-  return steps.runSteps(ctx, resolveRequiredAgents(chain, options), resolveRequiredSuites(chain, options), chain.steps!, options);
+  try {
+    if (chain.run) return await chain.run(ctx, options);
+    return await steps.runSteps(ctx, resolveRequiredAgents(chain, options), resolveRequiredSuites(chain, options), chain.steps!, options);
+  } finally {
+    // Both are no-ops for a one-shot `spf <chain>` invocation with no
+    // explicit `--adw-id` (ctx.adw_id is null; the id session.ensure()
+    // actually minted never makes it back up here) — that process exits
+    // right after this call returns, and the existing end-of-process
+    // `flushAll()` in `cli/index.ts`'s `finally` still drains the exporter
+    // exactly as it always did (the signal listener needs no such fallback:
+    // the process is gone).
+    await otel.releaseOtelExporter(ctx.adw_id);
+    session.finalize(ctx.adw_id);
+  }
 }

@@ -29,6 +29,7 @@ import {
   ReviewOutput,
   ScoutOutput,
   VerifyOutput,
+  WatchConfigSchema,
   makePhaseParams,
 } from "../core/data_types.js";
 import { agentEnv, loadConfig } from "../core/agents.js";
@@ -161,6 +162,49 @@ test("review merges key-by-key across two layered config files, like observabili
     const cfg = loadConfig([base, override]);
     assert.equal(cfg.review.require_human_signoff, true, "override wins for the key it names");
     assert.equal(cfg.review.signoff_timeout_seconds, 120, "unset in the override -> the base's value survives, key-by-key, not a whole-block replace");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WatchConfigSchema: chain_options defaults to {} — an existing watch: config with no chain_options is unaffected", () => {
+  const parsed = v.parse(WatchConfigSchema, {});
+  assert.deepEqual(parsed.chain_options, {});
+});
+
+// watch.chain_options — fix for PR #20's stated KNOWN LIMITATION: an
+// unattended `spf watch` dispatch used to call runChainDef with no options
+// at all, so nothing --suite-shaped could ever reach it (see
+// cli/commands/watch.ts / core/watch.ts). `watch` itself is spread WHOLE by
+// mergeRawConfig (not enumerated field-by-field), so a new WatchConfigSchema
+// field like this one already passes through that spread — the boundary
+// that actually matters is WatchConfigSchema itself, which is what this
+// pins.
+test("watch.chain_options survives loadConfig's merge for a single config file — not stripped by mergeRawConfig or by WatchConfigSchema", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-watch-chain-options-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, "watch:\n  chain: plan-build-test\n  chain_options:\n    suite: strict\n");
+    const cfg = loadConfig([configPath]);
+    assert.deepEqual(cfg.watch.chain_options, { suite: "strict" }, "a watch.chain_options value from a real config file must reach SFConfig, not be dropped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch.chain_options is a whole-map replace across layered config files, like observability.otel — not merged key-by-key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-watch-chain-options-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "watch:\n  chain_options:\n    suite: base-suite\n    agent: base-agent\n");
+    writeFileSync(override, "watch:\n  chain_options:\n    suite: override-suite\n");
+    const cfg = loadConfig([base, override]);
+    assert.deepEqual(
+      cfg.watch.chain_options,
+      { suite: "override-suite" },
+      "override replaces the whole chain_options map — the base's agent key does not survive alongside it",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

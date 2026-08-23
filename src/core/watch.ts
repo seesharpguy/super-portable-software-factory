@@ -88,6 +88,17 @@ export interface WatchDeps {
   baseBranch: string;
   concurrency: number;
   /**
+   * `watch.chain_options` (see `WatchConfigSchema`'s doc comment) — passed
+   * unchanged into both `runChain`'s and `runRefine`'s opts below, exactly
+   * like `spf <chain> --suite <name>` builds an options map for an
+   * interactive dispatch (`cli/commands/run.ts`). Fixes the KNOWN
+   * LIMITATION from PR #20: an unattended `spf watch` dispatch used to call
+   * `runChainDef` with no options at all, so nothing --suite-shaped could
+   * ever reach it. One shared map for both lanes — `spf watch` has no
+   * separate `refine.chain_options` today.
+   */
+  chainOptions: Record<string, string>;
+  /**
    * The second lane — decomposing a `<prefix>:spec-ready` product spec
    * instead of building a `<prefix>:ready` issue. `false` (the default) is
    * a complete no-op: `claimSpecs`/`reconcileRefining` return immediately,
@@ -98,7 +109,7 @@ export interface WatchDeps {
   refineConcurrency: number;
   refineChain: string;
   /** Same shape as `runChain`, for the refine lane — see its own doc comment for why the two aren't unified into one callback. */
-  runRefine: (opts: { prompt: string; cwd: string; adwId: string; issueId: string }) => Promise<RefineRunResult>;
+  runRefine: (opts: { prompt: string; cwd: string; adwId: string; issueId: string; chainOptions: Record<string, string> }) => Promise<RefineRunResult>;
   worktreesDir: string; // OUTSIDE the repo — see module doc comment
   /**
    * Symlink (or otherwise wire up) `<worktreePath>/.spf/data` to the MAIN
@@ -113,7 +124,7 @@ export interface WatchDeps {
    */
   linkDataDir: (worktreePath: string) => void;
   dryRun: boolean;
-  runChain: (opts: { prompt: string; cwd: string; adwId: string }) => Promise<ChainRunResult>;
+  runChain: (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }) => Promise<ChainRunResult>;
   log: (message: string) => void;
   /**
    * Structured push, alongside `log`'s plain string — a required field, like
@@ -361,7 +372,7 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
 
     const prompt = `${issue.title}\n\n${issue.body}`.trim();
-    const result = await deps.runChain({ prompt, cwd: worktreePath, adwId });
+    const result = await deps.runChain({ prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions });
 
     if (!result.accepted) {
       deps.log(`watch: ${issue.id}: chain "${deps.chain}" did not succeed — blocked`);
@@ -480,7 +491,7 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
 
     const prompt = `${issue.title}\n\n${issue.body}`.trim();
-    const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id });
+    const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id, chainOptions: deps.chainOptions });
 
     if (!result.accepted) {
       deps.log(`watch: spec ${issue.id}: refine chain "${deps.refineChain}" did not succeed — blocked`);

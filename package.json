@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "!dist/test",
     "web",
     "assets",
     "README.md",
