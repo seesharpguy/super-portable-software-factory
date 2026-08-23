@@ -386,11 +386,15 @@ export async function watchCommand(argv: string[]): Promise<number> {
 
   /**
    * Same shape as `runChain`, for the refine lane — with one extra step on
-   * success: a chain's return value is just an exit code, so the created-
-   * issues list `steps.publishIssues()` actually produced has to come back
-   * through the side channel it wrote (`refine_publish.json`, under the
-   * SAME symlinked session dir `linkDataDir` already wires up), not through
-   * `runChainDef`'s return value.
+   * success: a chain's return value is just an exit code, so what
+   * `steps.publishIssues()` actually did — published a tree, OR escalated a
+   * question set instead — has to come back through the side channel it
+   * wrote (`refine_publish.json` or `refine_questions.json`, under the SAME
+   * symlinked session dir `linkDataDir` already wires up), not through
+   * `runChainDef`'s return value. The two are read independently and both
+   * default to `[]`: `gates.refinementWellFormed` guarantees a chain never
+   * writes both files in the same run, so exactly one of `created`/
+   * `questions` is ever non-empty on an accepted run.
    */
   const runRefine = async (opts: { prompt: string; cwd: string; adwId: string; issueId: string; chainOptions: Record<string, string> }): Promise<RefineRunResult> => {
     const chainDef = findChain(cfg.watch.refine.chain)!; // checked above
@@ -414,18 +418,24 @@ export async function watchCommand(argv: string[]): Promise<number> {
         opts.adwId,
         `Refine chain "${cfg.watch.refine.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
       );
-      return { accepted: false, adwId: opts.adwId, detail, created: [] };
+      return { accepted: false, adwId: opts.adwId, detail, created: [], questions: [] };
     }
+    const wtAnchor = paths.resolveAnchor(opts.cwd);
+    const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
+    const handoffDir = path.join(wtDataPaths.data_dir, "sessions", opts.adwId, "context_handoff");
     let created: RefineRunResult["created"] = [];
     try {
-      const wtAnchor = paths.resolveAnchor(opts.cwd);
-      const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-      const summaryPath = path.join(wtDataPaths.data_dir, "sessions", opts.adwId, "context_handoff", "refine_publish.json");
-      created = JSON.parse(readFileSync(summaryPath, "utf-8"));
+      created = JSON.parse(readFileSync(path.join(handoffDir, "refine_publish.json"), "utf-8"));
     } catch {
       // best-effort — an empty list still lets runSpec finish cleanly, just with no per-issue summary
     }
-    return { accepted: true, adwId: opts.adwId, detail: "", created };
+    let questions: RefineRunResult["questions"] = [];
+    try {
+      questions = JSON.parse(readFileSync(path.join(handoffDir, "refine_questions.json"), "utf-8"));
+    } catch {
+      // best-effort, same as above — no questions file means this run wasn't an escalation
+    }
+    return { accepted: true, adwId: opts.adwId, detail: "", created, questions };
   };
 
   const deps: WatchDeps = {

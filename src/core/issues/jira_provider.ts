@@ -40,9 +40,20 @@
  * `issue_provider: jira` fails loudly at startup rather than silently
  * running a refine lane that can never publish anything.
  */
-import type { EnsureLabelsResult, Issue, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
+import type { EnsureLabelsResult, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
-const STATES: WatchState[] = ["ready", "working", "review", "done", "blocked", "spec-ready", "refining", "refined"];
+const STATES: WatchState[] = [
+  "ready",
+  "working",
+  "review",
+  "done",
+  "blocked",
+  "spec-ready",
+  "refining",
+  "refined",
+  "needs-feedback",
+  "continue-refinement",
+];
 const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*?\})/s;
 
 interface JiraIssue {
@@ -58,6 +69,8 @@ interface JiraIssue {
 interface JiraComment {
   id: string;
   body: unknown;
+  author: { displayName: string };
+  created: string;
 }
 
 function toAdf(text: string): unknown {
@@ -192,10 +205,16 @@ export class JiraProvider implements IssueProvider {
     await this.jira(`/rest/api/3/issue/${issue.id}/comment`, { method: "POST", body: JSON.stringify({ body: toAdf(body) }) });
   }
 
-  private async findMarkerComment(issueId: string): Promise<{ id: string; marker: WatchMarker } | null> {
+  /** The single fetch every comment-reading method (`findMarkerComment`, `listComments`) builds on. */
+  private async fetchComments(issueId: string): Promise<JiraComment[]> {
     const result = await this.jira<{ comments: JiraComment[] }>(`/rest/api/3/issue/${issueId}/comment?maxResults=100`);
+    return result.comments;
+  }
+
+  private async findMarkerComment(issueId: string): Promise<{ id: string; marker: WatchMarker } | null> {
+    const comments = await this.fetchComments(issueId);
     let found: { id: string; marker: WatchMarker } | null = null;
-    for (const c of result.comments) {
+    for (const c of comments) {
       const match = MARKER_RE.exec(adfToText(c.body));
       if (!match) continue;
       try {
@@ -205,6 +224,14 @@ export class JiraProvider implements IssueProvider {
       }
     }
     return found;
+  }
+
+  /** Oldest-first (Jira's own comment order), the hidden `[spf-watch-marker]` comment filtered out. */
+  async listComments(issue: Issue): Promise<IssueComment[]> {
+    const comments = await this.fetchComments(issue.id);
+    return comments
+      .filter((c) => !MARKER_RE.test(adfToText(c.body)))
+      .map((c) => ({ id: c.id, author: c.author?.displayName ?? "unknown", created_at: c.created, body: adfToText(c.body) }));
   }
 
   async readMarker(issue: Issue): Promise<WatchMarker | null> {

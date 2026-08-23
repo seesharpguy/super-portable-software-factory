@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { GateReport, type EnvelopeBase, type GateFn, type RefinedIssue, type RunContext } from "./data_types.ts";
+import { GateReport, type EnvelopeBase, type GateFn, type RefinedIssue, type RefineQuestion, type RunContext } from "./data_types.ts";
 import { operatorEnv } from "./utils.ts";
 
 const TAIL_CHARS = 1000; // command output kept as evidence on a failure
@@ -158,13 +158,45 @@ const LEAF_KINDS = new Set(["story", "bug", "task"]);
  *
  * "Container" and "leaf" are derived from the graph, not asserted by the
  * agent: a node is a container iff some other node names it as `parent`.
+ *
+ * `questions` (see `RefineQuestionSchema`'s doc comment) is the human-in-the-
+ * loop escalation path, and it is mutually exclusive with `issues`: a
+ * refinement that raises material ambiguity must publish NOTHING this round
+ * — a partial tree pinned to an unanswered question is worse than none.
+ * When `questions` is non-empty this gate checks only its own shape (unique,
+ * non-blank ids; non-blank question text) and skips every `issues` rule
+ * below, since there is no tree to validate.
  */
 export function refinementWellFormed(envelope: EnvelopeBase, _run: RunContext): GateReport {
   const report = new GateReport();
   const issues = ((envelope as any).issues as RefinedIssue[] | undefined) ?? [];
+  const questions = ((envelope as any).questions as RefineQuestion[] | undefined) ?? [];
+
+  if (questions.length > 0) {
+    report.check(
+      "issues empty while escalating",
+      issues.length === 0,
+      issues.length === 0
+        ? "no issues published alongside the questions"
+        : `${issues.length} issue(s) published alongside ${questions.length} question(s) — escalating means publishing nothing this round`,
+    );
+    const seenIds = new Set<string>();
+    for (const q of questions) {
+      const blank = !q.id.trim();
+      const dup = !blank && seenIds.has(q.id);
+      seenIds.add(q.id);
+      report.check(
+        `question ${JSON.stringify(q.id)}`,
+        !blank && !dup,
+        blank ? "question id is blank" : dup ? "duplicate question id — every question needs a unique id within this round" : "id ok",
+      );
+      report.check(`question ${JSON.stringify(q.id)}.question`, q.question.trim().length > 0, q.question.trim().length > 0 ? "has text" : "question text is blank");
+    }
+    return report;
+  }
 
   if (issues.length === 0) {
-    report.check("issues", false, "a refinement produced no issues at all — decompose the spec into at least one leaf");
+    report.check("issues", false, "a refinement produced no issues at all and raised no questions — decompose the spec into at least one leaf, or escalate what's ambiguous");
     return report;
   }
 

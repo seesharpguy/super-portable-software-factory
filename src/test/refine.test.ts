@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { publish, resolveAuthoringProvider } from "../core/refine.js";
 import { refinementWellFormed } from "../core/gates.js";
 import type { Issue, IssueAuthoringProvider } from "../core/issues/provider.js";
-import type { RefinedIssue, SFConfig } from "../core/data_types.js";
+import type { RefinedIssue, RefineQuestion, SFConfig } from "../core/data_types.js";
 
 /** Only the `watch:` fields resolveAuthoringProvider actually reads — the rest of SFConfig is irrelevant to it. */
 function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
@@ -158,6 +158,14 @@ function envelope(issues: RefinedIssue[]) {
   return { status: "success" as const, summary: "", artifacts: [], notes_for_next_agent: "", issues };
 }
 
+function question(overrides: Partial<RefineQuestion> & Pick<RefineQuestion, "id" | "question">): RefineQuestion {
+  return { why_it_matters: "", options: [], recommendation: "", evidence: [], ...overrides };
+}
+
+function envelopeWithQuestions(questions: RefineQuestion[], issues: RefinedIssue[] = []) {
+  return { status: "success" as const, summary: "", artifacts: [], notes_for_next_agent: "", issues, questions };
+}
+
 test("refinementWellFormed: an empty issues list fails", () => {
   const report = refinementWellFormed(envelope([]), { repo_root: "/repo" });
   assert.equal(report.passed, false);
@@ -231,4 +239,48 @@ test("refinementWellFormed: duplicate keys fail", () => {
   );
   assert.equal(report.passed, false);
   assert.ok(report.violations.some((v) => v.includes("duplicate")));
+});
+
+test("refinementWellFormed: an empty issues list that also raised no questions fails, naming both options", () => {
+  const report = refinementWellFormed(envelopeWithQuestions([]), { repo_root: "/repo" });
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.toLowerCase().includes("escalate")));
+});
+
+test("refinementWellFormed: questions alone (no issues) passes", () => {
+  const report = refinementWellFormed(
+    envelopeWithQuestions([question({ id: "Q1", question: "Should invitations expire?" })]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, true);
+});
+
+test("refinementWellFormed: questions alongside issues fails — escalating must publish nothing this round", () => {
+  const report = refinementWellFormed(
+    envelopeWithQuestions([question({ id: "Q1", question: "Should invitations expire?" })], [node({ key: "S1", kind: "story", title: "A leaf" })]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.toLowerCase().includes("escalating means publishing nothing")));
+});
+
+test("refinementWellFormed: a blank question id fails", () => {
+  const report = refinementWellFormed(envelopeWithQuestions([question({ id: "", question: "Something?" })]), { repo_root: "/repo" });
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.includes("blank")));
+});
+
+test("refinementWellFormed: duplicate question ids fail", () => {
+  const report = refinementWellFormed(
+    envelopeWithQuestions([question({ id: "Q1", question: "First?" }), question({ id: "Q1", question: "Second?" })]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.includes("duplicate question id")));
+});
+
+test("refinementWellFormed: blank question text fails", () => {
+  const report = refinementWellFormed(envelopeWithQuestions([question({ id: "Q1", question: "   " })]), { repo_root: "/repo" });
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.includes("question text is blank")));
 });

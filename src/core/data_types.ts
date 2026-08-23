@@ -184,9 +184,33 @@ export const RefinedIssueSchema = v.object({
 });
 export type RefinedIssue = v.InferOutput<typeof RefinedIssueSchema>;
 
+/**
+ * One open question the refiner could not answer itself — material ambiguity
+ * (scope, data model, an external dependency choice, a UX contract, anything
+ * that would contradict an ADR) it is refusing to guess on, per
+ * `assets/prompts/refiner/system.md`'s "ask, don't decide" rule. `id` is
+ * stable within one round so a resumed run's answers can be matched back to
+ * the question they answer; `why_it_matters`/`options`/`recommendation`/
+ * `evidence` exist so a human can answer in one word ("go with your rec")
+ * instead of re-deriving the tradeoff the refiner already worked out.
+ * `gates.refinementWellFormed` requires `issues` to be empty whenever this is
+ * non-empty — escalating means publishing nothing THIS round, never a
+ * partial tree pinned to an unanswered question.
+ */
+export const RefineQuestionSchema = v.object({
+  id: v.string(),
+  question: v.string(),
+  why_it_matters: v.optional(v.string(), ""),
+  options: v.optional(v.array(v.string()), () => []),
+  recommendation: v.optional(v.string(), ""),
+  evidence: v.optional(v.array(v.string()), () => []),
+});
+export type RefineQuestion = v.InferOutput<typeof RefineQuestionSchema>;
+
 /** A product spec decomposed into a feature/story tree — see `steps.refine()` and `core/refine.ts`. */
 export const RefineOutput = envelopeType("RefineOutput", {
   issues: v.optional(v.array(RefinedIssueSchema), () => []),
+  questions: v.optional(v.array(RefineQuestionSchema), () => []),
 });
 export type RefineOutputT = v.InferOutput<typeof RefineOutput.schema>;
 

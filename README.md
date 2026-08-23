@@ -383,9 +383,10 @@ A product spec isn't individually workable — it needs to become a feature,
 broken down into user stories and bugs, before the build lane above has
 anything to claim. `watch.refine` is a second lane over the same poll loop
 that does exactly that: it polls `<prefix>:spec-ready`, runs a decomposition
-chain (`refine` by default) against the spec in its own worktree, and
-publishes what it produces as real tracker issues — a feature/epic container
-plus story/bug/task leaves, linked via GitHub's native sub-issue hierarchy.
+chain (`refine` by default — `request → scout → refiner → publish`) against
+the spec in its own worktree, and publishes what it produces as real tracker
+issues — a feature/epic container plus story/bug/task leaves, linked via
+GitHub's native sub-issue hierarchy.
 
 ```yaml
 watch:
@@ -406,22 +407,62 @@ into twenty stories doesn't turn into twenty unattended chain runs and twenty
 PRs with nobody having looked at the breakdown first. Once you do promote a
 leaf, the existing build lane picks it up completely unchanged.
 
-The spec issue itself gets a `spec-ready → refining → done`/`blocked`
-lifecycle, same shape as the build lane, and a summary comment listing every
-issue it created. Try it by hand first, against a real spec, before turning
-on the daemon:
+Grounding the decomposition in real code is structural, not just prose: a
+`scout` phase maps the subsystems the spec touches before the refiner ever
+runs, and its findings flow straight into the refiner as context. This makes
+`scout` a required agent for the `refine` chain — a roster that pruned it
+fails `spf watch` startup by name, the same as any other missing required
+agent.
+
+#### Human-in-the-loop escalation
+
+The refiner is instructed not to guess on anything material (scope, data
+model, an external dependency choice, a UX contract, a breaking change, or
+anything that would contradict an existing ADR — see
+`assets/prompts/refiner/system.md`'s "Ask, don't decide"). When it hits real
+ambiguity it raises questions instead of publishing a partial tree, and the
+spec moves through an extra loop before it reaches `done`:
+
+```text
+spec-ready → refining ──┬─→ done / blocked            (published a tree)
+                         └─→ needs-feedback            (raised questions)
+                                  │  a human answers in the issue's comments,
+                                  │  then adds continue-refinement
+                                  ▼
+                            refining (again, same adw_id) → ...
+```
+
+Answer the refiner's questions as comments on the spec issue, then add the
+`<prefix>:continue-refinement` label. `spf watch` resumes the **same**
+`adw_id` — the refiner's own coding-agent session continues, with the
+comment thread folded into its prompt — so it never re-derives context it
+already had, and it can loop through as many rounds as it takes; there's no
+cap. If channels are configured (see "Notifications" below), a
+`spec_needs_feedback` event fires every round.
+
+The spec issue itself moves through a `spec-ready → refining →
+needs-feedback ⇄ refining → done`/`blocked` lifecycle (the `needs-feedback ⇄
+refining` loop only when the refiner actually escalates), and a summary
+comment lists every issue it created — noting how many rounds of feedback it
+took, if any. Once a spec reaches `done`, `spf watch` also closes the issue
+on the tracker (best-effort: a tracker or a failed close never turns a
+successfully refined spec back to `blocked`). Try it by hand first, against
+a real spec, before turning on the daemon:
 
 ```bash
 spf refine "<spec text or path/to/spec.md>" --issue 42   # --issue renders a "## Parent: #42" back-reference
 ```
 
-`spf watch init` seeds the type labels alongside the state ones. This lane's
-prompt (`assets/prompts/refiner/`) is adapted from a "tracer-bullet ticket"
-decomposition skill — vertical slices, a `blocked_by` dependency graph, and
-an expand/migrate/contract sequence for wide mechanical refactors — with a
-gate (`gates.refinementWellFormed`) added on top to enforce the
+`spf watch init` seeds the type labels alongside the state ones — **re-run
+it** after upgrading to this version, so it can create the new
+`<prefix>:needs-feedback` and `<prefix>:continue-refinement` labels. This
+lane's prompt (`assets/prompts/refiner/`) is adapted from a "tracer-bullet
+ticket" decomposition skill — vertical slices, a `blocked_by` dependency
+graph, and an expand/migrate/contract sequence for wide mechanical refactors
+— with a gate (`gates.refinementWellFormed`) added on top to enforce the
 container/leaf shape that skill left as prose convention rather than a
-checked rule.
+checked rule, now also enforcing that a refinement never publishes issues and
+raises questions in the same round.
 
 ### GitHub (`issue_provider: github` and/or `code_host: github`)
 
@@ -482,10 +523,13 @@ notifications:
 ```
 
 `events` is the whole filter: `errors` sends only failed runs/phases, blocked
-issues, and watch errors; `all` adds every milestone — run started/finished,
-issue claimed, PR opened, issue done. A channel's own `events` overrides the
-top-level scope for just that channel. `spf doctor` reports whether each
-configured channel's env var is set.
+issues, watch errors, and a spec needing feedback (`spec_needs_feedback` —
+see "Human-in-the-loop escalation" above; it's `error`-level on purpose, the
+same class of event as a blocked issue, so an `errors`-scope channel sees it
+too); `all` adds every milestone — run started/finished, issue claimed, PR
+opened, issue done. A channel's own `events` overrides the top-level scope
+for just that channel. `spf doctor` reports whether each configured
+channel's env var is set.
 
 The webhook URL is a secret and lives only in `.env` — `webhook_url_env`
 names the key, never the URL itself, matching `GITHUB_TOKEN`/

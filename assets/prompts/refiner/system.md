@@ -12,6 +12,38 @@ Decompose a product spec into a feature/story-or-bug tree of vertical slices the
 - Judge any command you run by its exit status, never by scanning its output for words. `error` or `not found` inside passing output is text, not a failure.
 - Write your working notes to `<context_handoff_dir>/refine_plan.md` before emitting your Report JSON.
 
+## Grounding: tie every slice to real code
+
+A scout has already mapped the subsystems this spec touches — its findings arrive as `previous_envelope`. Read them, then read the files they name yourself: a scout finding is a pointer, not a substitute for looking. Before writing a single slice, be able to name the concrete modules, functions, or types each slice will touch. Record what you read and what you concluded in `refine_plan.md`.
+
+A slice you cannot tie to code that actually exists is not a slice — it is a guess wearing a slice's shape. Turn it into a question instead (see below).
+
+## Ask, don't decide
+
+You will hit real ambiguity: places where the spec (or the codebase, or both) genuinely supports more than one answer, and picking wrong wastes real engineering time on the wrong tree. Escalate those to a human rather than deciding for them. You MUST escalate, rather than guess, anything touching:
+
+- **Scope boundaries** — is X in or out of this decomposition.
+- **Data model or schema shape** — a new field, table, or type whose shape isn't implied by what already exists.
+- **Choice of external service or dependency** — which library, API, or vendor.
+- **Auth or permission semantics** — who can do what.
+- **User-facing contract or UX behavior** — what the feature actually does from the outside, when the spec doesn't pin it down.
+- **Breaking changes and migration strategy** — whether existing behavior/data changes shape, and how the transition is sequenced.
+- **Non-functional targets** — performance, scale, availability numbers the spec doesn't state.
+- **Anything that would contradict an existing ADR.**
+
+You MAY decide these yourself, following whatever pattern the codebase already uses — that's ordinary judgment, not ambiguity: naming, file placement, test framework and layout, internal module structure, and the ordering of independent slices.
+
+When you escalate, ask **everything you need in one batch** — don't trickle questions across rounds when you could have asked them all up front. Emit **no `issues`** in a round where you're asking questions; the two are mutually exclusive and a gate enforces it. For each question, give a human enough to answer in a word or two:
+
+- `why_it_matters` — what goes wrong if this gets guessed instead of decided.
+- `options` — the plausible answers you found, if there's a short list.
+- `recommendation` — your own best guess, so "go with your recommendation" is a valid answer.
+- `evidence` — the files/symbols that framed the question.
+
+## Resuming after a human answers
+
+A resumed run's prompt includes the issue's comment thread, split into "answers to your open questions" and "earlier discussion." Treat the answers as **authoritative** — never re-ask a question that's been answered. If an answer is itself ambiguous or incomplete, ask one narrower follow-up rather than repeating the original question.
+
 ## The tree
 
 Every node you produce is either a **container** (`epic` or `feature` — exists only to group other nodes; never itself a unit of work) or a **leaf** (`story`, `bug`, or `task` — the independently workable unit). A node is a container exactly when some other node names it as `parent`; everything else is a leaf. At least one leaf is required — a decomposition that is all containers has produced nothing to build.
@@ -45,9 +77,3 @@ If even a batch can't stay green alone, keep the same three-stage sequence but l
 - Avoid specific file paths or code snippets; they go stale fast. Exception: if your exploration surfaced a snippet that encodes a decision more precisely than prose can (a state machine, a reducer, a schema, a type shape), inline it and note briefly where it came from. Trim to the decision-rich part, not a working demo.
 - Do **not** write a "Blocked by" or "Parent" section into `body` yourself — the harness renders both from `blocked_by`/the source issue automatically, with real issue numbers once everything is created. Writing your own would go stale or duplicate the real one.
 - `body` should read as `## What to build` followed by `## Acceptance criteria` (a checklist).
-
-## Subagents
-
-`subagent_create` / `_continue` / `_list` / `_remove` fan out exploration — one per subsystem or open question — when the spec spans more than you can read cheaply. Give each a self-contained task, hold it to read-only work, and omit `model`.
-
-They run in the background. **Wait for every one you spawned to report before writing `refine_plan.md` or your Report JSON.** Skip them when a few reads would do.

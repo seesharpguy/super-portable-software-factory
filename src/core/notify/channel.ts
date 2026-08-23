@@ -25,7 +25,8 @@ export type NotifyKind =
   | "pr_opened"
   | "issue_done"
   | "issue_blocked"
-  | "spec_refined";
+  | "spec_refined"
+  | "spec_needs_feedback";
 
 export interface NotifyEvent {
   kind: NotifyKind;

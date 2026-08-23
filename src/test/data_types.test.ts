@@ -25,6 +25,7 @@ import {
   NotificationsConfigSchema,
   PhaseParamsSchema,
   PlanOutput,
+  RefineOutput,
   ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
@@ -78,9 +79,26 @@ test("PhaseParamsSchema rejects a blank description and an echo of the name, wit
 });
 
 test("every envelope type still converts to JSON Schema (the sf_report tool wiring depends on this)", () => {
-  for (const envelope of [GenericOutput, PlanOutput, BuildOutput, ScoutOutput, ReviewOutput, DocumentOutput, ChangesOutput, VerifyOutput]) {
+  for (const envelope of [GenericOutput, PlanOutput, BuildOutput, ScoutOutput, ReviewOutput, DocumentOutput, ChangesOutput, VerifyOutput, RefineOutput]) {
     assert.doesNotThrow(() => toJsonSchema(envelope.schema), `${envelope.name} must stay convertible — no rawTransform allowed on an envelope schema`);
   }
+});
+
+test("RefineOutput: questions defaults to [] when absent — a pre-existing issues-only payload parses byte-identical to before this field existed", () => {
+  const withoutQuestions = v.parse(RefineOutput.schema, {
+    status: "success",
+    issues: [{ key: "S1", kind: "story", title: "A leaf", body: "## What to build" }],
+  });
+  assert.deepEqual(withoutQuestions.questions, []);
+
+  const withQuestions = v.parse(RefineOutput.schema, {
+    status: "success",
+    issues: [],
+    questions: [{ id: "Q1", question: "Should invitations expire?" }],
+  });
+  assert.equal(withQuestions.questions.length, 1);
+  assert.equal(withQuestions.questions[0]!.id, "Q1");
+  assert.equal(withQuestions.questions[0]!.why_it_matters, "", "optional question fields still default like the rest of the envelope schemas");
 });
 
 test("PhaseParamsSchema itself (the one schema WITH a rawTransform) correctly refuses JSON Schema conversion", () => {
