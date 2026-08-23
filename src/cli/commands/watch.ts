@@ -335,7 +335,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     }
   }
 
-  const runChain = async (opts: { prompt: string; cwd: string; adwId: string }): Promise<ChainRunResult> => {
+  const runChain = async (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }): Promise<ChainRunResult> => {
     // WATCH DIVERGENCE: `findChain` here resolves against the registry
     // `cli/index.ts`'s `main()` built ONCE, at daemon start, from the MAIN
     // repo anchor (the `registerRepoChains(...)` call before the command
@@ -360,17 +360,19 @@ export async function watchCommand(argv: string[]): Promise<number> {
       unattended: true,
       chain_source: chainDef.source,
     };
-    // KNOWN LIMITATION (not fixed here): runChainDef is called below with no
-    // third `options` argument, so nothing --suite-shaped ever reaches this
-    // dispatch — `resolveRequiredSuites`/`resolveRequiredAgents` below both
-    // fall back to each chain's compiled-in/YAML-declared default. An
-    // unattended watch run therefore can't override a chain's suite the way
-    // an interactive `spf <chain> --suite <name>` can.
-    const code = await runChainDef(chainDef, ctx);
-    // Static for every chain but "prompt" (whose --agent flag `spf watch`
-    // never passes) — resolved with no options, exactly like `runChainDef`
-    // above ran it.
-    const reviewRequired = resolveRequiredAgents(chainDef, {}).includes("reviewer");
+    // `opts.chainOptions` is `watch.chain_options` (see WatchConfigSchema's
+    // doc comment), threaded down from `deps.chainOptions` by
+    // `core/watch.ts`'s `runIssue` — the same options-map shape an
+    // interactive `spf <chain> --suite <name>` builds in
+    // `cli/commands/run.ts`'s `dispatchChain`. This closes the KNOWN
+    // LIMITATION from PR #20: an unattended watch dispatch used to call
+    // `runChainDef` with no options at all, so nothing --suite-shaped could
+    // ever reach it.
+    const code = await runChainDef(chainDef, ctx, opts.chainOptions);
+    // Resolved with the SAME options `runChainDef` just ran the chain with,
+    // so a `chain_options` override that swaps a "reviewer" step in or out
+    // is reflected here too, not just each chain's static/YAML default.
+    const reviewRequired = resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer");
     if (code === 0) {
       return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: reviewSummaryFor(opts.cwd, opts.adwId) };
     }
@@ -390,7 +392,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
    * SAME symlinked session dir `linkDataDir` already wires up), not through
    * `runChainDef`'s return value.
    */
-  const runRefine = async (opts: { prompt: string; cwd: string; adwId: string; issueId: string }): Promise<RefineRunResult> => {
+  const runRefine = async (opts: { prompt: string; cwd: string; adwId: string; issueId: string; chainOptions: Record<string, string> }): Promise<RefineRunResult> => {
     const chainDef = findChain(cfg.watch.refine.chain)!; // checked above
     const ctx: ChainContext = {
       prompt: opts.prompt,
@@ -399,13 +401,13 @@ export async function watchCommand(argv: string[]): Promise<number> {
       cwd: opts.cwd,
       chain_name: chainDef.name,
       issue_id: opts.issueId,
-      // Same reasoning as runChain's ctx above — an unattended dispatch,
-      // with no --suite-shaped options reaching it either (same KNOWN
-      // LIMITATION).
+      // Same reasoning as runChain's ctx above — an unattended dispatch.
       unattended: true,
       chain_source: chainDef.source,
     };
-    const code = await runChainDef(chainDef, ctx);
+    // Same `watch.chain_options` threading as runChain above — see its
+    // comment for the KNOWN LIMITATION this fixes.
+    const code = await runChainDef(chainDef, ctx, opts.chainOptions);
     if (code !== 0) {
       const detail = detailFromFailedPhase(
         opts.cwd,
@@ -435,6 +437,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     chain: cfg.watch.chain,
     baseBranch: cfg.watch.base_branch,
     concurrency: cfg.watch.concurrency,
+    chainOptions: cfg.watch.chain_options,
     refineEnabled: cfg.watch.refine.enabled,
     refineConcurrency: cfg.watch.refine.concurrency,
     refineChain: cfg.watch.refine.chain,

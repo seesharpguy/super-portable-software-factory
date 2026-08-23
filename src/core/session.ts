@@ -12,17 +12,37 @@ import { Run } from "./runner.ts";
 import { Tracer } from "./tracer.ts";
 import type { SFConfig } from "./data_types.ts";
 import { engineerName, newId } from "./utils.ts";
-import { resolveNotifier } from "./notify/notifier.ts";
+import { resolveNotifier, drainAll as drainNotifiers } from "./notify/notifier.ts";
 import * as otel from "./otel.ts";
 
 /**
- * How long a signalled run may spend pushing spans before it exits anyway.
- * Short on purpose: someone who just pressed ^C is waiting, and an
- * observability projection is never worth making a kill feel broken. The
- * budget is enforced inside `otel.flushAll()` (a raced, unref'd deadline), so
- * an unreachable collector costs exactly this and not one tick more.
+ * How long a signalled run may spend pushing spans / webhook sends before it
+ * exits anyway. Short on purpose: someone who just pressed ^C is waiting, and
+ * neither an observability projection nor a Slack ping is ever worth making a
+ * kill feel broken. The budget is enforced inside `otel.flushAll()` and
+ * `notify.drainAll()` (each a raced, unref'd deadline), so an unreachable
+ * collector or webhook host costs exactly this and not one tick more.
  */
 const SIGNAL_DRAIN_MS = 750;
+
+/**
+ * Runs currently in flight in THIS process, keyed by adw_id — what the one
+ * shared signal handler below acts on, and what `finalize()` removes a run
+ * from once its own dispatch has settled.
+ *
+ * `spf watch`'s daemon loop calls `ensure()` once per claimed issue, in the
+ * same process, for the life of the daemon. Installing a FRESH
+ * SIGTERM/SIGINT listener per `ensure()` call (the old shape) meant every
+ * listener ever registered stayed registered and fired on the NEXT signal —
+ * so ^C during issue 72 would also re-run issue 70 and 71's long-finished
+ * handlers, flipping their already-`success` sessions back to `fail`, on top
+ * of leaking a `MaxListenersExceededWarning` at the 11th run. One listener,
+ * installed once, acting on whichever runs are still in `ACTIVE`, fixes
+ * both: a signal only ever finalizes runs that are actually still running.
+ */
+const ACTIVE = new Map<string, Run>();
+let installed = false;
+let draining = false;
 
 /**
  * A killed run still closes its own trace.
@@ -35,33 +55,81 @@ const SIGNAL_DRAIN_MS = 750;
  * (best-effort: a signal can still land mid-write).
  *
  * SQLite is written FIRST and synchronously, exactly as before — the otel
- * drain is appended after it and can only ever cost time, never correctness.
- * (`notify` has no equivalent drain on this path: its in-flight webhooks are
- * dropped on a signal today. Fixing that means touching the notifier's
- * lifecycle, which is outside this change; only the otel path is drained here.)
+ * and notify drains are appended after it and can only ever cost time, never
+ * correctness. `notify`'s in-flight Slack/Teams/webhook sends get the SAME
+ * timeout-and-swallow discipline as the otel drain (see `Notifier.drain()` /
+ * `notify.drainAll()` in `notify/notifier.ts`): bounded by the same
+ * `SIGNAL_DRAIN_MS` budget, run concurrently with the otel drain (not after
+ * it, so a killed run never pays both budgets back to back), and never able
+ * to throw into this handler.
  * A second signal during the drain exits immediately — someone pressing ^C
  * twice means "now", and a shutdown path that ignores that is a hang.
  */
+function handleSignal(signal: NodeJS.Signals): void {
+  const code = 128 + (signal === "SIGINT" ? 2 : 15);
+  if (draining) process.exit(code);
+  draining = true;
+  const runs = [...ACTIVE.values()]; // snapshot: finalize() may mutate ACTIVE mid-drain
+  for (const run of runs) run.tracer.sessionFinish(run.adw_id, false); // also closes process rows
+  const drains: Array<Promise<void>> = [];
+  if (runs.some((run) => run.tracer.otel)) drains.push(otel.flushAll(SIGNAL_DRAIN_MS));
+  if (runs.some((run) => run.notify)) drains.push(drainNotifiers(SIGNAL_DRAIN_MS));
+  // Unconfigured (the default) exits SYNCHRONOUSLY, exactly as it did before
+  // otel/notify existed — no extra tick between the signal and the exit for
+  // the repos that never opted in to either.
+  if (drains.length === 0) {
+    process.exit(code);
+    return;
+  }
+  // Bounded and never-throwing: both drains swallow their own failures and
+  // resolve on their own deadline, so this always reaches process.exit().
+  void Promise.all(drains).then(
+    () => process.exit(code),
+    () => process.exit(code),
+  );
+}
+
 function finalizeWhenKilled(run: Run): void {
-  let draining = false;
-  const handler = (signal: NodeJS.Signals) => {
-    const code = 128 + (signal === "SIGINT" ? 2 : 15);
-    if (draining) process.exit(code);
-    draining = true;
-    run.tracer.sessionFinish(run.adw_id, false); // also closes process rows
-    // Unconfigured (the default) exits SYNCHRONOUSLY, exactly as it did before
-    // otel existed — no extra tick between the signal and the exit for the
-    // repos that never opted in.
-    if (!run.tracer.otel) process.exit(code);
-    // Bounded and never-throwing: flushAll() swallows its own failures and
-    // resolves on its own deadline, so this always reaches process.exit().
-    void otel.flushAll(SIGNAL_DRAIN_MS).then(
-      () => process.exit(code),
-      () => process.exit(code),
-    );
-  };
-  process.on("SIGTERM", handler);
-  process.on("SIGINT", handler);
+  ACTIVE.set(run.adw_id, run);
+  if (installed) return;
+  installed = true;
+  process.on("SIGTERM", handleSignal);
+  process.on("SIGINT", handleSignal);
+}
+
+/**
+ * The symmetric teardown for `finalizeWhenKilled()` above: drop `adwId` from
+ * `ACTIVE` (so a later signal can no longer reach it) and close its Tracer's
+ * sqlite handle. Call once a run's own dispatch has fully settled — success
+ * or thrown error alike; `chains/index.ts`'s `runChain()` finally is the one
+ * seam every dispatch path (one-shot CLI and `spf watch` alike) shares on
+ * the way out, exactly where `otel.releaseOtelExporter()` already lives for
+ * the identical reason (see otel.ts's RUN-SCOPED CLEANUP note / #26).
+ *
+ * Without this, `spf watch` held every finished run's `Run` (and its
+ * Tracer, its open sqlite handle, and its Notifier) strongly reachable from
+ * the signal listener for the rest of the daemon's life — the listener
+ * closes over the `run` a fresh `finalizeWhenKilled()` call captured, but
+ * since #26 only that one listener installs once now, and `ACTIVE` is the
+ * only thing keeping a finished run reachable from it.
+ *
+ * A one-shot invocation with no explicit `--adw-id` makes `adwId` here the
+ * caller's `ctx.adw_id` (`null`) rather than the id `session.ensure()`
+ * actually minted, so this is a harmless no-op for it — same caveat as
+ * `releaseOtelExporter`, and harmless for the same reason: that process
+ * exits right after anyway.
+ */
+export function finalize(adwId: string | null | undefined): void {
+  if (!adwId) return;
+  const run = ACTIVE.get(adwId);
+  if (!run) return;
+  ACTIVE.delete(adwId);
+  run.tracer.close();
+}
+
+/** Tests only: which adw_ids the process-wide signal handler currently considers active. */
+export function activeRunIdsForTest(): string[] {
+  return [...ACTIVE.keys()];
 }
 
 /**

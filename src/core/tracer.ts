@@ -136,6 +136,19 @@ export class Tracer {
     this.migrate();
   }
 
+  /**
+   * Close the sqlite handle. A one-shot CLI process never needs this — it
+   * exits right after its one Tracer anyway — but `spf watch`'s daemon loop
+   * builds a fresh Tracer (and a fresh `new Database(dbPath)`) per claimed
+   * issue, in-process, for the life of the daemon; without this, every
+   * issue's handle stayed open forever. Called from `session.ts`'s
+   * `finalize()`, once a run's own dispatch has fully settled — see its
+   * comment for why that timing is safe.
+   */
+  close(): void {
+    this.db.close();
+  }
+
   /** Additive column migrations, so a db from an older SPF still opens. */
   private migrate(): void {
     for (const [table, column, decl] of MIGRATIONS) {

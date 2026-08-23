@@ -153,6 +153,7 @@ Full mechanism: the main README's "`spf watch`" section. Field reference:
 | `base_branch` | string | Branch worktrees fork from and PRs target. Default `main`. |
 | `poll_ms` | int | Tick interval. Default `60000`. |
 | `concurrency` | int ≥1 | Max issues claimed and run at once, the build lane's own budget (independent of `refine.concurrency`). Default `2`. |
+| `chain_options` | map of string -> string | Options passed straight through to `chain` (and `refine.chain`) for every unattended dispatch — the same shape an interactive `spf <chain> --suite <name>` builds, e.g. `{suite: strict}` or `{agent: some-agent}`. Default `{}`. Only useful for a chain whose behavior actually reads the option (a step-derived chain's `--suite`; an imperative chain ignores an option it doesn't know about). |
 | `jira.base_url` / `jira.project_key` | string | Only consulted when `issue_provider: jira`. |
 | `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` — `spf watch` fails loudly at startup otherwise, since issue authoring (create + link a hierarchy) isn't implemented for Jira yet. |
 | `refine.chain` | string | Which registered chain runs per claimed spec. Default `refine`. |
@@ -163,6 +164,8 @@ watch:
   repo: owner/name
   label_prefix: spf
   chain: plan-build-test
+  chain_options:
+    suite: strict        # only if plan-build-test's chain declares a step-derived requiredSuites
   refine:
     enabled: true       # decompose spf:spec-ready specs into a feature/story tree
     chain: refine

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import * as v from "valibot";
-import { Notifier, resolveNotifier, DEFAULT_NOTIFY_ENV_KEY } from "../core/notify/notifier.js";
+import { Notifier, resolveNotifier, drainAll, DEFAULT_NOTIFY_ENV_KEY } from "../core/notify/notifier.js";
 import type { NotificationChannel, NotifyEvent } from "../core/notify/channel.js";
 import { SFConfigSchema, type SFConfig } from "../core/data_types.js";
 
@@ -46,6 +46,28 @@ class BlockedChannel implements NotificationChannel {
   private gate = new Promise<void>((resolve) => (this.release = resolve));
   async send(): Promise<void> {
     await this.gate;
+  }
+}
+
+/**
+ * A channel whose `send()` outlives any reasonable drain budget via a real
+ * (ref'd) timer — unlike `BlockedChannel`'s bare in-memory promise, this
+ * keeps a genuine libuv handle alive during the race, which is what a real
+ * hung webhook `fetch()` would too. `drain()`'s own deadline timer is
+ * deliberately unref'd (see `notifier.ts`), so it needs some other ref'd work
+ * in flight to fire on schedule instead of the process going idle first.
+ */
+class SlowChannel implements NotificationChannel {
+  label = "slow";
+  private timer: NodeJS.Timeout | null = null;
+  async send(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      this.timer = setTimeout(resolve, 10_000);
+    });
+  }
+  /** Release the real timer once a test is done racing against it. */
+  cancel(): void {
+    if (this.timer) clearTimeout(this.timer);
   }
 }
 
@@ -134,6 +156,58 @@ test("flush() actually awaits pending sends before returning", async () => {
   blocked.release();
   await flushPromise;
   assert.equal(flushed, true);
+});
+
+test("drain() resolves within its budget against a channel slower than the budget", async () => {
+  const slow = new SlowChannel();
+  const notifier = new Notifier([{ channel: slow, scope: "all" }], 20_000, false, () => {});
+  notifier.send(infoEvent());
+  const started = Date.now();
+  await notifier.drain(100);
+  assert.ok(Date.now() - started < 3_000, "a slow channel cannot stall the drain past its budget");
+  slow.cancel(); // release the real timer now that the assertion is done
+});
+
+test("drain() awaits a fast pending send instead of always burning the full budget", async () => {
+  const blocked = new BlockedChannel();
+  const notifier = new Notifier([{ channel: blocked, scope: "all" }], 5000, false, () => {});
+  notifier.send(infoEvent());
+  let drained = false;
+  const drainPromise = notifier.drain(5000).then(() => {
+    drained = true;
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(drained, false, "drain must not resolve before the pending send does");
+  blocked.release();
+  await drainPromise;
+  assert.equal(drained, true);
+});
+
+test("drain() never throws even when a channel rejects", async () => {
+  const rejecting = new RejectingChannel();
+  const notifier = new Notifier([{ channel: rejecting, scope: "all" }], 1000, false, () => {});
+  notifier.send(infoEvent());
+  await assert.doesNotReject(() => notifier.drain(200));
+});
+
+test("drainAll() drains every live Notifier under one shared budget and never throws", async () => {
+  // 127.0.0.1:1 is closed on every platform CI runs on — a connection
+  // refusal, which is the fast path; the budget covers the hang case. Same
+  // shape as otel.test.ts's drain() test, kept network-free (no server to
+  // spin up or tear down) for exactly that reason.
+  const envKey = "SPF_TEST_WEBHOOK_REFUSED";
+  process.env[envKey] = "http://127.0.0.1:1/hook";
+  try {
+    const cfg = baseConfig({ events: "all", channels: [{ kind: "webhook", webhook_url_env: envKey }] });
+    const notifier = resolveNotifier(cfg);
+    assert.notEqual(notifier, null);
+    notifier!.send(infoEvent());
+    const started = Date.now();
+    await assert.doesNotReject(() => drainAll(200));
+    assert.ok(Date.now() - started < 3_000, "an unreachable webhook host cannot stall drainAll past its budget");
+  } finally {
+    delete process.env[envKey];
+  }
 });
 
 test("resolveNotifier returns null when events is off", () => {

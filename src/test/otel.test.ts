@@ -31,17 +31,30 @@ import type { AddressInfo } from "node:net";
 import {
   OtelExporter,
   endpointLabel,
+  flushAll,
   inboundTraceparent,
   nanosFromIso,
   parseTraceparent,
   redact,
+  releaseOtelExporter,
+  resetLiveForTest,
+  resolveOtelExporter,
   resolveTracesUrl,
   spanIdFor,
   toolSpanName,
   traceIdFor,
 } from "../core/otel.js";
 import * as v from "valibot";
-import { AgentConfigSchema, GateReport, makeEventRecord, makePhaseParams, type EventRecord, type Phase } from "../core/data_types.js";
+import {
+  AgentConfigSchema,
+  GateReport,
+  makeEventRecord,
+  makePhaseParams,
+  SFConfigSchema,
+  type EventRecord,
+  type Phase,
+  type SFConfig,
+} from "../core/data_types.js";
 
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX16 = /^[0-9a-f]{16}$/;
@@ -97,6 +110,11 @@ async function receiver(): Promise<{ url: string; body: Promise<any>; close: () 
     body,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
+}
+
+/** A minimal SFConfig with `observability.otel` pointed at `endpoint` — enough for resolveOtelExporter, nothing else. */
+function configWithOtel(endpoint: string): SFConfig {
+  return v.parse(SFConfigSchema, { observability: { otel: { endpoint, service_name: "spf" } } }) as SFConfig;
 }
 
 // ── 1. ids ──────────────────────────────────────────────────────────────────
@@ -615,4 +633,102 @@ test("drain() with no queued spans and no config activity is a silent no-op", as
   await exp.drain(50);
   await exp.drain(50); // idempotent: the root span is emitted at most once
   assert.equal(exp.stats().queued, 0);
+});
+
+// ── 7. the LIVE registry (#26: spf watch's daemon loop must not accumulate
+//      one exporter per run forever) ─────────────────────────────────────────
+
+test("resolveOtelExporter is a no-op — and so is releasing/flushing it — when otel is unconfigured", async () => {
+  resetLiveForTest();
+  const cfg = v.parse(SFConfigSchema, {}) as SFConfig; // no observability.otel block at all
+  const exp = resolveOtelExporter(cfg, { adwId: "adw_unconfigured", chainName: "plan" });
+  assert.equal(exp, null);
+  await releaseOtelExporter("adw_unconfigured"); // nothing was ever registered under this id
+  await flushAll(); // nothing registered at all — must resolve, not hang or throw
+});
+
+test("releaseOtelExporter(null | undefined | an id nobody registered) is a silent no-op", async () => {
+  resetLiveForTest();
+  await releaseOtelExporter(null);
+  await releaseOtelExporter(undefined);
+  await releaseOtelExporter("adw_never_registered");
+});
+
+test("releaseOtelExporter drains the named exporter's queue before removing it", async () => {
+  resetLiveForTest();
+  const recv = await receiver();
+  try {
+    const cfg = configWithOtel(recv.url);
+    const exp = resolveOtelExporter(cfg, { adwId: "adw_release_drains", chainName: "plan-build-test" });
+    assert.ok(exp, "otel is configured — resolveOtelExporter must return an exporter");
+    exp!.recordPhase(phase());
+    assert.equal(exp!.stats().queued, 1, "the phase span is queued, not yet sent");
+
+    await releaseOtelExporter("adw_release_drains");
+
+    assert.equal(exp!.stats().queued, 0, "release() drained the queue before forgetting the exporter");
+    const sent = await recv.body;
+    assert.equal(sent.method, "POST");
+    const payload = JSON.parse(sent.raw);
+    // drain() emits the "incomplete" root span before flushing (this exporter
+    // never saw a sessionFinish), so the phase span rides in the same batch as
+    // that root span — two spans total, not one. Assert by name so the extra
+    // span reads as intended (drain()'s own contract), not as a loose count.
+    const names = payload.resourceSpans[0].scopeSpans[0].spans.map((s: any) => s.name);
+    assert.equal(names.length, 2);
+    assert.ok(names.includes("phase build"), "the queued phase span actually reached the collector");
+    assert.ok(
+      names.includes("spf run plan-build-test"),
+      "drain() also emits the incomplete root span, since this exporter never saw sessionFinish",
+    );
+  } finally {
+    await recv.close();
+  }
+});
+
+test("releaseOtelExporter removes the exporter from LIVE — a later flushAll() no longer reaches it", async () => {
+  resetLiveForTest();
+  const recv = await receiver();
+  try {
+    const cfg = configWithOtel(recv.url);
+    const exp = resolveOtelExporter(cfg, { adwId: "adw_release_unregisters", chainName: "plan" })!;
+    exp.recordPhase(phase());
+    await releaseOtelExporter("adw_release_unregisters"); // drains (this is the one POST recv.body below observes) + removes
+    await recv.body;
+
+    // Still the SAME exporter instance, still perfectly usable — releasing it
+    // only forgets it in the module-level registry (see otel.ts's
+    // RUN-SCOPED CLEANUP note); it does not close or disable it.
+    exp.recordPhase(phase({ phase_id: "adw_release_unregisters_02_test", seq: 2 }));
+    assert.equal(exp.stats().queued, 1, "a freshly re-queued span, unrelated to the one already drained");
+
+    await flushAll(); // global drain — must NOT find this exporter anymore
+    assert.equal(exp.stats().queued, 1, "flushAll() after release must not touch an exporter it no longer knows about");
+  } finally {
+    await recv.close();
+  }
+});
+
+test("flushAll() drains every exporter still registered, and only those", async () => {
+  resetLiveForTest();
+  const recvA = await receiver();
+  const recvB = await receiver();
+  try {
+    const expA = resolveOtelExporter(configWithOtel(recvA.url), { adwId: "adw_multi_a", chainName: "plan" })!;
+    const expB = resolveOtelExporter(configWithOtel(recvB.url), { adwId: "adw_multi_b", chainName: "plan" })!;
+    expA.recordPhase(phase());
+    expB.recordPhase(phase());
+
+    await releaseOtelExporter("adw_multi_a"); // simulates one `spf watch` issue finishing...
+    // ...while adw_multi_b's run is still in flight, exactly as concurrency > 1 leaves it.
+    await flushAll();
+
+    assert.equal(expA.stats().queued, 0);
+    assert.equal(expB.stats().queued, 0, "flushAll() still reaches every OTHER still-registered exporter");
+    await recvA.body;
+    await recvB.body;
+  } finally {
+    await recvA.close();
+    await recvB.close();
+  }
 });

@@ -178,6 +178,15 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
     observability: { ...(base.observability || {}), ...(override.observability || {}) },
     quality: { ...(base.quality || {}), ...(override.quality || {}) },
+    // `watch` is spread WHOLE — no per-sub-key enumeration inside it — so
+    // any WatchConfigSchema field, present or future (jira, refine,
+    // chain_options, ...), already passes through this line untouched.
+    // The silent-drop trap this function's own doc comment warns about is
+    // about the TOP-LEVEL keys named here, not watch's own fields; the
+    // actual boundary for one of those is WatchConfigSchema itself (an
+    // unknown key there is stripped at `v.parse`, same failure mode, just a
+    // different gate) — see `chain_options`'s merge-survival test in
+    // `data_types.test.ts` for the check that actually matters here.
     watch: { ...(base.watch || {}), ...(override.watch || {}) },
     // channels is a whole-array replace on override, same as quality.checks —
     // you don't want an override's channels appended to the built-in's.

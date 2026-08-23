@@ -59,6 +59,30 @@ export class Notifier {
   async flush(): Promise<void> {
     await Promise.all([...this.pending]);
   }
+
+  /**
+   * Bounded drain: race `flush()` against `budgetMs`, never throwing. Mirrors
+   * `otel.ts`'s `OtelExporter.drain()` discipline — for the signal handler in
+   * `session.ts`, which is racing a hard ^C deadline shorter than any single
+   * channel's own `AbortSignal.timeout(timeoutMs)`, so a webhook to an
+   * unreachable host cannot hold the process open past `budgetMs`.
+   */
+  async drain(budgetMs: number): Promise<void> {
+    let deadline: NodeJS.Timeout | null = null;
+    const budget = new Promise<void>((resolve) => {
+      deadline = setTimeout(resolve, budgetMs);
+      deadline.unref?.();
+    });
+    try {
+      await Promise.race([this.flush(), budget]);
+    } catch {
+      // unreachable in practice — every send() task is pre-caught into the log
+      // line above, so flush() never rejects — but a drain that can throw
+      // would break the shutdown path it exists to protect.
+    } finally {
+      if (deadline) clearTimeout(deadline);
+    }
+  }
 }
 
 function makeChannel(kind: string, url: string, name: string): NotificationChannel | null {
@@ -112,4 +136,15 @@ export function resolveNotifier(cfg: SFConfig, opts: { dryRun?: boolean; log?: (
 /** Await every Notifier this process has created — call once, from the CLI's shutdown path. */
 export async function flushAll(): Promise<void> {
   await Promise.all(LIVE.map((n) => n.flush()));
+}
+
+/**
+ * Bounded drain of every Notifier this process created, under one shared
+ * budget — the signal-handler twin of `flushAll()`. Called from
+ * `session.ts`'s SIGTERM/SIGINT handler, alongside `otel.flushAll()`, so a
+ * killed run's in-flight Slack/Teams/webhook sends get the same
+ * timeout-and-swallow chance the otel drain already had. Never throws.
+ */
+export async function drainAll(budgetMs: number): Promise<void> {
+  await Promise.all(LIVE.map((n) => n.drain(budgetMs)));
 }

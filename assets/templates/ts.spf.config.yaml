@@ -69,6 +69,12 @@ agents:
 #   label_prefix: spf
 #   chain: plan-build-test
 #   base_branch: main
+#   # Options threaded straight through to `chain` (and refine.chain below)
+#   # for every unattended dispatch — the same shape an interactive
+#   # `spf <chain> --suite <name>` builds. Only useful for a chain whose
+#   # behavior actually reads the option; empty/omitted by default.
+#   # chain_options:
+#   #   suite: strict
 #   # Optional second lane: decompose a spf:spec-ready product spec into a
 #   # feature/story-or-bug tree of real issues instead of building it
 #   # directly. Off by default; needs issue_provider: github (the default

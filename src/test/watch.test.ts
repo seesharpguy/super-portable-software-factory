@@ -144,6 +144,10 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     chain: "plan-build-test",
     baseBranch: "main",
     concurrency: 2,
+    // `{}` by default, like WatchConfigSchema's own default — a test that
+    // doesn't override this never sees a chainOptions field at all in what
+    // runChain/runRefine receive.
+    chainOptions: {},
     // Off by default, like WatchRefineConfigSchema itself — a test that
     // doesn't override these never touches the refine lane at all.
     refineEnabled: false,
@@ -815,6 +819,69 @@ test("truncateDigest: a digest over the cap is cut at exactly the codepoint boun
 
   const short = "short digest, well under the cap";
   assert.equal(truncateDigest(short), short, "text under the cap must pass through unchanged, with no ellipsis appended");
+});
+
+// ── watch.chain_options threading (fix for PR #20's stated KNOWN LIMITATION:
+// chain options like --suite never reached an unattended `spf watch` run) ──
+
+test("claimNewWork: threads deps.chainOptions through to runChain's opts", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("70", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let seenOptions: Record<string, string> | undefined;
+  const deps = makeDeps(provider, codeHost, {
+    chainOptions: { suite: "strict" },
+    runChain: async (opts) => {
+      seenOptions = opts.chainOptions;
+      return { accepted: true, adwId: opts.adwId, detail: "" };
+    },
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(seenOptions, { suite: "strict" }, "watch.chain_options must reach the chain dispatch, not be silently dropped");
+});
+
+test("claimNewWork: an empty (default) chainOptions still reaches runChain as {}, not undefined", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("71", "Add a /health endpoint");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let seenOptions: Record<string, string> | undefined;
+  const deps = makeDeps(provider, codeHost, {
+    runChain: async (opts) => {
+      seenOptions = opts.chainOptions;
+      return { accepted: true, adwId: opts.adwId, detail: "" };
+    },
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(seenOptions, {});
+});
+
+test("claimSpecs: threads deps.chainOptions through to runRefine's opts, same as the build lane", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("170", "A spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let seenOptions: Record<string, string> | undefined;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    chainOptions: { agent: "flue" },
+    runRefine: async (opts) => {
+      seenOptions = opts.chainOptions;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [] };
+    },
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(seenOptions, { agent: "flue" }, "watch.chain_options must reach the refine chain dispatch too");
 });
 
 test("tick: a per-stage error is caught and fires exactly one watch_error", async () => {
