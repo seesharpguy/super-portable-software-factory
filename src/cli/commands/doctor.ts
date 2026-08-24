@@ -21,7 +21,7 @@ import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
-import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites } from "../../chains/index.ts";
+import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
 import { isInteractive } from "../ask.ts";
 import { paint as paintPlain } from "../../core/console.ts";
@@ -59,6 +59,45 @@ interface Report {
  * a plain `✓` so a real negative finding (e.g. "unreachable", a `/v1`
  * double-path warning) can't be mistaken for a pass at a glance.
  */
+/**
+ * Cross-check ONE chain's own `requiredAgents`/`requiredSuites` (derived
+ * from what it actually does — `resolveRequiredAgents`/`resolveRequiredSuites`,
+ * same as `spf list`/a real dispatch would resolve) against what `cfg`
+ * actually has. Shared by the repo-chain loop below (every `.spf/chains/
+ * *.yaml` chain) and `watch.chain`/`watch.refine.chain` — the two chains
+ * `spf watch` will ACTUALLY dispatch, built-in or not. Extracted specifically
+ * because the repo-chain loop used to be the ONLY place this ran, and it
+ * skips every built-in chain by construction (`.filter((c) => c.source !==
+ * undefined)`) — so a `watch.chain` naming a built-in like `plan-build-test`
+ * never went through it at all: `spf doctor` could report clean while `spf
+ * watch`'s very first claimed issue failed at runtime on a missing
+ * `quality.suites` entry doctor never actually looked for.
+ */
+function checkChainRequirements(report: Report, label: string, chain: ChainDefinition, cfg: SFConfig): void {
+  const owners = resolveRequiredAgents(chain, {});
+  const missingOwners = owners.filter((o) => !cfg.agents.some((a) => a.name === o));
+  check(
+    report,
+    `${label} owners`,
+    missingOwners.length === 0,
+    missingOwners.length === 0 ? owners.join(", ") || "(none)" : `unknown agent(s): ${missingOwners.join(", ")} — not in cfg.agents`,
+  );
+
+  const suiteNames = resolveRequiredSuites(chain, {});
+  const missingSuites = suiteNames.filter((s) => !(s in cfg.quality.suites));
+  const missingChecks = missingSuites.length === 0 ? suiteNames.flatMap((s) => cfg.quality.suites[s].filter((n) => !cfg.quality.checks.some((c) => c.name === n))) : [];
+  check(
+    report,
+    `${label} suites`,
+    missingSuites.length === 0 && missingChecks.length === 0,
+    missingSuites.length > 0
+      ? `unknown suite(s): ${missingSuites.join(", ")} — not in cfg.quality.suites`
+      : missingChecks.length > 0
+        ? `suite(s) name unknown check(s): ${missingChecks.join(", ")}`
+        : suiteNames.join(", ") || "(none)",
+  );
+}
+
 function check(report: Report, name: string, ok: boolean, detail: string, severity?: "info" | "warn"): void {
   report.checks.push({ name, ok, detail, severity });
   if (!ok) report.ok = false;
@@ -547,28 +586,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     check(report, `repo chain ${problem.file}`, false, problem.message);
   }
   for (const chain of allChains().filter((c) => c.source !== undefined)) {
-    const owners = resolveRequiredAgents(chain, {});
-    const missingOwners = owners.filter((o) => !cfg.agents.some((a) => a.name === o));
-    check(
-      report,
-      `repo chain "${chain.name}" owners`,
-      missingOwners.length === 0,
-      missingOwners.length === 0 ? owners.join(", ") || "(none)" : `unknown agent(s): ${missingOwners.join(", ")} — not in cfg.agents`,
-    );
-
-    const suiteNames = resolveRequiredSuites(chain, {});
-    const missingSuites = suiteNames.filter((s) => !(s in cfg.quality.suites));
-    const missingChecks = missingSuites.length === 0 ? suiteNames.flatMap((s) => cfg.quality.suites[s].filter((n) => !cfg.quality.checks.some((c) => c.name === n))) : [];
-    check(
-      report,
-      `repo chain "${chain.name}" suites`,
-      missingSuites.length === 0 && missingChecks.length === 0,
-      missingSuites.length > 0
-        ? `unknown suite(s): ${missingSuites.join(", ")} — not in cfg.quality.suites`
-        : missingChecks.length > 0
-          ? `suite(s) name unknown check(s): ${missingChecks.join(", ")}`
-          : suiteNames.join(", ") || "(none)",
-    );
+    checkChainRequirements(report, `repo chain "${chain.name}"`, chain, cfg);
 
     // Informational: the derived sequence itself, same string `spf list`
     // shows — printed here so the chain's author can eyeball what they
@@ -664,6 +682,20 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       watchChain ? `${cfg.watch.chain}${watchChain.source ? ` (repo: ${repoChainLabel(watchChain.source)})` : ""}` : `"${cfg.watch.chain}" is not a registered chain`,
     );
 
+    // The "repo chain X suites/owners" loop above only covers chains with a
+    // `.source` (loaded from `.spf/chains/*.yaml`) — a BUILT-IN chain named
+    // by `watch.chain` (the common case: `plan-build-test`, etc.) never went
+    // through that check, and the "roster + suites validate" call earlier
+    // only validates suites already present in `cfg.quality.suites`, not
+    // whether `watch.chain` actually NEEDS one that's missing entirely. That
+    // gap is exactly how `spf doctor` can report clean while `spf watch`'s
+    // very first claimed issue fails at runtime with "quality.suites.\"test\"
+    // is not configured" — this closes it by checking the chain `spf watch`
+    // will ACTUALLY dispatch, the same way the repo-chain loop already does.
+    if (watchChain) {
+      checkChainRequirements(report, `watch.chain "${cfg.watch.chain}"`, watchChain, cfg);
+    }
+
     // Informational only, never a failure: a chain that skips review and/or
     // never commits is a legitimate choice (e.g. `scout`, `plan`) — this is
     // here so an unattended `spf watch` posture is a visible fact, not a
@@ -696,6 +728,9 @@ export async function doctorCommand(argv: string[]): Promise<number> {
         Boolean(refineChain),
         refineChain ? `${cfg.watch.refine.chain}${refineChain.source ? ` (repo: ${repoChainLabel(refineChain.source)})` : ""}` : `"${cfg.watch.refine.chain}" is not a registered chain`,
       );
+      if (refineChain) {
+        checkChainRequirements(report, `watch.refine.chain "${cfg.watch.refine.chain}"`, refineChain, cfg);
+      }
       check(
         report,
         "watch.refine issue authoring",
