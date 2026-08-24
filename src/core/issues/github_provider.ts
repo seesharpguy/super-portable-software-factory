@@ -46,7 +46,22 @@ const STATES: WatchState[] = [
   "continue-refinement",
   "spec-in-progress",
 ];
-const MARKER_RE = /<!--\s*spf-watch:\s*(\{.*?\})\s*-->/s;
+/**
+ * GREEDY capture, not lazy: `WatchMarker.feedback` nests its own object
+ * (`{rounds, asked_at}`), so a lazy `\{.*?\}` stops at the FIRST `}` it
+ * finds — which is `feedback`'s own closing brace, not the marker's outer
+ * one — capturing an unbalanced, unparseable fragment the instant a spec
+ * escalates even once. `JSON.parse` then throws, is silently caught, and
+ * `readMarker` returns `null` forever after that point: the round counter
+ * can never advance past 1, a fresh marker comment gets posted every tick
+ * instead of the existing one being edited in place, and — worst of all —
+ * `buildSpecPrompt` never receives a valid `asked_at`, so a human's answer
+ * is never recognized as one, just dumped into undifferentiated "earlier
+ * discussion." A greedy match backtracks from the END of the string to find
+ * the LAST `}` — the marker's own outer brace — which is exactly right
+ * here since nothing meaningful follows it but the closing `-->`.
+ */
+const MARKER_RE = /<!--\s*spf-watch:\s*(\{.*\})\s*-->/s;
 /** `listByLabel`'s pagination bound — see its own doc comment. */
 const MAX_LIST_PAGES = 5;
 

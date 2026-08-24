@@ -1,3 +1,5 @@
+import type { RunObserver } from "../core/console.ts";
+
 /**
  * What every chain's `main()` receives. The CLI (or, later, the chain
  * registry) resolves every path here — a chain never has its own opinion
@@ -57,4 +59,29 @@ export interface ChainContext {
    * edited by the time anyone reads the run back).
    */
   chain_source?: string;
+  /**
+   * A live TTY view's hook into this run's `Console` — see `RunObserver`'s
+   * doc comment (`core/console.ts`). Optional and omitted by every
+   * construction site except an interactive `cli/commands/run.ts`
+   * dispatch: `spf watch`'s per-issue runs, `spf fanout`'s per-attempt
+   * runs, the `refine` chain, and every test all continue to build a
+   * plain, unobserved `Console` exactly as before this field existed.
+   */
+  render_hooks?: {
+    sink?: (line: string) => void;
+    observer?: RunObserver | null;
+    /**
+     * The live dashboard's own handoff pair — call `pause()` before a
+     * chain shows its own competing prompt (today, only `simple_sdlc.ts`'s
+     * human sign-off gate) and `resume()` once it's done, symmetrically,
+     * in a `finally`. Ink refuses a second `render()` on the same stdout
+     * while a prior instance is still live, so this isn't optional
+     * politeness — skipping `pause()` before mounting another Ink surface
+     * (or even a plain `readline` prompt sharing the same stdin/stdout,
+     * given the dashboard's own live-updating timer keeps writing to it)
+     * corrupts both.
+     */
+    pause?: () => void | Promise<void>;
+    resume?: () => void;
+  };
 }

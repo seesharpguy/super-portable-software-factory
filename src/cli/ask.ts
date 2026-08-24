@@ -46,6 +46,20 @@ export function isInteractive(): boolean {
   return Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY) && !process.env["CI"];
 }
 
+/**
+ * Whether `cli/ui/ink_asker.tsx`'s Ink-backed `Asker` can run instead of this
+ * file's plain readline one. Ink hard-requires raw-mode stdin — confirmed by
+ * testing: rendering an Ink app against a non-raw-mode-capable stdin throws
+ * before anything is drawn. `isInteractive()` already implies raw mode is
+ * available in every real case (a TTY stdin always exposes `setRawMode`);
+ * the extra `typeof` check is cheap insurance against whatever exotic
+ * terminal doesn't, so a caller falls back to `createAsker()` instead of
+ * crashing.
+ */
+export function inkAvailable(): boolean {
+  return isInteractive() && typeof process.stdin.setRawMode === "function";
+}
+
 /** Thrown when the user interrupts (Ctrl-C) or stdin closes (EOF) mid-interview. `initCommand` catches this and exits 130, writing nothing. */
 export class InterviewAborted extends Error {
   constructor() {
@@ -187,7 +201,8 @@ export function createAsker(): Asker {
   };
 }
 
-function maskForPrompt(value: string): string {
+/** Exported for `cli/ui/ink_asker.tsx`'s secret prompt, which renders the same "keep current" line and must mask it identically. */
+export function maskForPrompt(value: string): string {
   if (value.length <= 4) return "•".repeat(value.length);
   return `${"•".repeat(Math.max(0, value.length - 4))}${value.slice(-4)}`;
 }

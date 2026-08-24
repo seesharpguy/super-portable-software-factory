@@ -1,5 +1,6 @@
 import path from "node:path";
 import { allChains, repoChainProblems } from "../../chains/index.ts";
+import { isInteractive } from "../ask.ts";
 
 /**
  * A repo-defined chain's `source` is an absolute path into `.spf/chains/` by
@@ -14,28 +15,45 @@ function repoChainLabel(source: string): string {
   return idx === -1 ? source : source.slice(idx);
 }
 
-export function listCommand(): number {
+export async function listCommand(): Promise<number> {
   // Built-ins first, then repo chains — same order `allChains()` guarantees,
   // so this listing and `findChain`'s resolution order never disagree about
   // which chain wins on a name collision.
   const chains = allChains();
   const width = Math.max(...chains.map((c) => c.name.length));
-  for (const chain of chains) {
+  const entries = chains.map((chain) => {
     const agents = typeof chain.requiredAgents === "function" ? "(--agent picks who)" : chain.requiredAgents.join(", ") || "(none)";
     const suites = typeof chain.requiredSuites === "function" ? chain.requiredSuites({}) : chain.requiredSuites;
     const suiteNote = typeof chain.requiredSuites === "function" ? " (--suite overrides)" : "";
-    console.log(`${chain.name.padEnd(width)}  ${chain.phases}`);
-    console.log(`${"".padEnd(width)}  ${chain.describe}`);
-    console.log(`${"".padEnd(width)}  agents: ${agents}${suites.length ? `  ·  quality suites: ${suites.join(", ")}${suiteNote}` : ""}`);
-    // `source` is undefined for every built-in — only a chain loaded from a
-    // `.spf/chains/*.yaml` file carries one (see chains/repo_chains.ts).
-    if (chain.source) {
-      console.log(`${"".padEnd(width)}  (repo: ${repoChainLabel(chain.source)})`);
+    return {
+      name: chain.name,
+      phases: chain.phases,
+      describe: chain.describe,
+      agentsLine: `agents: ${agents}${suites.length ? `  ·  quality suites: ${suites.join(", ")}${suiteNote}` : ""}`,
+      // `source` is undefined for every built-in — only a chain loaded from a
+      // `.spf/chains/*.yaml` file carries one (see chains/repo_chains.ts).
+      repoLabel: chain.source ? repoChainLabel(chain.source) : undefined,
+    };
+  });
+
+  const usageLines = [
+    `spf <name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>] [--suite <name>]   (spf run <name> ... works identically)`,
+    `spf watch polls a tracker and runs one of these chains per issue — spf doctor shows the current config.`,
+  ];
+
+  if (isInteractive()) {
+    const { renderChainList } = await import("../ui/reports.tsx");
+    await renderChainList(entries, usageLines);
+  } else {
+    for (const entry of entries) {
+      console.log(`${entry.name.padEnd(width)}  ${entry.phases}`);
+      console.log(`${"".padEnd(width)}  ${entry.describe}`);
+      console.log(`${"".padEnd(width)}  ${entry.agentsLine}`);
+      if (entry.repoLabel) console.log(`${"".padEnd(width)}  (repo: ${entry.repoLabel})`);
+      console.log();
     }
-    console.log();
+    for (const line of usageLines) console.log(line);
   }
-  console.log(`spf <name> "<prompt>" [--config <path>] [--adw-id <id>] [--cwd <dir>] [--suite <name>]   (spf run <name> ... works identically)`);
-  console.log(`spf watch polls a tracker and runs one of these chains per issue — spf doctor shows the current config.`);
 
   // Every malformed `.spf/chains/*.yaml` file (bad YAML, a schema/params
   // mismatch, a name naming a step factory that doesn't exist) becomes a

@@ -23,6 +23,29 @@ import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites } from "../../chains/index.ts";
 import type { SFConfig } from "../../core/data_types.ts";
+import { isInteractive } from "../ask.ts";
+import { paint as paintPlain } from "../../core/console.ts";
+
+/**
+ * A transient "checking X..." status line around a network probe — real
+ * work only starts inside `run()`; this doesn't touch the promise's timing.
+ * TTY-only: `\r` + erase-to-end-of-line only makes sense against a real
+ * terminal, and a non-TTY/CI log should show nothing extra, matching
+ * doctor's output exactly as it always has when piped. Not Ink-based on
+ * purpose — this is a plain transient ANSI line, not a component tree, and
+ * doctor's checks accumulate into one report printed at the very end
+ * regardless, so there's no persistent live region for a probe status to
+ * join.
+ */
+async function withProbeStatus<T>(label: string, run: () => Promise<T>): Promise<T> {
+  if (!isInteractive()) return run();
+  process.stdout.write(paintPlain("dim", `  checking ${label}...`));
+  try {
+    return await run();
+  } finally {
+    process.stdout.write("\r\x1b[2K");
+  }
+}
 
 interface Report {
   ok: boolean;
@@ -191,7 +214,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     check(report, "config parses", true, `${cfg.agents.length} agent(s), ${Object.keys(cfg.quality.suites).length} quality suite(s)`);
   } catch (error) {
     check(report, "config parses", false, (error as Error).message);
-    return finish(report, flags["json"]);
+    return await finish(report, flags["json"]);
   }
 
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
@@ -291,7 +314,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       const probeBase = doubledPath ? trimmed.replace(/\/v1$/, "") : trimmed;
       const claudeCodeAgent = cfg.agents.find((a) => a.coding_agent === "claude_code");
       const probeModel = claudeCodeAgent?.model || "claude-sonnet-5";
-      const result = await probeAnthropicMessages(probeBase, probeModel);
+      const result = await withProbeStatus("ANTHROPIC_BASE_URL reachability", () => probeAnthropicMessages(probeBase, probeModel));
       check(
         report,
         "ANTHROPIC_BASE_URL reachability",
@@ -333,7 +356,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     // latency either way — strictly cheaper for a pure reachability check,
     // and there's no live-server dependency in this choice: doctor's probe
     // itself tolerates either endpoint being down (see `probeGet`).
-    const result = await probeGet(`${ollamaBase}/models`);
+    const result = await withProbeStatus("OLLAMA_BASE_URL reachability", () => probeGet(`${ollamaBase}/models`));
     check(
       report,
       "OLLAMA_BASE_URL reachability",
@@ -433,7 +456,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     // chain+prompt is `spf estimate`'s job, not doctor's. `required` is the
     // WHOLE roster, matching the "roster + suites validate" call above —
     // every routed role doctor's job covers, not just what one chain needs.
-    const servedOllamaTags = flags["no-probe"] ? null : await probeServedOllamaTags(cfg);
+    const servedOllamaTags = flags["no-probe"] ? null : await withProbeStatus("served Ollama tags", () => probeServedOllamaTags(cfg));
     const resolution = resolveTiering({
       cfg,
       chainName: "",
@@ -709,7 +732,9 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       insecure ? "warn" : "info",
     );
     if (!flags["no-probe"]) {
-      const result = await probeOtel(url, cfg.observability.otel.headers);
+      // Captured into a local: TS narrowing from the outer `if (cfg.observability.otel)` doesn't survive into this closure.
+      const otelHeaders = cfg.observability.otel.headers;
+      const result = await withProbeStatus("observability.otel reachability", () => probeOtel(url, otelHeaders));
       check(
         report,
         "observability.otel reachability",
@@ -737,15 +762,28 @@ export async function doctorCommand(argv: string[]): Promise<number> {
   return finish(report, flags["json"]);
 }
 
-function finish(report: Report, json: boolean): number {
+async function finish(report: Report, json: boolean): Promise<number> {
   if (json) {
     console.log(JSON.stringify(report, null, 2));
+    return report.ok ? 0 : 1;
+  }
+  const footer = { ok: report.ok, message: report.ok ? "spf doctor: clean" : "spf doctor: problems found above" };
+  if (isInteractive()) {
+    const { renderChecklist } = await import("../ui/reports.tsx");
+    await renderChecklist(
+      report.checks.map((c) => ({
+        icon: c.severity === "warn" ? "warn" : c.severity === "info" ? "info" : c.ok ? "ok" : "fail",
+        name: c.name,
+        detail: c.detail,
+      })),
+      footer,
+    );
   } else {
     for (const c of report.checks) {
       const icon = c.severity === "warn" ? "⚠" : c.severity === "info" ? "ℹ" : c.ok ? "✓" : "✗";
       console.log(`${icon} ${c.name}: ${c.detail}`);
     }
-    console.log(report.ok ? "\nspf doctor: clean" : "\nspf doctor: problems found above");
+    console.log(`\n${footer.message}`);
   }
   return report.ok ? 0 : 1;
 }

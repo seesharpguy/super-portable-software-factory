@@ -40,6 +40,8 @@ import { findChain, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { newId, parseCli, resolvePrompt } from "../../core/utils.ts";
+import { isInteractive } from "../ask.ts";
+import type { FanoutDashboard } from "../ui/fanout_dashboard.tsx";
 
 /**
  * A ceiling on `--n`, not a recommendation. Each attempt is a full chain run
@@ -76,9 +78,32 @@ function formatGates(attempt: FanoutAttempt): string {
 /**
  * The result table. Fixed column widths over a `console.table`: every other
  * `spf` listing (`sessions`, `phases`) prints plain padded columns, and this
- * output is read in a terminal beside them.
+ * output is read in a terminal beside them. On a TTY, routes through the
+ * same `renderTable()` (`cli/ui/reports.tsx`) those two now use instead —
+ * `fanout_cli.test.ts` runs with no TTY, so it keeps exercising this exact
+ * plain-text path unchanged.
  */
-function printTable(attempts: FanoutAttempt[]): void {
+async function printTable(attempts: FanoutAttempt[]): Promise<void> {
+  const rows = attempts.map((a) => [
+    String(a.index),
+    a.adw_id,
+    a.branch,
+    a.status,
+    formatGates(a),
+    agents.formatUsd(a.cost),
+    a.status === "skipped" ? "-" : formatDuration(a.wall_ms),
+  ]);
+  if (isInteractive()) {
+    const { renderTable } = await import("../ui/reports.tsx");
+    await renderTable(
+      [["#", "adw_id", "branch", "status", "gates", "cost", "time"], ...rows],
+      { rowColor: (i) => (i > 0 && attempts[i - 1]!.status === "fail" ? "red" : undefined) },
+    );
+    for (const a of attempts) {
+      if (a.error) console.log(`      error: ${a.error}`);
+    }
+    return;
+  }
   const widths = {
     adw: Math.max(6, ...attempts.map((a) => a.adw_id.length)),
     branch: Math.max(6, ...attempts.map((a) => a.branch.length)),
@@ -387,10 +412,26 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
   // this reliably buys, in the case it can't prevent, is telling the
   // operator the one thing the trace can't: which base adw_id to hand to
   // `--clean` afterwards.
+  // Mounted only on a real TTY — a live results table that updates row by
+  // row as each attempt settles, instead of the plain-text path's one-shot
+  // table at the very end. `dashboard` (not just its presence) is read by
+  // `onSignal` below, best-effort-unmounted before `process.exit()`: Ink's
+  // usual cleanup (restoring cursor visibility) never gets a chance to run
+  // on an abrupt exit otherwise, and this command's own SIGINT handler —
+  // unlike `spf watch`'s two-stage drain — already exits immediately by
+  // design (see its comment), so there's no "wait for it to finish" point
+  // to hook a graceful teardown into instead.
+  let dashboard: FanoutDashboard | undefined;
+  if (isInteractive()) {
+    const { mountFanoutDashboard } = await import("../ui/fanout_dashboard.tsx");
+    dashboard = mountFanoutDashboard({ n, chainName: chain.name, baseBranch, baseAdwId });
+  }
+
   let interrupted = false;
   const onSignal = (signal: NodeJS.Signals): void => {
     if (interrupted) return;
     interrupted = true;
+    dashboard?.unmountNow(); // best-effort cursor-visibility restore — see FanoutDashboard.unmountNow's own comment for why this isn't the awaited close()
     console.error(
       `\n[spf] fanout: ${signal} received — attempts already past their last checkpoint run to completion. ` +
         `Once everything has settled, clean up anything left under this base id with:\n` +
@@ -416,11 +457,18 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
       runAttempt,
       readMetrics,
       firstSuccess: flags["first-success"],
-      log: (message) => console.log(`[spf] ${message}`),
+      log: (message) => (dashboard ? dashboard.log(message) : console.log(`[spf] ${message}`)),
+      onAttempt: dashboard?.onAttempt,
     });
+    await dashboard?.close();
 
-    console.log(`\nfanout ${chain.name} — ${n} attempt(s), base ${baseBranch}`);
-    printTable(result.attempts);
+    // A dashboard already printed the header and kept the table live and
+    // in scrollback throughout the run — printing it again here would just
+    // duplicate what's already there. Only the non-TTY path needs both.
+    if (!dashboard) {
+      console.log(`\nfanout ${chain.name} — ${n} attempt(s), base ${baseBranch}`);
+      await printTable(result.attempts);
+    }
 
     if (!result.winner) {
       console.error(`\nno winner: ${result.basis}`);

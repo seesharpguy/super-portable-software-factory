@@ -145,7 +145,7 @@ function makeStep(
 export async function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Promise<Run> {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
-  const run = session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name);
+  const run = session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name, ctx.render_hooks);
   // Provenance, once per run, before any phase opens: a repo-local chain
   // (.spf/chains/*.yaml) records the file it came from. `chain_name` alone
   // stops being enough to reconstruct a run the moment a target repo can

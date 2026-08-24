@@ -311,6 +311,12 @@ export async function main(ctx: ChainContext): Promise<number> {
     const canPrompt = isInteractive() && !ctx.unattended; // amendment: never infer this from TTY state alone
     identity = committerIdentity(run.repo_root);
     const asker = canPrompt ? createAsker() : null;
+    // A live run dashboard (cli/ui/run_dashboard.tsx) keeps writing to the
+    // same stdout/stdin on its own timer even though it never reads input
+    // itself — that alone is enough to corrupt this prompt's rendering if
+    // both are live at once. `pause()`/`resume()` are no-ops when no
+    // dashboard is mounted (every non-interactive dispatch, and any test).
+    if (canPrompt) await ctx.render_hooks?.pause?.();
     try {
       const outcome = await run.phase(
         makePhaseParams({
@@ -335,6 +341,7 @@ export async function main(ctx: ChainContext): Promise<number> {
       recordedYes = outcome.recordedYes;
     } finally {
       asker?.close();
+      if (canPrompt) ctx.render_hooks?.resume?.();
     }
   }
 

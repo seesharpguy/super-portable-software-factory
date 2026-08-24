@@ -193,3 +193,64 @@ test("validateIssueTypes: a custom mapping is checked against its own configured
     restore();
   }
 });
+
+// ── readMarker/writeMarker: regression for MARKER_RE's non-greedy capture ──
+//
+// `WatchMarker.feedback` nests its own object ({rounds, asked_at}). A lazy
+// `\{.*?\}` stops at feedback's OWN closing brace instead of the marker's
+// outer one, capturing unbalanced JSON the instant a spec escalates even
+// once — JSON.parse then throws, is silently caught, and readMarker returns
+// null forever after that point. This is exactly the bug that produced a
+// real production loop: the round counter frozen at 1, a fresh marker
+// comment posted every tick instead of the existing one edited in place,
+// and a human's answer never recognized as an answer at all.
+
+function adfMarker(text: string) {
+  return { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text }] }] };
+}
+
+test("readMarker: correctly parses a marker whose JSON contains a nested feedback object", async () => {
+  const marker = { worktree: "/x", branch: "spf-refine/BT-1", attempt: 0, feedback: { rounds: 2, asked_at: "2026-01-01T00:00:00.000Z" } };
+  const { restore } = mockFetch([
+    {
+      body: {
+        comments: [{ id: "1", body: adfMarker(`[spf-watch-marker] ${JSON.stringify(marker)}`), author: { displayName: "spf" }, created: "2026-01-01T00:00:00.000Z" }],
+      },
+    },
+  ]);
+  try {
+    const provider = makeProvider();
+    const read = await provider.readMarker({ id: "BT-1", title: "spec", body: "", labels: [] });
+    assert.deepEqual(read, marker);
+  } finally {
+    restore();
+  }
+});
+
+test("writeMarker: finds and edits the existing marker in place (PUT), even when its current content already has a nested feedback object", async () => {
+  const existingMarker = { worktree: "/x", branch: "b", attempt: 0, feedback: { rounds: 1, asked_at: "2026-01-01T00:00:00.000Z" } };
+  const { calls, restore } = mockFetch([
+    {
+      body: {
+        comments: [
+          { id: "999", body: adfMarker(`[spf-watch-marker] ${JSON.stringify(existingMarker)}`), author: { displayName: "spf" }, created: "2026-01-01T00:00:00.000Z" },
+        ],
+      },
+    },
+    {}, // the PUT itself — 204 No Content
+  ]);
+  try {
+    const provider = makeProvider();
+    await provider.writeMarker(
+      { id: "BT-1", title: "spec", body: "", labels: [] },
+      { ...existingMarker, feedback: { rounds: 2, asked_at: "2026-01-02T00:00:00.000Z" } },
+    );
+
+    assert.equal(calls.length, 2, "found the existing marker (GET), then edited it — never fell through to POSTing a new one");
+    assert.equal(calls[0]!.method, "GET");
+    assert.equal(calls[1]!.method, "PUT");
+    assert.match(calls[1]!.url, /\/comment\/999$/);
+  } finally {
+    restore();
+  }
+});

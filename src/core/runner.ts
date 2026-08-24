@@ -13,7 +13,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as agents from "./agents.ts";
 import { makeGit, type GitHandle } from "./git_helper.ts";
-import { Console } from "./console.ts";
+import { Console, type RunObserver } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import { makeEventRecord, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
 import type { TierResolution } from "./tiering.ts";
@@ -73,6 +73,10 @@ export interface RunInit {
   chainName?: string;
   /** `null`/omitted when notifications are off (the default) or no channel resolved. */
   notifier?: Notifier | null;
+  /** Where a printed line goes — see `Console`'s own constructor doc. Omitted everywhere except an interactive `cli/commands/run.ts` dispatch. */
+  sink?: (line: string) => void;
+  /** See `RunObserver`'s doc comment (`core/console.ts`). `null`/omitted outside an interactive dispatch. */
+  observer?: RunObserver | null;
 }
 
 export class Run {
@@ -111,7 +115,7 @@ export class Run {
     this.adw_id = init.adwId;
     this.tracer = init.tracer;
     this.notify = init.notifier ?? null;
-    this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw");
+    this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw", init.sink, init.observer);
     this.engineer = init.engineer;
     this.seq = init.tracer.maxPhaseSeq(init.adwId);
     this.repo_root = init.repoRoot;
@@ -135,6 +139,7 @@ export class Run {
     this.tokens += tokens;
     this.cost += cost;
     this.tracer.sessionAddUsage(this.adw_id, tokens, cost);
+    this.console.notifyUsage(this.tokens, this.cost);
   }
 
   // ── the phase primitive ─────────────────────────────────────────────────

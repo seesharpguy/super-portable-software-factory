@@ -1,7 +1,8 @@
 import { parseCli } from "../../core/utils.ts";
 import { openTrace } from "./trace.ts";
+import { isInteractive } from "../ask.ts";
 
-export function phasesCommand(argv: string[]): number {
+export async function phasesCommand(argv: string[]): Promise<number> {
   const { positionals, options, flags } = parseCli(argv, ["cwd", "config"], ["json"]);
   if (positionals.length < 1) {
     console.error("usage: spf phases <adw_id> [--cwd <dir>] [--config <path>] [--json]");
@@ -19,9 +20,21 @@ export function phasesCommand(argv: string[]): number {
     console.log(`no phases recorded for ${adwId}`);
     return 1;
   }
-  for (const p of rows) {
-    const marker = p.status === "success" ? "✓" : p.status === "fail" ? "✗" : "…";
-    console.log(`${String(p.seq).padStart(2, "0")} ${marker} ${(p.name ?? "").padEnd(20)} ${(p.kind ?? "").padEnd(9)} ${(p.owner ?? "").padEnd(12)} ${p.error ?? ""}`);
+  const table = rows.map((p) => [
+    String(p.seq).padStart(2, "0"),
+    p.status === "success" ? "✓" : p.status === "fail" ? "✗" : "…",
+    p.name ?? "",
+    p.kind ?? "",
+    p.owner ?? "",
+    p.error ?? "",
+  ]);
+  if (isInteractive()) {
+    const { renderTable } = await import("../ui/reports.tsx");
+    await renderTable(table, { rowColor: (i) => (rows[i]!.status === "fail" ? "red" : undefined) });
+  } else {
+    for (const [seq, marker, name, kind, owner, error] of table) {
+      console.log(`${seq} ${marker} ${name.padEnd(20)} ${kind.padEnd(9)} ${owner.padEnd(12)} ${error}`);
+    }
   }
   return 0;
 }

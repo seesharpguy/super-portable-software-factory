@@ -74,7 +74,19 @@ const STATES: WatchState[] = [
   "continue-refinement",
   "spec-in-progress",
 ];
-const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*?\})/s;
+/**
+ * GREEDY capture, not lazy — same fix and same reasoning as
+ * `github_provider.ts`'s own `MARKER_RE`: `WatchMarker.feedback` nests its
+ * own object, so a lazy `\{.*?\}` stops at `feedback`'s own closing brace
+ * instead of the marker's outer one, producing unparseable JSON the moment
+ * a spec escalates even once — `readMarker` then returns `null` forever,
+ * `writeMarker` can never find the existing marker to edit in place (a new
+ * one gets posted every tick instead), and `buildSpecPrompt` never sees a
+ * valid `asked_at`, so a human's answer never gets flagged as one. Greedy
+ * backtracks from the end of the comment body to the true last `}` — safe
+ * here because nothing follows the JSON in this format at all.
+ */
+const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*\})/s;
 
 interface JiraIssue {
   id: string;

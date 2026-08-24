@@ -156,7 +156,7 @@ export async function main(): Promise<void> {
         process.exitCode = await estimateCommand(rest);
         return;
       case "list":
-        process.exitCode = listCommand();
+        process.exitCode = await listCommand();
         return;
       case "init":
         process.exitCode = await initCommand(rest);
@@ -182,10 +182,10 @@ export async function main(): Promise<void> {
         return;
       }
       case "sessions":
-        process.exitCode = sessionsCommand(rest);
+        process.exitCode = await sessionsCommand(rest);
         return;
       case "phases":
-        process.exitCode = phasesCommand(rest);
+        process.exitCode = await phasesCommand(rest);
         return;
       case "events":
         process.exitCode = await eventsCommand(rest);
