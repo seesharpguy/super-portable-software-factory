@@ -39,6 +39,14 @@
  * for this provider, and `watch.refine.enabled: true` with
  * `issue_provider: jira` fails loudly at startup rather than silently
  * running a refine lane that can never publish anything.
+ *
+ * `getIssue()` IS implemented (`claimNewWork`'s frontier check in `watch.ts`
+ * needs it on every tracker), but `listChildren()` is not — that lives only
+ * on `IssueAuthoringProvider`, which this class doesn't implement — so
+ * container roll-up (`rollUp` in `watch.ts`) is GitHub-only, a logged no-op
+ * here rather than a startup failure: the build lane still functions
+ * without it, unlike refine, which cannot function without authoring at
+ * all.
  */
 import type { EnsureLabelsResult, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
@@ -53,6 +61,7 @@ const STATES: WatchState[] = [
   "refined",
   "needs-feedback",
   "continue-refinement",
+  "spec-in-progress",
 ];
 const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*?\})/s;
 
@@ -173,6 +182,28 @@ export class JiraProvider implements IssueProvider {
    */
   async listInState(state: WatchState): Promise<Issue[]> {
     return this.searchByLabel(this.label(state));
+  }
+
+  /**
+   * `null` on a real 404 (deleted, or a key that never existed) — any other
+   * non-2xx still throws, same as `jira()`. What `claimNewWork`'s frontier
+   * check (`watch.ts`) uses to look up a `blocked_by` id's current labels;
+   * unlike `github_provider.ts`'s `listByLabel`, this file has no
+   * `spf-refine:` marker to read a Jira issue's OWN parent/blockers back
+   * from (Jira has no `IssueAuthoringProvider` yet — see this file's module
+   * comment), so on Jira the frontier check can only ever see what
+   * `blocked_by` a caller already has in hand, never discover it itself.
+   */
+  async getIssue(id: string): Promise<Issue | null> {
+    const response = await fetch(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels`, {
+      headers: { Authorization: this.authHeader(), Accept: "application/json" },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Jira GET /rest/api/3/issue/${id} -> ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    return this.toIssue((await response.json()) as JiraIssue);
   }
 
   async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {

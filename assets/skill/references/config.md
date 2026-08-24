@@ -180,23 +180,56 @@ additionally gets `<prefix>:refined`, so a human can review and promote it to
 `<prefix>:ready` when it's worth building — the refine lane never
 auto-promotes anything.
 
+A third label vocabulary — `<prefix>:priority:p0|p1|p2|p3` — is what
+`claimNewWork` actually schedules `<prefix>:ready` issues by: priority first,
+then sibling affinity (a leaf whose parent already has a sibling in flight
+goes first), then creation order. The refiner proposes a priority per node
+(clamped to the spec's own priority, when the spec issue has one, as a
+ceiling — never a floor); a human can relabel before promoting, which is the
+entire override mechanism. Independently, a `<prefix>:ready` leaf whose
+`blocked_by` isn't fully `<prefix>:done` is skipped until it is — the
+frontier check. This label is separate from any GitHub Projects v2
+"Priority" field a repo's board might have; `spf watch` never touches
+Projects v2, so the two are unreconciled if you use both.
+
 The `refine` chain grounds its decomposition with a `scout` phase before the
 refiner runs, so `scout` is a required agent for it — a roster that pruned
 it fails `spf watch` startup by name.
 
 The refine lane's own state machine has an extra loop beyond
-`spec-ready → refining → done`/`blocked`: when the refiner raises material
-ambiguity instead of a tree (see `assets/prompts/refiner/system.md`'s "Ask,
-don't decide"), the spec moves to `<prefix>:needs-feedback` with a comment
-naming its questions, instead of publishing anything. A human answers in the
-issue's comments and adds `<prefix>:continue-refinement`; `spf watch` claims
-that label back into `refining` and resumes the **same** `adw_id` — the
-comment thread (split into "answers to your open questions" and "earlier
-discussion") is folded into the resumed prompt, and the refiner's own
-coding-agent session continues rather than starting cold. This can loop any
-number of rounds. `spf watch init` must be re-run after upgrading to this
-version to seed the two new labels. Once a spec is fully published it's also
-closed on the tracker (GitHub only, best-effort), not just labeled `done`.
+`spec-ready → refining → spec-in-progress → done`/`blocked`: when the
+refiner raises material ambiguity instead of a tree (see
+`assets/prompts/refiner/system.md`'s "Ask, don't decide"), the spec moves to
+`<prefix>:needs-feedback` with a comment naming its questions, instead of
+publishing anything. A human answers in the issue's comments and adds
+`<prefix>:continue-refinement`; `spf watch` claims that label back into
+`refining` and resumes the **same** `adw_id` — the comment thread (split
+into "answers to your open questions" and "earlier discussion") is folded
+into the resumed prompt, and the refiner's own coding-agent session
+continues rather than starting cold. This can loop any number of rounds.
+
+Publishing a tree does NOT mean the spec is done: `<prefix>:spec-in-progress`
+is where a spec lands right after publish, and it stays there — with a
+summary comment listing every issue created — until **every one of those
+issues** is itself `<prefix>:done` (`finishTrackedSpecs`, polled every tick,
+reads `WatchMarker.refined` back to check). Only then does it move to
+`<prefix>:done`, get a closing comment, and close on the tracker (GitHub
+only, best-effort) — firing `spec_done`, distinct from the earlier
+`spec_refined`. This exists so a spec's tracker status means what a product
+manager expects it to mean: "done" is the work being finished, not merely
+having been decomposed. `spf watch init` must be re-run after upgrading to
+this version to seed the new labels.
+
+Container roll-up mirrors that same "close, don't just label" behavior for a
+generated feature/epic: once every child under it carries `<prefix>:done`
+(checked reactively, each time a leaf's PR merges), the container gets a
+summary comment, transitions to `<prefix>:done`, and closes — then the check
+repeats on ITS OWN parent, so an epic rolls up once its last feature does. A
+container with one unfinished child (including a leaf still sitting at
+`<prefix>:refined`, never promoted) is left alone; nothing forces it. This
+also needs GitHub's native sub-issue read-back, so it's GitHub-only — a
+logged no-op on Jira, not a startup failure, since the build lane still works
+without it.
 
 ### `notifications`
 

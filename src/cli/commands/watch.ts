@@ -16,7 +16,7 @@ import { isRepoAt, makeGit } from "../../core/git_helper.ts";
 import { GitHubProvider } from "../../core/issues/github_provider.ts";
 import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
-import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
+import type { CodeHostProvider, IssueAuthoringProvider, IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain, resolveRequiredAgents, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
@@ -438,6 +438,19 @@ export async function watchCommand(argv: string[]): Promise<number> {
     return { accepted: true, adwId: opts.adwId, detail: "", created, questions };
   };
 
+  // `IssueAuthoringProvider`'s read-back half — GitHub-only today (see
+  // `provider.ts`'s doc comment on `listChildren`), so `null` on Jira makes
+  // `rollUp` a logged no-op there rather than a startup failure the way
+  // `watch.refine.enabled` on a non-GitHub tracker is above: the build
+  // lane functions fine without container roll-up, unlike refine, which
+  // cannot function without authoring at all. `instanceof` rather than a
+  // second `resolveAuthoringProvider()` call: that helper's own config
+  // validation (repo, GITHUB_TOKEN) already ran to produce `provider`
+  // itself when `issue_provider` is "github" — GitHubProvider implements
+  // `IssueProvider`, `CodeHostProvider`, AND `IssueAuthoringProvider` in one
+  // class, since GitHub natively is all three at once.
+  const authoringProvider: IssueAuthoringProvider | null = provider instanceof GitHubProvider ? provider : null;
+
   const deps: WatchDeps = {
     provider,
     codeHost,
@@ -456,6 +469,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     linkDataDir,
     dryRun: Boolean(flags["dry-run"]),
     runChain,
+    listChildren: authoringProvider ? (parent) => authoringProvider.listChildren(parent) : undefined,
     log: (message) => console.log(message),
     notify: (event) => notifier?.send(event),
   };

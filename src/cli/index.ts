@@ -50,7 +50,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf abort <adw_id>                        signal a run's process to stop
   spf version                               print the installed version
 
-Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>] [--issue <id>]
+Chain options: [--config <path>] [--adw-id <id>] [--cwd <dir>] [--agent <name>] [--base <ref>] [--issue <id>] [--priority p0|p1|p2|p3]
 Run budget: set defaults.max_run_cost (USD) and/or defaults.max_run_tokens in spf.config.yaml to stop the NEXT agent call once a run has already spent this much — checked before each call, never after, so a single call is never capped and a one-agent-dispatch chain (scout/prompt/build) can never trip it; absent (the default) = unbounded.
 Run \`spf list\` to see every chain and what it needs.`;
 

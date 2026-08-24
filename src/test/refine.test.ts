@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { publish, resolveAuthoringProvider } from "../core/refine.js";
+import { parseRefineMarker, publish, resolveAuthoringProvider } from "../core/refine.js";
 import { refinementWellFormed } from "../core/gates.js";
 import type { Issue, IssueAuthoringProvider } from "../core/issues/provider.js";
 import type { RefinedIssue, RefineQuestion, SFConfig } from "../core/data_types.js";
@@ -29,16 +29,24 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
 class FakeTracker implements IssueAuthoringProvider {
   created: Array<{ title: string; body: string; labels: string[] }> = [];
   links: Array<{ parent: string; child: string }> = [];
+  private byId = new Map<string, Issue>();
   nextId = 1;
 
   async createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue> {
     this.created.push(input);
     const id = String(this.nextId++);
-    return { id, internal_id: `db-${id}`, title: input.title, body: input.body, labels: input.labels };
+    const issue: Issue = { id, internal_id: `db-${id}`, title: input.title, body: input.body, labels: input.labels };
+    this.byId.set(id, issue);
+    return issue;
   }
 
   async linkChild(parent: Issue, child: Issue): Promise<void> {
     this.links.push({ parent: parent.id, child: child.id });
+  }
+
+  /** Not exercised by this file's own tests (those live in watch.test.ts's roll-up coverage) — kept correct anyway since a fake that half-implements its interface is worse than one that doesn't compile. */
+  async listChildren(parent: Issue): Promise<Issue[]> {
+    return this.links.filter((l) => l.parent === parent.id).map((l) => this.byId.get(l.child)!);
   }
 }
 
@@ -87,7 +95,7 @@ test("resolveAuthoringProvider: issue_repo overrides repo — the github-issues-
 });
 
 function node(overrides: Partial<RefinedIssue> & Pick<RefinedIssue, "key" | "kind" | "title">): RefinedIssue {
-  return { body: "", parent: "", blocked_by: [], ...overrides };
+  return { body: "", parent: "", blocked_by: [], priority: "p2", ...overrides };
 }
 
 // ── publish() ────────────────────────────────────────────────────────────
@@ -109,7 +117,7 @@ test("publish: creates a container before its children, and links them via linkC
   ]);
 });
 
-test("publish: labels a leaf with its type AND spf:refined; a container gets only its type label", async () => {
+test("publish: labels a leaf with its type, priority, AND spf:refined; a container gets its type and priority labels only", async () => {
   const tracker = new FakeTracker();
   const issues = [node({ key: "F1", kind: "feature", title: "A feature" }), node({ key: "S1", kind: "story", title: "A leaf", parent: "F1" })];
 
@@ -117,8 +125,73 @@ test("publish: labels a leaf with its type AND spf:refined; a container gets onl
 
   const feature = tracker.created.find((c) => c.title === "A feature")!;
   const leaf = tracker.created.find((c) => c.title === "A leaf")!;
-  assert.deepEqual(feature.labels, ["spf:type:feature"]);
-  assert.deepEqual(leaf.labels, ["spf:type:story", "spf:refined"]);
+  assert.deepEqual(feature.labels, ["spf:type:feature", "spf:priority:p2"]);
+  assert.deepEqual(leaf.labels, ["spf:type:story", "spf:priority:p2", "spf:refined"]);
+});
+
+// ── priority: labeling, the hidden marker, and the spec ceiling ─────────
+
+test("publish: a non-default priority is labeled and carried into the hidden marker", async () => {
+  const tracker = new FakeTracker();
+  const created = await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf", priority: "p0" })], { labelPrefix: "spf" });
+
+  const leaf = tracker.created.find((c) => c.title === "A leaf")!;
+  assert.ok(leaf.labels.includes("spf:priority:p0"));
+  assert.deepEqual(parseRefineMarker(created[0]!.issue.body), { parent: null, blocked_by: [], priority: "p0" });
+});
+
+test("publish: the hidden spf-refine marker round-trips parent and blocked_by as real issue ids", async () => {
+  const tracker = new FakeTracker();
+  const issues = [
+    node({ key: "F1", kind: "feature", title: "A feature" }),
+    node({ key: "S1", kind: "story", title: "First", parent: "F1" }),
+    node({ key: "S2", kind: "story", title: "Second", parent: "F1", blocked_by: ["S1"] }),
+  ];
+
+  const created = await publish(tracker, issues, { labelPrefix: "spf" });
+  const f1Id = created.find((c) => c.key === "F1")!.issue.id;
+  const s1Id = created.find((c) => c.key === "S1")!.issue.id;
+  const s2 = created.find((c) => c.key === "S2")!;
+
+  assert.deepEqual(parseRefineMarker(s2.issue.body), { parent: f1Id, blocked_by: [s1Id], priority: "p2" });
+});
+
+test("publish: with no marker at all, parseRefineMarker degrades to no parent, no blockers, p2", () => {
+  assert.deepEqual(parseRefineMarker("just a plain issue body, never created by the refine lane"), { parent: null, blocked_by: [], priority: "p2" });
+});
+
+test("publish: a malformed marker degrades the same way, rather than throwing", () => {
+  assert.deepEqual(parseRefineMarker("<!-- spf-refine: {not valid json -->"), { parent: null, blocked_by: [], priority: "p2" });
+});
+
+test("publish: clamps a node that outranks the spec's priority ceiling", async () => {
+  const tracker = new FakeTracker();
+  const created = await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf", priority: "p0" })], {
+    labelPrefix: "spf",
+    priorityCeiling: "p2",
+  });
+
+  const leaf = tracker.created.find((c) => c.title === "A leaf")!;
+  assert.ok(leaf.labels.includes("spf:priority:p2"), "clamped down to the ceiling");
+  assert.deepEqual(parseRefineMarker(created[0]!.issue.body).priority, "p2");
+});
+
+test("publish: a node already at or below the ceiling is left alone", async () => {
+  const tracker = new FakeTracker();
+  const created = await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf", priority: "p3" })], {
+    labelPrefix: "spf",
+    priorityCeiling: "p2",
+  });
+
+  const leaf = tracker.created.find((c) => c.title === "A leaf")!;
+  assert.ok(leaf.labels.includes("spf:priority:p3"), "p3 does not outrank a p2 ceiling, so it is not raised");
+  assert.deepEqual(parseRefineMarker(created[0]!.issue.body).priority, "p3");
+});
+
+test("publish: no ceiling given is a no-op — every node keeps its own priority", async () => {
+  const tracker = new FakeTracker();
+  const created = await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf", priority: "p0" })], { labelPrefix: "spf" });
+  assert.deepEqual(parseRefineMarker(created[0]!.issue.body).priority, "p0");
 });
 
 test("publish: creates a blocker before what it blocks, and renders a real #n reference in the body", async () => {
@@ -283,4 +356,40 @@ test("refinementWellFormed: blank question text fails", () => {
   const report = refinementWellFormed(envelopeWithQuestions([question({ id: "Q1", question: "   " })]), { repo_root: "/repo" });
   assert.equal(report.passed, false);
   assert.ok(report.violations.some((v) => v.includes("question text is blank")));
+});
+
+// ── refinementWellFormed: priority monotonicity ──────────────────────────
+
+test("refinementWellFormed: a p0 child under a p3 parent fails — a child may never outrank its parent", () => {
+  const report = refinementWellFormed(
+    envelope([
+      node({ key: "F1", kind: "feature", title: "Someday", priority: "p3" }),
+      node({ key: "S1", kind: "story", title: "Urgent leaf", parent: "F1", priority: "p0" }),
+    ]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, false);
+  assert.ok(report.violations.some((v) => v.includes("S1.priority")));
+});
+
+test("refinementWellFormed: a child at the same priority as its parent passes", () => {
+  const report = refinementWellFormed(
+    envelope([
+      node({ key: "F1", kind: "feature", title: "A feature", priority: "p1" }),
+      node({ key: "S1", kind: "story", title: "A leaf", parent: "F1", priority: "p1" }),
+    ]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, true);
+});
+
+test("refinementWellFormed: a child LESS urgent than its parent passes — only outranking is a violation", () => {
+  const report = refinementWellFormed(
+    envelope([
+      node({ key: "F1", kind: "feature", title: "A feature", priority: "p0" }),
+      node({ key: "S1", kind: "story", title: "A leaf", parent: "F1", priority: "p3" }),
+    ]),
+    { repo_root: "/repo" },
+  );
+  assert.equal(report.passed, true);
 });

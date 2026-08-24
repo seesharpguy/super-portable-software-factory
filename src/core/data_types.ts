@@ -174,6 +174,26 @@ export type DocumentOutputT = v.InferOutput<typeof DocumentOutput.schema>;
  * this list before publish ever runs (unique keys, resolvable references,
  * no cycles, container/leaf kind agreement, at least one leaf).
  */
+/**
+ * `p0` (drop everything) .. `p3` (someday) — see `assets/prompts/refiner/system.md`'s
+ * `## Priority` section for what each rung means. Two rules the schema alone
+ * can't enforce, checked instead by `gates.refinementWellFormed`
+ * (monotonicity: no node outranks its `parent`) and `core/refine.ts`'s
+ * `publish()` (the spec's own priority, when known, is a ceiling clamped onto
+ * every node): see both files' doc comments.
+ */
+export const RefinedPrioritySchema = v.picklist(["p0", "p1", "p2", "p3"]);
+export type RefinedPriority = v.InferOutput<typeof RefinedPrioritySchema>;
+
+/** Lower rank = more urgent. The one place both `gates.refinementWellFormed` (monotonicity) and `core/refine.ts`'s `publish()` (the spec-priority ceiling) get their ordering from — see `RefinedPrioritySchema`'s doc comment. */
+export const PRIORITY_RANK: Record<RefinedPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
+
+/** `priority`, pulled down to `ceiling` if it outranks it — never raised. `ceiling` nullish (a bare `spf refine` with nothing to inherit from) is a no-op. */
+export function clampPriority(priority: RefinedPriority, ceiling: RefinedPriority | null | undefined): RefinedPriority {
+  if (!ceiling) return priority;
+  return PRIORITY_RANK[priority] < PRIORITY_RANK[ceiling] ? ceiling : priority;
+}
+
 export const RefinedIssueSchema = v.object({
   key: v.string(),
   kind: v.picklist(["epic", "feature", "story", "bug", "task"]),
@@ -181,6 +201,7 @@ export const RefinedIssueSchema = v.object({
   body: v.string(), // "## What to build" / "## Acceptance criteria" — see assets/prompts/refiner/user.md
   parent: v.optional(v.string(), ""), // another node's `key`; "" = top level
   blocked_by: v.optional(v.array(v.string()), () => []), // other nodes' `key`s that must land first
+  priority: v.optional(RefinedPrioritySchema, "p2"), // what spf watch's build lane schedules by — see RefinedPrioritySchema
 });
 export type RefinedIssue = v.InferOutput<typeof RefinedIssueSchema>;
 

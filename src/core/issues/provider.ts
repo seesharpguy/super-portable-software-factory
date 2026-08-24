@@ -43,11 +43,21 @@
  * the issue id) with the comment thread folded into the prompt. This can
  * loop any number of rounds; there is no cap.
  *
- * All ten still live in one `WatchState` union (not several separate unions)
- * because `transition()`'s "strip every `<prefix>:<state>` label, then add
- * one" logic (see `github_provider.ts`/`jira_provider.ts`) has to know about
- * every one of them to strip correctly, and `ensureLabels()` seeds all of
- * them from one `STATES` array.
+ * `spec-in-progress` is where a spec lands once it's been decomposed and
+ * published — deliberately NOT `done` yet: a product manager watching this
+ * spec's status must not see "done" until every issue the refiner produced
+ * (every story/bug/task, and every feature/epic container once its own
+ * children finish — see `rollUp` in `watch.ts`) is itself `<prefix>:done`.
+ * `announceRefined` (`watch.ts`) makes the move `refining -> spec-in-progress`
+ * once publish succeeds; `finishTrackedSpecs` (`watch.ts`) polls every
+ * `spec-in-progress` spec each tick and moves it the rest of the way,
+ * `-> done`, once `WatchMarker.refined` is entirely `<prefix>:done`.
+ *
+ * All eleven still live in one `WatchState` union (not several separate
+ * unions) because `transition()`'s "strip every `<prefix>:<state>` label,
+ * then add one" logic (see `github_provider.ts`/`jira_provider.ts`) has to
+ * know about every one of them to strip correctly, and `ensureLabels()`
+ * seeds all of them from one `STATES` array.
  */
 export type WatchState =
   | "ready"
@@ -59,7 +69,8 @@ export type WatchState =
   | "refining"
   | "refined"
   | "needs-feedback"
-  | "continue-refinement";
+  | "continue-refinement"
+  | "spec-in-progress";
 
 export interface Issue {
   /** Opaque tracker identifier: a GitHub issue number stringified ("42"), a Jira key ("PROJ-123"). */
@@ -110,7 +121,10 @@ export interface PrStatus {
  * issue a completed publish pass created for this spec. A re-claimed spec
  * whose marker already lists them skips creation entirely — `to-tickets`
  * (the skill this lane's prompt is ported from) has no such guard and
- * duplicates every ticket on a re-run; this is what closes that gap.
+ * duplicates every ticket on a re-run; this is what closes that gap. It does
+ * double duty once the spec reaches `spec-in-progress`: `finishTrackedSpecs`
+ * (`watch.ts`) reads this same list back to check whether every one of them
+ * is `<prefix>:done` yet — the gate on the spec's OWN move to `done`.
  *
  * `feedback` is the refine lane's human-in-the-loop cursor: `rounds` counts
  * how many times this spec has been escalated (so a resumed run's summary
@@ -149,6 +163,15 @@ export interface IssueProvider {
   ensureLabels(): Promise<EnsureLabelsResult>;
   /** Issues currently labeled `<prefix>:ready`. */
   listEligible(): Promise<Issue[]>;
+  /**
+   * One issue by its tracker-facing id, or `null` if it no longer exists
+   * (deleted, or — on a tracker where a closed item 404s a plain fetch —
+   * closed). The frontier check needs this on every tracker (`claimNewWork`
+   * in `watch.ts` calls it once per distinct `blocked_by` id per tick, to
+   * decide whether a leaf's blockers all carry `<prefix>:done`), so unlike
+   * `IssueAuthoringProvider`'s methods below, this is required, not optional.
+   */
+  getIssue(id: string): Promise<Issue | null>;
   /**
    * Issues currently in `state`. `includeAll` queries closed issues too —
    * required for `review` on a tracker where closing an issue is a side
@@ -226,4 +249,18 @@ export interface IssueAuthoringProvider {
   createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue>;
   /** Link `child` under `parent` using the tracker's native hierarchy — GitHub's sub-issues API today. */
   linkChild(parent: Issue, child: Issue): Promise<void>;
+  /**
+   * Read back what `linkChild` wrote — every issue currently linked under
+   * `parent`. What makes container roll-up possible at all (`rollUp` in
+   * `watch.ts`: a container is `done` once every one of these carries
+   * `<prefix>:done`); lives here rather than on `IssueProvider` for the same
+   * reason `linkChild` does — a tracker's plain list/claim/transition surface
+   * has no reason to know about a hierarchy it may not even have (Jira has
+   * no native issue-hierarchy wired up yet — see `jira_provider.ts`'s module
+   * comment), so roll-up is GitHub-only, a logged no-op elsewhere, not a
+   * startup failure the way `watch.refine.enabled` on a non-GitHub tracker
+   * is (`cli/commands/watch.ts`) — the build lane still functions without
+   * it, refine cannot function without authoring at all.
+   */
+  listChildren(parent: Issue): Promise<Issue[]>;
 }

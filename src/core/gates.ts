@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { GateReport, type EnvelopeBase, type GateFn, type RefinedIssue, type RefineQuestion, type RunContext } from "./data_types.ts";
+import { GateReport, PRIORITY_RANK, type EnvelopeBase, type GateFn, type RefinedIssue, type RefineQuestion, type RunContext } from "./data_types.ts";
 import { operatorEnv } from "./utils.ts";
 
 const TAIL_CHARS = 1000; // command output kept as evidence on a failure
@@ -277,6 +277,32 @@ export function refinementWellFormed(envelope: EnvelopeBase, _run: RunContext): 
     leafCount > 0,
     leafCount > 0 ? `${leafCount} leaf issue(s)` : "every node is a container — nothing here is independently workable",
   );
+
+  // Monotonicity: no node may be MORE urgent than its own parent — p0 < p1 <
+  // p2 < p3, so "more urgent" is a lower rank. Only checked against `parent`
+  // (the containment edge), never `blocked_by` (a real dependency can easily
+  // be less urgent than the thing it blocks — a p3 prefactor gating a p0
+  // feature is normal, not a mistake). A violation here is a decomposition
+  // mistake worth a correction round-trip (this gate's `retries: 1` —
+  // steps.ts's `refine()`), not a hard block: a p0 story wearing a p3
+  // feature's parent almost always means the feature was mis-scored, not the
+  // story. The spec's OWN priority ceiling is enforced separately, in
+  // `core/refine.ts`'s `publish()` — this gate only knows about the tree,
+  // never the spec issue it came from.
+  for (const issue of issues) {
+    if (!issue.parent) continue;
+    const parent = byKey.get(issue.parent);
+    if (!parent) continue; // already reported above as an unresolved parent
+    const childRank = PRIORITY_RANK[issue.priority] ?? 2;
+    const parentRank = PRIORITY_RANK[parent.priority] ?? 2;
+    report.check(
+      `${issue.key}.priority`,
+      childRank >= parentRank,
+      childRank >= parentRank
+        ? `${issue.priority} — no more urgent than parent ${JSON.stringify(issue.parent)} (${parent.priority})`
+        : `${issue.priority} is more urgent than parent ${JSON.stringify(issue.parent)}'s ${parent.priority} — a container's priority is a ceiling for everything under it`,
+    );
+  }
 
   return report;
 }

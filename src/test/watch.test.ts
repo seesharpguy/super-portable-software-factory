@@ -8,11 +8,14 @@ import {
   claimSpecs,
   createWatchState,
   finishReviews,
+  finishTrackedSpecs,
+  orderEligible,
   reconcileOrphans,
   reconcileRefining,
   refineBranchNameFor,
   tick,
 } from "../core/watch.js";
+import { parseRefineMarker } from "../core/refine.js";
 import type { GitHandle } from "../core/git_helper.js";
 import type { ChainRunResult, RefineRunResult, WatchDeps } from "../core/watch.js";
 import type { NotifyEvent } from "../core/notify/channel.js";
@@ -51,6 +54,13 @@ interface FakeEntry {
   comments: IssueComment[];
 }
 
+/** Every `<prefix>:<state>` label `transition()`/`claim()` strip before adding one — mirrors `github_provider.ts`'s own `STATES` (not exported, so duplicated here; a self-contained test fixture already hardcodes the "spf" prefix throughout this file). */
+const FAKE_STATE_LABELS = new Set(
+  (["ready", "working", "review", "done", "blocked", "spec-ready", "refining", "refined", "needs-feedback", "continue-refinement"] as const).map(
+    (s) => `spf:${s}`,
+  ),
+);
+
 /** In-memory fake — exactly the seam `provider.ts` exists for. */
 class FakeProvider implements IssueProvider {
   entries = new Map<string, FakeEntry>();
@@ -58,12 +68,24 @@ class FakeProvider implements IssueProvider {
   transitions: Array<{ id: string; to: WatchState; detail?: string }> = [];
   claimCalls: string[] = [];
   closedIssues: string[] = [];
-  /** Set to make `closeIssue` reject — for asserting a failed close never blocks `finishSpec`. */
+  /** Set to make `closeIssue` reject — for asserting a failed close never blocks `finishSpec`/`finishReviews`/`rollUp`. */
   closeIssueError: Error | null = null;
   private nextCommentSeq = 1;
 
-  addIssue(id: string, title: string, state: WatchState = "ready", marker: WatchMarker | null = null): void {
-    this.entries.set(id, { issue: { id, title, body: "", labels: [`spf:${state}`] }, state, marker, comments: [] });
+  /**
+   * `opts.body` lets a test embed a hidden `spf-refine:` marker (parent,
+   * blocked_by, priority) the same way `core/refine.ts`'s `renderBody()`
+   * would — see this file's `markerBody()` helper. `opts.extraLabels` lets a
+   * test add a `spf:priority:pN` (or any other) label alongside the state
+   * label `addIssue` always sets.
+   */
+  addIssue(id: string, title: string, state: WatchState = "ready", marker: WatchMarker | null = null, opts: { body?: string; extraLabels?: string[] } = {}): void {
+    this.entries.set(id, {
+      issue: { id, title, body: opts.body ?? "", labels: [`spf:${state}`, ...(opts.extraLabels ?? [])] },
+      state,
+      marker,
+      comments: [],
+    });
   }
 
   /**
@@ -89,6 +111,10 @@ class FakeProvider implements IssueProvider {
   async listInState(state: WatchState): Promise<Issue[]> {
     return [...this.entries.values()].filter((e) => e.state === state).map((e) => e.issue);
   }
+  /** Relabels on a successful claim, like the real providers do — the frontier check (`getIssue`) and `orderEligible` both read labels, not `entry.state`, so a fake that only moved `entry.state` would silently pass a blocker check it shouldn't. */
+  private relabel(entry: FakeEntry, to: WatchState): void {
+    entry.issue = { ...entry.issue, labels: [...entry.issue.labels.filter((l) => !FAKE_STATE_LABELS.has(l)), `spf:${to}`] };
+  }
   async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {
     this.claimCalls.push(issue.id);
     const entry = this.entries.get(issue.id)!;
@@ -96,10 +122,13 @@ class FakeProvider implements IssueProvider {
     const to = opts?.to ?? "working";
     if (entry.state !== from) return false;
     entry.state = to;
+    this.relabel(entry, to);
     return true;
   }
   async transition(issue: Issue, to: WatchState, detail?: string): Promise<void> {
-    this.entries.get(issue.id)!.state = to;
+    const entry = this.entries.get(issue.id)!;
+    entry.state = to;
+    this.relabel(entry, to);
     this.transitions.push({ id: issue.id, to, detail });
   }
   async comment(issue: Issue, body: string): Promise<void> {
@@ -117,6 +146,21 @@ class FakeProvider implements IssueProvider {
   async closeIssue(issue: Issue): Promise<void> {
     if (this.closeIssueError) throw this.closeIssueError;
     this.closedIssues.push(issue.id);
+  }
+  async getIssue(id: string): Promise<Issue | null> {
+    return this.entries.get(id)?.issue ?? null;
+  }
+  /**
+   * Not part of `IssueProvider` — `listChildren` lives on
+   * `IssueAuthoringProvider` instead (GitHub-only in production; see
+   * `provider.ts`'s doc comment), so this is a plain convenience a roll-up
+   * test wires directly into `WatchDeps.listChildren`
+   * (`{ listChildren: (parent) => provider.listChildren(parent) }`), mirroring
+   * how `cli/commands/watch.ts` wires the real `GitHubProvider.listChildren`.
+   * Reads the same hidden `spf-refine:` marker `getIssue`/`orderEligible` do.
+   */
+  async listChildren(parent: Issue): Promise<Issue[]> {
+    return [...this.entries.values()].filter((e) => parseRefineMarker(e.issue.body).parent === parent.id).map((e) => e.issue);
   }
 }
 
@@ -205,6 +249,11 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
     if (Date.now() - start > timeoutMs) throw new Error("waitUntil timed out");
     await new Promise((r) => setTimeout(r, 5));
   }
+}
+
+/** The exact hidden-block shape `core/refine.ts`'s `renderBody()` writes and `parseRefineMarker` reads back — see `refine.test.ts`'s own round-trip coverage of that encoding. A test-only shortcut for embedding one directly in a fake issue's `body`, without going through `publish()`. */
+function markerBody(marker: { parent?: string | null; blocked_by?: string[]; priority?: string } = {}): string {
+  return `<!-- spf-refine: ${JSON.stringify({ parent: marker.parent ?? null, blocked_by: marker.blocked_by ?? [], priority: marker.priority ?? "p2" })} -->`;
 }
 
 test("branchNameFor: sanitizes a title into a safe branch name", () => {
@@ -334,6 +383,224 @@ test("claimNewWork: dry-run claims nothing and calls neither claim() nor runChai
   assert.equal(provider.claimCalls.length, 0);
   assert.equal(runChainCalled, false);
   assert.equal(provider.entries.get("20")!.state, "ready");
+});
+
+// ── orderEligible: priority, sibling affinity, created-asc ──────────────
+
+function issue(id: string, opts: { labels?: string[]; body?: string } = {}): Issue {
+  return { id, title: `issue ${id}`, body: opts.body ?? "", labels: opts.labels ?? [] };
+}
+
+test("orderEligible: p0 sorts ahead of p2 regardless of creation order", () => {
+  const older = issue("1", { labels: ["spf:priority:p2"] });
+  const newer = issue("2", { labels: ["spf:priority:p0"] });
+  const ordered = orderEligible([older, newer], new Map(), "spf");
+  assert.deepEqual(ordered.map((i) => i.id), ["2", "1"]);
+});
+
+test("orderEligible: sibling affinity breaks a tie within the same priority band, but never crosses bands", () => {
+  const inflightParents = new Map([["100", "parent-A"]]); // issue 100 is in flight, its parent is parent-A
+  const siblingOfInflight = issue("2", { labels: ["spf:priority:p2"], body: markerBody({ parent: "parent-A" }) });
+  const unrelated = issue("1", { labels: ["spf:priority:p2"], body: markerBody({ parent: "parent-B" }) });
+  const urgentUnrelated = issue("3", { labels: ["spf:priority:p0"], body: markerBody({ parent: "parent-B" }) });
+
+  const ordered = orderEligible([unrelated, siblingOfInflight, urgentUnrelated], inflightParents, "spf");
+
+  // p0 still wins outright, even though it has no affinity...
+  assert.equal(ordered[0]!.id, "3");
+  // ...but among the two p2 issues, the sibling of in-flight work goes first.
+  assert.deepEqual(ordered.slice(1).map((i) => i.id), ["2", "1"]);
+});
+
+test("orderEligible: falls back to created (array) order as the final, stable tiebreaker", () => {
+  const a = issue("1", { labels: ["spf:priority:p2"] });
+  const b = issue("2", { labels: ["spf:priority:p2"] });
+  const c = issue("3", { labels: ["spf:priority:p2"] });
+  const ordered = orderEligible([a, b, c], new Map(), "spf");
+  assert.deepEqual(ordered.map((i) => i.id), ["1", "2", "3"]);
+});
+
+test("orderEligible: a missing or corrupt marker sorts as p2 with no affinity, same as before this feature existed", () => {
+  const noMarker = issue("1"); // no labels, no body at all
+  const corrupt = issue("2", { body: "<!-- spf-refine: {not json -->" });
+  const explicitP2 = issue("3", { labels: ["spf:priority:p2"] });
+  const ordered = orderEligible([noMarker, corrupt, explicitP2], new Map(), "spf");
+  assert.deepEqual(ordered.map((i) => i.id), ["1", "2", "3"], "all p2, so creation order alone decides");
+});
+
+test("orderEligible: the label wins over the marker when they disagree — a human relabel is the override mechanism", () => {
+  // Published as p0 (what the marker still says), but a human relabeled it down to p3.
+  const relabeled = issue("1", { labels: ["spf:priority:p3"], body: markerBody({ priority: "p0" }) });
+  const stillP0 = issue("2", { labels: ["spf:priority:p0"], body: markerBody({ priority: "p0" }) });
+  const ordered = orderEligible([relabeled, stillP0], new Map(), "spf");
+  assert.deepEqual(ordered.map((i) => i.id), ["2", "1"], "the label, not the stale marker, decides");
+});
+
+// ── claimNewWork: the frontier — a blocker not yet spf:done is skipped ───
+
+test("claimNewWork: an issue with an unfinished blocker is not claimed", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("11", "the blocker", "working"); // not done yet
+  provider.addIssue("10", "blocked leaf", "ready", null, { body: markerBody({ blocked_by: ["11"] }) });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost), state);
+
+  assert.equal(provider.claimCalls.length, 0, "the blocker is not spf:done yet, so nothing is claimed at all");
+  assert.equal(provider.entries.get("10")!.state, "ready");
+});
+
+test("claimNewWork: the same issue claims once its blocker carries spf:done", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("21", "the blocker", "done");
+  provider.addIssue("20", "unblocked leaf", "ready", null, { body: markerBody({ blocked_by: ["21"] }) });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost), state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["20"]);
+});
+
+test("claimNewWork: a blocker that no longer exists (404) is treated as satisfied, not a permanent wedge", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("30", "leaf with a deleted blocker", "ready", null, { body: markerBody({ blocked_by: ["nonexistent"] }) });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost), state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["30"]);
+});
+
+test("claimNewWork: a blocker shared by two leaves is fetched at most once per tick", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("41", "the shared blocker", "done");
+  provider.addIssue("40", "leaf one", "ready", null, { body: markerBody({ blocked_by: ["41"] }) });
+  provider.addIssue("42", "leaf two", "ready", null, { body: markerBody({ blocked_by: ["41"] }) });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let getIssueCalls = 0;
+  const realGetIssue = provider.getIssue.bind(provider);
+  provider.getIssue = async (id) => {
+    if (id === "41") getIssueCalls++;
+    return realGetIssue(id);
+  };
+
+  await claimNewWork(makeDeps(provider, codeHost, { concurrency: 2 }), state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(provider.claimCalls.sort(), ["40", "42"]);
+  assert.equal(getIssueCalls, 1, "the shared blocker is looked up once, not once per dependent");
+});
+
+// ── finishReviews: closes the leaf, and rolls a container up once every child is done ──
+
+test("finishReviews: closes the issue when its PR merges", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("60", "shipped", "review", { pr: 610, branch: "spf-watch/60-x" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(610, { merged: true, state: "closed", ciStatus: "success" });
+
+  await finishReviews(makeDeps(provider, codeHost));
+
+  assert.deepEqual(provider.closedIssues, ["60"]);
+});
+
+test("finishReviews: a closeIssue rejection leaves the issue done and open, without blocking the tick", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("61", "shipped but close fails", "review", { pr: 611, branch: "spf-watch/61-x" });
+  provider.closeIssueError = new Error("tracker unavailable");
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(611, { merged: true, state: "closed", ciStatus: "success" });
+
+  await finishReviews(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("61")!.state, "done");
+  assert.deepEqual(provider.closedIssues, [], "the failed close never reverted the transition");
+});
+
+test("finishReviews: rolls a container up to done + closed once every child is done", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("71", "child one", "done", null, { body: markerBody({ parent: "70" }) });
+  provider.addIssue("72", "child two", "review", { pr: 620, branch: "spf-watch/72-x" }, { body: markerBody({ parent: "70" }) });
+  provider.addIssue("70", "the feature", "working"); // containers never carry a build-lane state in production, but rollUp only reads its own labels
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(620, { merged: true, state: "closed", ciStatus: "success" });
+  const { events, notify } = collectNotifications();
+
+  await finishReviews(makeDeps(provider, codeHost, { notify, listChildren: (parent) => provider.listChildren(parent) }));
+
+  assert.equal(provider.entries.get("72")!.state, "done", "the child that just landed");
+  assert.equal(provider.entries.get("70")!.state, "done", "the container rolls up once its last child lands");
+  assert.deepEqual(provider.closedIssues.sort(), ["70", "72"]);
+  assert.ok(events.some((e) => e.kind === "feature_done" && e.title.includes("70")));
+});
+
+test("finishReviews: a container with one unfinished child does not roll up", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("81", "child one — still working", "working", null, { body: markerBody({ parent: "80" }) });
+  provider.addIssue("82", "child two", "review", { pr: 621, branch: "spf-watch/82-x" }, { body: markerBody({ parent: "80" }) });
+  provider.addIssue("80", "the feature");
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(621, { merged: true, state: "closed", ciStatus: "success" });
+
+  await finishReviews(makeDeps(provider, codeHost, { listChildren: (parent) => provider.listChildren(parent) }));
+
+  assert.equal(provider.entries.get("82")!.state, "done");
+  assert.notEqual(provider.entries.get("80")!.state, "done", "child one is still working, so the container must not roll up yet");
+  assert.deepEqual(provider.closedIssues, ["82"]);
+});
+
+test("finishReviews: a nested epic rolls up once its feature rolls up", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("91", "the only story", "review", { pr: 622, branch: "spf-watch/91-x" }, { body: markerBody({ parent: "90" }) });
+  provider.addIssue("90", "the feature", "working", null, { body: markerBody({ parent: "9" }) });
+  provider.addIssue("9", "the epic");
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(622, { merged: true, state: "closed", ciStatus: "success" });
+
+  await finishReviews(makeDeps(provider, codeHost, { listChildren: (parent) => provider.listChildren(parent) }));
+
+  assert.equal(provider.entries.get("90")!.state, "done", "the feature rolls up once its one story lands");
+  assert.equal(provider.entries.get("9")!.state, "done", "the epic then rolls up too, once its feature is done");
+  assert.deepEqual(provider.closedIssues.sort(), ["9", "90", "91"]);
+});
+
+test("finishReviews: a container already done is never re-processed", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("101", "child", "review", { pr: 623, branch: "spf-watch/101-x" }, { body: markerBody({ parent: "100" }) });
+  provider.addIssue("100", "already-done feature", "done");
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(623, { merged: true, state: "closed", ciStatus: "success" });
+  let listChildrenCalls = 0;
+  const deps = makeDeps(provider, codeHost, {
+    listChildren: (parent) => {
+      listChildrenCalls++;
+      return provider.listChildren(parent);
+    },
+  });
+
+  await finishReviews(deps);
+
+  assert.equal(listChildrenCalls, 0, "getIssue already saw spf:done on the container and returned before ever listing its children");
+});
+
+test("finishReviews: with no listChildren wired (a non-GitHub tracker), roll-up is a logged no-op, not a failure", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("111", "child", "review", { pr: 624, branch: "spf-watch/111-x" }, { body: markerBody({ parent: "110" }) });
+  provider.addIssue("110", "the feature");
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(624, { merged: true, state: "closed", ciStatus: "success" });
+
+  // makeDeps's default has no listChildren — same as a Jira-backed provider.
+  await finishReviews(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("111")!.state, "done", "the leaf itself still finishes normally");
+  assert.notEqual(provider.entries.get("110")!.state, "done", "no listChildren means no roll-up is even attempted");
 });
 
 test("reconcileOrphans: a working issue with an open PR in its marker resumes as review", async () => {
@@ -618,7 +885,7 @@ test("claimSpecs: a disabled refine lane never lists spec-ready issues or claims
   assert.equal(provider.claimCalls.length, 0);
 });
 
-test("claimSpecs: claims a spec-ready spec, publishes, and finishes it to done with a summary comment", async () => {
+test("claimSpecs: claims a spec-ready spec, publishes, and moves it to spec-in-progress with a summary comment — NOT done yet", async () => {
   const provider = new FakeProvider();
   provider.addIssue("101", "Team invitations", "spec-ready");
   const codeHost = new FakeCodeHost();
@@ -645,9 +912,11 @@ test("claimSpecs: claims a spec-ready spec, publishes, and finishes it to done w
   await waitUntil(() => state.refining.size === 0);
 
   assert.deepEqual(provider.claimCalls, ["101"]);
-  assert.deepEqual(provider.transitions.map((t) => t.to), ["done"]);
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["spec-in-progress"], "published, but not done — nothing it produced has landed yet");
   assert.equal(comments.length, 1);
   assert.match(comments[0]!.body, /#200 \(story\): Owner invites by email/);
+  assert.match(comments[0]!.body, /moves to `spf:done` once every one of them does/);
+  assert.deepEqual(provider.closedIssues, [], "not closed — a PM watching this spec must not see it as finished yet");
   assert.deepEqual(provider.entries.get("101")!.marker?.refined, ["200", "199"]);
 });
 
@@ -723,10 +992,10 @@ test("claimSpecs: a re-claimed spec whose marker already lists published issues 
   await waitUntil(() => state.refining.size === 0);
 
   assert.equal(called, false, "to-tickets itself has no idempotency guard — this is the one this lane adds");
-  assert.deepEqual(provider.transitions.map((t) => t.to), ["done"]);
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["spec-in-progress"]);
 });
 
-test("reconcileRefining: a refining spec whose marker already lists published issues finishes it without re-running the refiner", async () => {
+test("reconcileRefining: a refining spec whose marker already lists published issues moves to spec-in-progress without re-running the refiner", async () => {
   const provider = new FakeProvider();
   provider.addIssue("150", "orphaned after publish", "refining", { refined: ["400"] });
   const codeHost = new FakeCodeHost();
@@ -734,7 +1003,7 @@ test("reconcileRefining: a refining spec whose marker already lists published is
 
   await reconcileRefining(makeDeps(provider, codeHost, { refineEnabled: true }), state);
 
-  assert.deepEqual(provider.transitions, [{ id: "150", to: "done", detail: undefined }]);
+  assert.deepEqual(provider.transitions, [{ id: "150", to: "spec-in-progress", detail: undefined }]);
 });
 
 test("reconcileRefining: a refining spec with no marker retries up to the cap, then blocks", async () => {
@@ -937,38 +1206,119 @@ test("claimSpecs: dry-run never claims or runs an escalating spec either", async
   assert.equal(provider.entries.get("212")!.state, "continue-refinement");
 });
 
-test("finishSpec: closes the issue on the tracker once a spec is fully published", async () => {
+test("announceRefined: a decomposition that produced zero issues has nothing to wait on, so it goes straight to done and closes", async () => {
   const provider = new FakeProvider();
-  provider.addIssue("220", "Ready to close", "spec-ready");
+  provider.addIssue("220", "Nothing came out of this", "spec-ready");
   const codeHost = new FakeCodeHost();
   const state = createWatchState();
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "700", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] }),
   });
 
   await claimSpecs(deps, state);
   await waitUntil(() => state.refining.size === 0);
 
+  assert.equal(provider.entries.get("220")!.state, "done");
   assert.deepEqual(provider.closedIssues, ["220"]);
 });
 
-test("finishSpec: a closeIssue that rejects still leaves the spec transitioned to done — a failed close never un-does a successful publish", async () => {
+// ── finishTrackedSpecs: the spec itself isn't done until every issue it produced is ──
+
+test("finishTrackedSpecs: a spec-in-progress spec with an unfinished refined issue is left alone — not done, not closed", async () => {
   const provider = new FakeProvider();
-  provider.addIssue("221", "Close fails", "spec-ready");
+  provider.addIssue("230", "the work is still open", "spec-in-progress", { refined: ["700"] });
+  provider.addIssue("700", "the only story", "ready"); // not spf:done yet
+  const codeHost = new FakeCodeHost();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("230")!.state, "spec-in-progress", "a PM must still see this as in progress, not done");
+  assert.deepEqual(provider.closedIssues, []);
+});
+
+test("finishTrackedSpecs: closes the spec once every refined issue reaches spf:done", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("231", "Ready to close", "spec-in-progress", { refined: ["701"] });
+  provider.addIssue("701", "A story", "done");
+  const codeHost = new FakeCodeHost();
+  const { events, notify } = collectNotifications();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost, { notify }));
+
+  assert.equal(provider.entries.get("231")!.state, "done");
+  assert.deepEqual(provider.closedIssues, ["231"]);
+  assert.deepEqual(events.map((e) => e.kind), ["spec_done"]);
+  assert.equal(events[0]!.level, "info");
+});
+
+test("finishTrackedSpecs: with several refined issues, ALL must be done — one still open holds the spec back", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("232", "partially done", "spec-in-progress", { refined: ["710", "711"] });
+  provider.addIssue("710", "finished story", "done");
+  provider.addIssue("711", "still working", "working");
+  const codeHost = new FakeCodeHost();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("232")!.state, "spec-in-progress");
+  assert.deepEqual(provider.closedIssues, []);
+});
+
+test("finishTrackedSpecs: a closeIssue that rejects still leaves the spec transitioned to done — a failed close never un-does completed work", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("233", "Close fails", "spec-in-progress", { refined: ["712"] });
+  provider.addIssue("712", "A story", "done");
   provider.closeIssueError = new Error("tracker rejected the close");
   const codeHost = new FakeCodeHost();
-  const state = createWatchState();
-  const deps = makeDeps(provider, codeHost, {
-    refineEnabled: true,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "701", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
-  });
 
-  await claimSpecs(deps, state);
-  await waitUntil(() => state.refining.size === 0);
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
 
-  assert.equal(provider.entries.get("221")!.state, "done");
+  assert.equal(provider.entries.get("233")!.state, "done");
   assert.deepEqual(provider.closedIssues, []);
+});
+
+test("finishTrackedSpecs: a refined issue that no longer exists (404) is treated as done, not a permanent wedge", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("234", "one story was deleted", "spec-in-progress", { refined: ["deleted-id", "713"] });
+  provider.addIssue("713", "the surviving story", "done");
+  const codeHost = new FakeCodeHost();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("234")!.state, "done");
+  assert.deepEqual(provider.closedIssues, ["234"]);
+});
+
+test("finishTrackedSpecs: a spec with no refined ids recorded is left alone, never assumed done", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("235", "no marker at all", "spec-in-progress", null);
+  const codeHost = new FakeCodeHost();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+
+  assert.equal(provider.entries.get("235")!.state, "spec-in-progress");
+  assert.deepEqual(provider.closedIssues, []);
+});
+
+test("finishTrackedSpecs: a container among the refined ids counts as done only once rollUp already marked it so", async () => {
+  // Mirrors a real tree: publish() created a feature (F1) and one story
+  // under it (S1) — both ids land in WatchMarker.refined. The feature is
+  // only spf:done once finishReviews' rollUp already rolled it up (tested
+  // separately); finishTrackedSpecs itself just reads the label, same as
+  // for a leaf.
+  const provider = new FakeProvider();
+  provider.addIssue("236", "tree with a container", "spec-in-progress", { refined: ["240", "241"] });
+  provider.addIssue("240", "the feature", "working"); // not yet rolled up
+  provider.addIssue("241", "the story", "done");
+  const codeHost = new FakeCodeHost();
+
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+  assert.equal(provider.entries.get("236")!.state, "spec-in-progress", "the feature container hasn't rolled up to done yet");
+
+  await provider.transition(provider.entries.get("240")!.issue, "done"); // simulates rollUp() finishing the container
+  await finishTrackedSpecs(makeDeps(provider, codeHost));
+  assert.equal(provider.entries.get("236")!.state, "done", "now that the container is done too, the spec can close");
 });
 
 // ── buildSpecPrompt ──────────────────────────────────────────────────────
@@ -983,6 +1333,17 @@ function specComment(author: string, created_at: string, body: string): IssueCom
 
 test("buildSpecPrompt: no comments falls back to the plain title/body", () => {
   assert.equal(buildSpecPrompt(specIssue(), []), "A spec\n\nSome body text.");
+});
+
+test("buildSpecPrompt: omits the Priority section entirely when no priority is given — byte-identical to before this feature existed", () => {
+  assert.equal(buildSpecPrompt(specIssue(), [], undefined, null), "A spec\n\nSome body text.");
+  assert.equal(buildSpecPrompt(specIssue(), []), "A spec\n\nSome body text.", "and the same when the 4th arg is omitted entirely");
+});
+
+test("buildSpecPrompt: renders a ## Priority section, ahead of the discussion, when given one", () => {
+  const prompt = buildSpecPrompt(specIssue(), [specComment("bob", "2020-01-01T00:00:00.000Z", "Some context.")], undefined, "p1");
+  assert.match(prompt, /## Priority\n\nThis spec is labeled p1\./);
+  assert.ok(prompt.indexOf("## Priority") < prompt.indexOf("## Discussion on the spec issue"));
 });
 
 test("buildSpecPrompt: with no prior escalation, every comment is 'earlier discussion'", () => {
@@ -1135,6 +1496,86 @@ test("claimSpecs: threads deps.chainOptions through to runRefine's opts, same as
   await waitUntil(() => state.refining.size === 0);
 
   assert.deepEqual(seenOptions, { agent: "flue" }, "watch.chain_options must reach the refine chain dispatch too");
+});
+
+// ── claimSpecs/runSpec: a spec's own priority label reaches the refiner ──
+
+test("claimSpecs: a spec's spf:priority label reaches both the prompt and runRefine's chainOptions", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("180", "An urgent spec", "spec-ready", null, { extraLabels: ["spf:priority:p1"] });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let seenPrompt = "";
+  let seenOptions: Record<string, string> | undefined;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => {
+      seenPrompt = opts.prompt;
+      seenOptions = opts.chainOptions;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+    },
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.match(seenPrompt, /## Priority\n\nThis spec is labeled p1\./);
+  assert.equal(seenOptions?.["priority"], "p1");
+});
+
+test("claimSpecs: a spec with no priority label reaches the refiner exactly as before this feature existed", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("181", "An unlabeled spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let seenPrompt = "";
+  let seenOptions: Record<string, string> | undefined;
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => {
+      seenPrompt = opts.prompt;
+      seenOptions = opts.chainOptions;
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+    },
+  });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.ok(!seenPrompt.includes("## Priority"));
+  assert.equal(seenOptions?.["priority"], undefined, "no ceiling — publishIssues() sees no priority key at all, same as before");
+});
+
+test("tick: a spec only reaches done once every issue it produced does — the refine lane, then finishTrackedSpecs, wired through tick() itself", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("300", "A spec", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    runRefine: async (opts) => ({
+      accepted: true,
+      adwId: opts.adwId,
+      detail: "",
+      created: [{ id: "800", title: "The only leaf", kind: "story", isLeaf: true }],
+      questions: [],
+    }),
+  });
+
+  await tick(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+  assert.equal(provider.entries.get("300")!.state, "spec-in-progress", "published, but the leaf hasn't landed yet — must not read as done");
+  assert.deepEqual(provider.closedIssues, []);
+
+  // The leaf doesn't exist on the fake tracker yet — this simulates it
+  // having actually been created (publish() would, via createIssue) and its
+  // own PR merging sometime later.
+  provider.addIssue("800", "The only leaf", "done");
+
+  await tick(deps, state);
+
+  assert.equal(provider.entries.get("300")!.state, "done", "the spec's last dependent finished — only now can it close");
+  assert.deepEqual(provider.closedIssues, ["300"]);
 });
 
 test("tick: a per-stage error is caught and fires exactly one watch_error", async () => {
