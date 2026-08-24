@@ -473,6 +473,20 @@ export async function watchCommand(argv: string[]): Promise<number> {
     } catch {
       // best-effort, same as above — no questions file means this run wasn't an escalation
     }
+    // Defense in depth: `steps.publishIssues()` now clears whichever of
+    // these two files it's NOT about to write, so both should never be
+    // non-empty here — but if some future change (or an older worktree's
+    // leftover files, before that fix existed) ever produces both, a real
+    // completed publish must never be silently overridden by a stale
+    // question. `runSpec` checks `questions.length > 0` first, so without
+    // this it would re-escalate over issues that already landed on the
+    // tracker seconds earlier.
+    if (created.length > 0 && questions.length > 0) {
+      console.error(
+        `watch: ${opts.adwId}: refine_publish.json AND refine_questions.json both had content — treating the ${created.length} published issue(s) as authoritative and discarding the stale question(s)`,
+      );
+      questions = [];
+    }
     return { accepted: true, adwId: opts.adwId, detail: "", created, questions };
   };
 

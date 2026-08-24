@@ -41,7 +41,7 @@
  *    line, never a phase that blows up ten minutes into an unattended run.
  */
 
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import * as changesLib from "../core/changes.ts";
 import * as gates from "../core/gates.ts";
@@ -905,6 +905,28 @@ function parsePriorityOption(raw: string | undefined): RefinedPriority | null {
   return raw;
 }
 
+/**
+ * `cli/commands/watch.ts`'s `runRefine()` reads BOTH `refine_publish.json`
+ * and `refine_questions.json` back, unconditionally, after this chain
+ * exits — it has no other way to learn what THIS run did, since a chain's
+ * return value is just an exit code. A resumed spec (`continue-refinement`)
+ * reruns this entire chain from `request` on, into the SAME deterministic
+ * `context_handoff_dir` a PRIOR round already wrote into. Without clearing
+ * the file this run is NOT about to write, a stale `refine_questions.json`
+ * from an earlier escalation round survives a LATER round's successful
+ * publish — `runRefine` then reports those old questions as if raised
+ * again THIS round, so `runSpec` escalates a second time even though real
+ * issues were already created on the tracker seconds earlier. Called
+ * before EITHER branch writes, so exactly one of the two files reflects
+ * this run when the phase returns, never a leftover from a previous one.
+ * `force: true` — a first-ever run has neither file yet, which is fine.
+ */
+export function clearStaleRefineOutputFiles(contextHandoffDir: string): void {
+  for (const name of ["refine_questions.json", "refine_publish.json"]) {
+    rmSync(path.join(contextHandoffDir, name), { force: true });
+  }
+}
+
 export function publishIssues(opts: { description?: string } = {}): Step {
   preflightDescription("publish", opts.description);
   const fn = async (run: Run, state: ChainState) => {
@@ -922,6 +944,7 @@ export function publishIssues(opts: { description?: string } = {}): Step {
         description: opts.description ?? "Create the feature/story tree on the tracker, in dependency order, and link each to its parent",
       }),
       async (ph) => {
+        clearStaleRefineOutputFiles(run.context_handoff_dir);
         if (questions.length > 0) {
           writeFileSync(path.join(run.context_handoff_dir, "refine_questions.json"), JSON.stringify(questions, null, 2));
           ph.log({ escalated: questions.length });
