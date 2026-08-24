@@ -14,6 +14,7 @@
  * `runSpec` closes that gap using what this module returns).
  */
 import { GitHubProvider } from "./issues/github_provider.ts";
+import { JiraProvider } from "./issues/jira_provider.ts";
 import type { Issue, IssueAuthoringProvider } from "./issues/provider.ts";
 import { clampPriority, type RefinedIssue, type RefinedPriority, type SFConfig } from "./data_types.ts";
 
@@ -27,18 +28,37 @@ export interface PublishedIssue {
 }
 
 /**
- * `IssueAuthoringProvider` has a real implementation only on `GitHubProvider`
- * today — see `jira_provider.ts`'s module comment on why Jira isn't wired up
- * yet. Throws rather than returning `null` so a `code` phase calling this
+ * `IssueAuthoringProvider` has a real implementation on `GitHubProvider` and
+ * `JiraProvider` — any other `issue_provider` value fails here, defensively
+ * (the config schema's picklist already rejects it earlier). Throws rather
+ * than returning `null` so a `code` phase calling this
  * (`steps.publishIssues()`) fails the phase with a clear, specific reason —
  * the same "fail loudly, never silently do nothing" contract
  * `agents.validate()` uses for an unconfigured quality suite.
+ *
+ * Duplicates `cli/commands/watch.ts`'s own `resolveIssueProvider`
+ * construction logic for each provider — a pre-existing pattern for GitHub
+ * (this function has always rebuilt its own `GitHubProvider` rather than
+ * sharing one with the CLI layer's build-lane provider), mirrored for Jira
+ * rather than refactored away, to stay within this change's scope.
  */
 export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider {
+  if (cfg.watch.issue_provider === "jira") {
+    if (!cfg.watch.jira.base_url.trim() || !cfg.watch.jira.project_key.trim()) {
+      throw new Error(`watch.jira.base_url and watch.jira.project_key must both be set when watch.issue_provider is "jira"`);
+    }
+    const email = process.env["JIRA_EMAIL"];
+    const token = process.env["JIRA_API_TOKEN"];
+    if (!email || !token) {
+      throw new Error(
+        'JIRA_EMAIL and JIRA_API_TOKEN must both be set — the refine lane needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens)',
+      );
+    }
+    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types);
+  }
   if (cfg.watch.issue_provider !== "github") {
     throw new Error(
-      `watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} does not support issue authoring — ` +
-        `the refine lane needs "github" (see jira_provider.ts's module comment on why Jira isn't wired up yet)`,
+      `watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} does not support issue authoring — the refine lane needs "github" or "jira"`,
     );
   }
   // Issue authoring always targets the ISSUE tracker's repo — `issue_repo`
@@ -234,7 +254,7 @@ export async function publish(tracker: IssueAuthoringProvider, issues: RefinedIs
     const labels = [typeLabel(opts.labelPrefix, node.kind), priorityLabel(opts.labelPrefix, priority)];
     if (isLeaf) labels.push(`${opts.labelPrefix}:refined`);
     const body = renderBody(node, byKey, opts.specIssueId);
-    const issue = await tracker.createIssue({ title: node.title, body, labels });
+    const issue = await tracker.createIssue({ title: node.title, body, labels, kind: node.kind });
     const published: PublishedIssue = { key: node.key, issue, kind: node.kind, isLeaf };
     byKey.set(node.key, published);
     created.push(published);

@@ -346,11 +346,11 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     watch = { issue_provider: issueProvider, code_host: codeHost, repo, label_prefix: labelPrefix, chain, base_branch: baseBranch };
     if (issueRepo) watch.issue_repo = issueRepo;
 
-    // Issue authoring (create + link a hierarchy) is only implemented on
-    // GitHubProvider today — see jira_provider.ts's module comment — so
-    // this lane isn't offered at all on a Jira tracker rather than asking a
-    // question that would just fail at `spf watch` startup.
-    if (issueProvider === "github") {
+    // Issue authoring (create + link a hierarchy) is implemented on both
+    // GitHubProvider and JiraProvider — see jira_provider.ts's module
+    // comment for how Jira's version works (native issue types + the
+    // `parent` field).
+    if (issueProvider === "github" || issueProvider === "jira") {
       const enableRefine = await asker.confirm(
         `Also enable the refine lane (decompose a "${labelPrefix}:spec-ready" product spec into a feature/story-or-bug tree)?`,
         false,
@@ -359,6 +359,12 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
         const refineChainChoices = allChains().map((c) => ({ value: c.name, label: c.name, hint: c.source ? `${c.describe} (repo)` : c.describe }));
         const refineChain = await asker.select("Chain to run per spec", refineChainChoices, "refine");
         watch.refine = { enabled: true, chain: refineChain };
+        if (issueProvider === "jira") {
+          asker.note(
+            'Jira issue types default to epic/feature -> "Epic", story -> "Story", bug -> "Bug", task -> "Task" — ' +
+              "customize per-kind in watch.jira.issue_types if your project renames any of them, then run `spf watch init` to validate.",
+          );
+        }
       }
     }
 

@@ -16,7 +16,8 @@ import { isRepoAt, makeGit } from "../../core/git_helper.ts";
 import { GitHubProvider } from "../../core/issues/github_provider.ts";
 import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
-import type { CodeHostProvider, IssueAuthoringProvider, IssueProvider } from "../../core/issues/provider.ts";
+import { isAuthoringProvider } from "../../core/issues/provider.ts";
+import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain, resolveRequiredAgents, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
@@ -113,7 +114,7 @@ function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
       console.error('JIRA_EMAIL and JIRA_API_TOKEN must both be set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens). See README.md\'s "spf watch" section.');
       return null;
     }
-    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token);
+    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types);
   }
   console.error(`watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} is not supported`);
   return null;
@@ -186,6 +187,14 @@ function releaseLock(lockPath: string): void {
  * machine needs, with sensible colors/descriptions. Doesn't touch git or
  * run anything, so it skips watchCommand's repo/chain checks entirely —
  * you can seed labels before ever wiring up a worktree-capable checkout.
+ *
+ * On Jira, with `watch.refine.enabled`, this also runs a READ-ONLY check of
+ * `watch.jira.issue_types` against the real project — the same check
+ * `watchCommand`'s own startup gate runs, exposed here too so a bad mapping
+ * can be caught (and fixed) before ever starting the daemon, not just at
+ * startup time. Labels themselves stay a pure report on Jira either way
+ * (Jira labels are freeform strings with no color/description registry to
+ * seed — see `jira_provider.ts`'s module comment).
  */
 export async function watchInitCommand(argv: string[]): Promise<number> {
   const { options } = parseCli(argv, ["cwd", "config"], []);
@@ -200,6 +209,15 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
   for (const name of result.created) console.log(`  + ${name} (created)`);
   for (const name of result.updated) console.log(`  ~ ${name} (updated color/description)`);
   for (const name of result.unchanged) console.log(`  = ${name} (already correct)`);
+
+  if (cfg.watch.refine.enabled && cfg.watch.issue_provider === "jira" && provider instanceof JiraProvider) {
+    const checks = await provider.validateIssueTypes();
+    console.log(`\nvalidating watch.jira.issue_types against ${cfg.watch.jira.project_key}:`);
+    for (const c of checks) {
+      console.log(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
+    }
+    if (checks.some((c) => !c.exists)) return 1;
+  }
   return 0;
 }
 
@@ -222,20 +240,38 @@ export async function watchCommand(argv: string[]): Promise<number> {
     return 1;
   }
   if (cfg.watch.refine.enabled) {
-    if (cfg.watch.issue_provider !== "github") {
-      // Fail loudly at startup, not silently every tick: JiraProvider
-      // doesn't implement IssueAuthoringProvider yet (see its module
-      // comment) — a refine lane that can never publish would otherwise
-      // just claim every spec-ready spec and block it, forever.
+    if (cfg.watch.issue_provider !== "github" && cfg.watch.issue_provider !== "jira") {
+      // Fail loudly at startup, not silently every tick: neither provider
+      // implements IssueAuthoringProvider besides these two — a refine lane
+      // that can never publish would otherwise just claim every spec-ready
+      // spec and block it, forever.
       console.error(
         `watch.refine.enabled is true but watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — ` +
-          `the refine lane needs "github" (issue authoring isn't implemented for Jira yet)`,
+          `the refine lane needs "github" or "jira"`,
       );
       return 1;
     }
     if (!findChain(cfg.watch.refine.chain)) {
       console.error(`watch.refine.chain ${JSON.stringify(cfg.watch.refine.chain)} is not a registered chain — run \`spf list\` to see every chain`);
       return 1;
+    }
+    // Jira's issue-type mapping is user-configured (watch.jira.issue_types)
+    // and project-specific — validated here, at startup, for the same
+    // reason findChain() is: a bad mapping should stop the daemon before
+    // it starts, not fail silently every tick once the first spec-ready
+    // spec tries to publish. Silent on success, matching this function's
+    // other startup checks; loud (and the full per-kind report) on failure.
+    if (cfg.watch.issue_provider === "jira" && provider instanceof JiraProvider) {
+      const checks = await provider.validateIssueTypes();
+      const mismatches = checks.filter((c) => !c.exists);
+      if (mismatches.length > 0) {
+        console.error(`watch.jira.issue_types has ${mismatches.length} mismatch(es) against ${cfg.watch.jira.project_key}:`);
+        for (const c of checks) {
+          console.error(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
+        }
+        console.error(`Fix watch.jira.issue_types, or the project's issue types, before running spf watch unattended. Run \`spf watch init\` any time to re-check.`);
+        return 1;
+      }
     }
   }
 
@@ -438,18 +474,17 @@ export async function watchCommand(argv: string[]): Promise<number> {
     return { accepted: true, adwId: opts.adwId, detail: "", created, questions };
   };
 
-  // `IssueAuthoringProvider`'s read-back half — GitHub-only today (see
-  // `provider.ts`'s doc comment on `listChildren`), so `null` on Jira makes
-  // `rollUp` a logged no-op there rather than a startup failure the way
-  // `watch.refine.enabled` on a non-GitHub tracker is above: the build
-  // lane functions fine without container roll-up, unlike refine, which
-  // cannot function without authoring at all. `instanceof` rather than a
-  // second `resolveAuthoringProvider()` call: that helper's own config
-  // validation (repo, GITHUB_TOKEN) already ran to produce `provider`
-  // itself when `issue_provider` is "github" — GitHubProvider implements
-  // `IssueProvider`, `CodeHostProvider`, AND `IssueAuthoringProvider` in one
-  // class, since GitHub natively is all three at once.
-  const authoringProvider: IssueAuthoringProvider | null = provider instanceof GitHubProvider ? provider : null;
+  // `IssueAuthoringProvider`'s read-back half — `isAuthoringProvider()` is a
+  // structural check (see `provider.ts`), so both GitHub and Jira are
+  // recognized here without an `instanceof` chain that would need editing
+  // for every future authoring-capable provider. `null` on any tracker that
+  // ISN'T authoring-capable makes `rollUp` a logged no-op there rather than
+  // a startup failure the way `watch.refine.enabled` without authoring
+  // support is above: the build lane functions fine without container
+  // roll-up, unlike refine, which cannot function without authoring at all.
+  // Not a second `resolveAuthoringProvider()` call: that helper's own config
+  // validation already ran to produce `provider` itself.
+  const authoringProvider = isAuthoringProvider(provider) ? provider : null;
 
   const deps: WatchDeps = {
     provider,

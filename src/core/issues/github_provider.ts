@@ -30,6 +30,7 @@ import type {
   WatchMarker,
   WatchState,
 } from "./provider.ts";
+import type { RefinedIssue } from "../data_types.ts";
 
 const API = "https://api.github.com";
 const STATES: WatchState[] = [
@@ -351,8 +352,14 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
     return { merged: detail.merged, state: detail.state, ciStatus };
   }
 
-  /** `IssueAuthoringProvider` — the refine lane's own need (see `provider.ts`'s module doc). */
-  async createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue> {
+  /**
+   * `IssueAuthoringProvider` — the refine lane's own need (see `provider.ts`'s
+   * module doc). `input.kind` is unused here: GitHub has no native
+   * issue-type field the way Jira does, and `input.labels` already carries
+   * `<prefix>:type:<kind>` for GitHub's own bookkeeping — the parameter
+   * exists on the shared interface for `JiraProvider`'s sake.
+   */
+  async createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue> {
     const raw = await this.gh<GhIssue>(`/repos/${this.repo}/issues`, {
       method: "POST",
       body: JSON.stringify({ title: input.title, body: input.body, labels: input.labels }),

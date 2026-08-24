@@ -155,7 +155,8 @@ Full mechanism: the main README's "`spf watch`" section. Field reference:
 | `concurrency` | int ≥1 | Max issues claimed and run at once, the build lane's own budget (independent of `refine.concurrency`). Default `2`. |
 | `chain_options` | map of string -> string | Options passed straight through to `chain` (and `refine.chain`) for every unattended dispatch — the same shape an interactive `spf <chain> --suite <name>` builds, e.g. `{suite: strict}` or `{agent: some-agent}`. Default `{}`. Only useful for a chain whose behavior actually reads the option (a step-derived chain's `--suite`; an imperative chain ignores an option it doesn't know about). |
 | `jira.base_url` / `jira.project_key` | string | Only consulted when `issue_provider: jira`. |
-| `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` — `spf watch` fails loudly at startup otherwise, since issue authoring (create + link a hierarchy) isn't implemented for Jira yet. |
+| `jira.issue_types` | map: `epic`/`feature`/`story`/`bug`/`task` -> string | Only consulted when `issue_provider: jira` AND `refine.enabled`. What each `RefinedIssue.kind` creates as on Jira — defaults `epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`, overridable per kind. Validated against the real project by both `spf watch init` and `spf watch`'s own startup check. |
+| `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` or `"jira"` — both implement issue authoring (create + link a hierarchy); any other value fails loudly at startup. |
 | `refine.chain` | string | Which registered chain runs per claimed spec. Default `refine`. |
 | `refine.concurrency` | int ≥1 | The refine lane's own budget, separate from `concurrency`. Default `1`. |
 
@@ -223,13 +224,17 @@ this version to seed the new labels.
 Container roll-up mirrors that same "close, don't just label" behavior for a
 generated feature/epic: once every child under it carries `<prefix>:done`
 (checked reactively, each time a leaf's PR merges), the container gets a
-summary comment, transitions to `<prefix>:done`, and closes — then the check
-repeats on ITS OWN parent, so an epic rolls up once its last feature does. A
+summary comment and transitions to `<prefix>:done` — then the check repeats
+on ITS OWN parent, so an epic rolls up once its last feature does. A
 container with one unfinished child (including a leaf still sitting at
 `<prefix>:refined`, never promoted) is left alone; nothing forces it. This
-also needs GitHub's native sub-issue read-back, so it's GitHub-only — a
-logged no-op on Jira, not a startup failure, since the build lane still works
-without it.
+needs a native hierarchy read-back — GitHub's sub-issues API, or a Jira
+`parent = "<id>"` JQL search — so it works on both today; a tracker that
+implements neither gets a logged no-op, not a startup failure, since the
+build lane still works fine without roll-up. Whether the container actually
+CLOSES on the tracker (not just relabels) depends on `closeIssue` being
+implemented at all — GitHub yes, Jira no (its own resolution workflow isn't
+wired up), same asymmetry as leaf and spec completion already have on Jira.
 
 ### `notifications`
 

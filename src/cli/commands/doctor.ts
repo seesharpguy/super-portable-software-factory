@@ -676,10 +676,12 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       check(
         report,
         "watch.refine issue authoring",
-        cfg.watch.issue_provider === "github",
+        cfg.watch.issue_provider === "github" || cfg.watch.issue_provider === "jira",
         cfg.watch.issue_provider === "github"
           ? "github supports issue authoring (createIssue/sub-issues)"
-          : `watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — the refine lane needs "github" (Jira issue authoring isn't implemented yet)`,
+          : cfg.watch.issue_provider === "jira"
+            ? "jira supports issue authoring (createIssue/parent field) — run `spf watch init` to validate watch.jira.issue_types against the real project"
+            : `watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — the refine lane needs "github" or "jira"`,
       );
     }
   }

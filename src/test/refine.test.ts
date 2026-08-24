@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseRefineMarker, publish, resolveAuthoringProvider } from "../core/refine.js";
 import { refinementWellFormed } from "../core/gates.js";
+import { JiraProvider } from "../core/issues/jira_provider.js";
 import type { Issue, IssueAuthoringProvider } from "../core/issues/provider.js";
 import type { RefinedIssue, RefineQuestion, SFConfig } from "../core/data_types.js";
 
@@ -18,7 +19,7 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
       base_branch: "main",
       poll_ms: 60_000,
       concurrency: 2,
-      jira: { base_url: "", project_key: "" },
+      jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task" } },
       refine: { enabled: false, chain: "refine", concurrency: 1 },
       ...watch,
     },
@@ -27,12 +28,12 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
 
 /** In-memory fake — exactly the seam `IssueAuthoringProvider` exists for. */
 class FakeTracker implements IssueAuthoringProvider {
-  created: Array<{ title: string; body: string; labels: string[] }> = [];
+  created: Array<{ title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }> = [];
   links: Array<{ parent: string; child: string }> = [];
   private byId = new Map<string, Issue>();
   nextId = 1;
 
-  async createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue> {
+  async createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue> {
     this.created.push(input);
     const id = String(this.nextId++);
     const issue: Issue = { id, internal_id: `db-${id}`, title: input.title, body: input.body, labels: input.labels };
@@ -52,8 +53,46 @@ class FakeTracker implements IssueAuthoringProvider {
 
 // ── resolveAuthoringProvider ─────────────────────────────────────────────
 
-test("resolveAuthoringProvider: rejects a non-github issue_provider", () => {
-  assert.throws(() => resolveAuthoringProvider(makeCfg({ issue_provider: "jira" })), /does not support issue authoring/);
+test("resolveAuthoringProvider: constructs a JiraProvider when issue_provider is jira and config/env are complete", () => {
+  const before = { email: process.env["JIRA_EMAIL"], token: process.env["JIRA_API_TOKEN"] };
+  process.env["JIRA_EMAIL"] = "you@example.com";
+  process.env["JIRA_API_TOKEN"] = "jira-token";
+  try {
+    const provider = resolveAuthoringProvider(
+      makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task" } } }),
+    );
+    assert.ok(provider instanceof JiraProvider);
+  } finally {
+    if (before.email !== undefined) process.env["JIRA_EMAIL"] = before.email;
+    else delete process.env["JIRA_EMAIL"];
+    if (before.token !== undefined) process.env["JIRA_API_TOKEN"] = before.token;
+    else delete process.env["JIRA_API_TOKEN"];
+  }
+});
+
+test("resolveAuthoringProvider: rejects a jira config missing base_url or project_key", () => {
+  assert.throws(
+    () => resolveAuthoringProvider(makeCfg({ issue_provider: "jira", jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task" } } })),
+    /watch\.jira\.base_url and watch\.jira\.project_key/,
+  );
+});
+
+test("resolveAuthoringProvider: rejects when JIRA_EMAIL or JIRA_API_TOKEN is unset", () => {
+  const before = { email: process.env["JIRA_EMAIL"], token: process.env["JIRA_API_TOKEN"] };
+  delete process.env["JIRA_EMAIL"];
+  delete process.env["JIRA_API_TOKEN"];
+  try {
+    assert.throws(
+      () =>
+        resolveAuthoringProvider(
+          makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task" } } }),
+        ),
+      /JIRA_EMAIL and JIRA_API_TOKEN/,
+    );
+  } finally {
+    if (before.email !== undefined) process.env["JIRA_EMAIL"] = before.email;
+    if (before.token !== undefined) process.env["JIRA_API_TOKEN"] = before.token;
+  }
 });
 
 test("resolveAuthoringProvider: rejects when neither issue_repo nor repo is set", () => {
@@ -84,7 +123,7 @@ test("resolveAuthoringProvider: issue_repo overrides repo — the github-issues-
     // issue_repo (the GitHub repo), never fall back to repo, or it would
     // try to create a GitHub issue against a Bitbucket-shaped identifier.
     const provider = resolveAuthoringProvider(makeCfg({ issue_provider: "github", repo: "acme-workspace/widgets-code", issue_repo: "acme/widgets-issues" }));
-    await provider.createIssue({ title: "x", body: "", labels: [] });
+    await provider.createIssue({ title: "x", body: "", labels: [], kind: "story" });
   } finally {
     globalThis.fetch = originalFetch;
     if (before !== undefined) process.env["GITHUB_TOKEN"] = before;
@@ -127,6 +166,16 @@ test("publish: labels a leaf with its type, priority, AND spf:refined; a contain
   const leaf = tracker.created.find((c) => c.title === "A leaf")!;
   assert.deepEqual(feature.labels, ["spf:type:feature", "spf:priority:p2"]);
   assert.deepEqual(leaf.labels, ["spf:type:story", "spf:priority:p2", "spf:refined"]);
+});
+
+test("publish: passes each node's own kind through to createIssue — what a Jira tracker maps to a real issue type", async () => {
+  const tracker = new FakeTracker();
+  const issues = [node({ key: "F1", kind: "feature", title: "A feature" }), node({ key: "S1", kind: "bug", title: "A leaf", parent: "F1" })];
+
+  await publish(tracker, issues, { labelPrefix: "spf" });
+
+  assert.equal(tracker.created.find((c) => c.title === "A feature")!.kind, "feature");
+  assert.equal(tracker.created.find((c) => c.title === "A leaf")!.kind, "bug");
 });
 
 // ── priority: labeling, the hidden marker, and the spec ceiling ─────────

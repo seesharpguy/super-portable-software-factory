@@ -369,7 +369,7 @@ the Bitbucket identifier — finds no matching issues and looks exactly like
 nothing being configured at all.
 
 ```bash
-spf watch init                # idempotently seed tracker state (no-op for Jira — see below); run this first
+spf watch init                # idempotently seed tracker state (labels are a no-op report on Jira — see below); run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
 spf watch --once             # one poll tick, then exit — good for cron
 spf watch --dry-run          # log intended claims/transitions, mutate nothing
@@ -397,18 +397,51 @@ anything to claim. `watch.refine` is a second lane over the same poll loop
 that does exactly that: it polls `<prefix>:spec-ready`, runs a decomposition
 chain (`refine` by default — `request → scout → refiner → publish`) against
 the spec in its own worktree, and publishes what it produces as real tracker
-issues — a feature/epic container plus story/bug/task leaves, linked via
-GitHub's native sub-issue hierarchy.
+issues — a feature/epic container plus story/bug/task leaves, linked into a
+real hierarchy: GitHub's native sub-issues API, or Jira's `parent` field.
 
 ```yaml
 watch:
-  issue_provider: github    # required — issue authoring isn't implemented for Jira yet
+  issue_provider: github    # or jira — both implement issue authoring
   repo: owner/name
   refine:
     enabled: true
     chain: refine           # any chain that ends in steps.publishIssues()
     concurrency: 1          # this lane's own budget, independent of watch.concurrency
 ```
+
+On Jira, every `RefinedIssue.kind` (`epic`/`feature`/`story`/`bug`/`task`) maps
+to a real Jira issue type through `watch.jira.issue_types` — defaults
+`epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`,
+overridable per kind since real projects rename or customize these:
+
+```yaml
+watch:
+  issue_provider: jira
+  jira:
+    base_url: https://your-domain.atlassian.net
+    project_key: PROJ
+    issue_types:        # optional — shown are the defaults
+      epic: Epic
+      feature: Epic
+      story: Story
+      bug: Bug
+      task: Task
+  refine:
+    enabled: true
+```
+
+Hierarchy uses Jira's modern `parent` field only (no legacy "Epic Link"
+custom-field support) — this works on team-managed projects and on
+company-managed projects with Jira's current issue-hierarchy setting; a
+project not configured for it surfaces Jira's own API error, unmodified.
+One accepted platform limitation: Jira doesn't support Epic-under-Epic
+nesting the way GitHub's sub-issues API supports up to 8 levels, so a
+`feature` node parented under another `epic`/`feature` (both `Epic` by
+default) will fail at publish time on Jira specifically — a real platform
+difference, not a bug. Both `spf watch init` and `spf watch`'s own startup
+check validate `watch.jira.issue_types` against the real project before
+anything unattended runs — see "Jira" below.
 
 Every generated issue carries a `<prefix>:type:epic|feature|story|bug|task`
 label AND a `<prefix>:priority:p0|p1|p2|p3` label (see "Priority, dependencies,
@@ -472,9 +505,12 @@ many rounds of feedback it took, if any — until **every one of those
 issues** reaches `<prefix>:done` (a leaf that lands, or a feature/epic
 container once `rollUp` has already finished it — see "Container roll-up"
 below). Only then does `spf watch` transition the spec to `<prefix>:done`,
-post a closing comment, and close it on the tracker (best-effort: a failed
-close never turns completed work back into `blocked`); a `spec_done` event
-fires at that point, distinct from the earlier `spec_refined`. A spec whose
+post a closing comment, and close it on the tracker where the tracker
+supports closing at all — GitHub does (best-effort: a failed close never
+turns completed work back into `blocked`); Jira doesn't have this wired up,
+so a Jira spec still relabels and comments correctly, just stays open. A
+`spec_done` event fires either way, distinct from the earlier
+`spec_refined`. A spec whose
 generated leaf never gets promoted, or whose work stalls `blocked`, simply
 stays `spec-in-progress` — which is the truthful state, not a bug.
 
@@ -495,16 +531,19 @@ never opens a PR — but it isn't abandoned once its children exist, either.
 Every time a leaf's PR merges, `spf watch` checks that leaf's parent: once
 **every** child under a container carries `<prefix>:done`, the container
 gets a summary comment (every child it rolled up, by id), transitions to
-`<prefix>:done`, and closes on the tracker — then the same check runs on
+`<prefix>:done`, and closes on the tracker if the tracker supports closing
+at all (GitHub does; Jira doesn't have this wired up, so a Jira container
+still relabels and comments, just stays open) — then the same check runs on
 *its* parent, so an epic of features rolls up once its last feature does.
 A container with even one unfinished child (including one still sitting at
 `<prefix>:refined`, never promoted) is left exactly as it is; nothing times
 out or force-closes it.
 
 Roll-up needs to read back the hierarchy `publish()` created — GitHub's
-native sub-issues API — so it's GitHub-only, same restriction as authoring
-itself: on Jira it's a logged no-op, not a startup failure, since the build
-lane still works fine without it.
+native sub-issues API, or a Jira `parent = "<id>"` JQL search — so it works
+on both providers today, same as authoring itself. A tracker that isn't
+authoring-capable at all gets a logged no-op, not a startup failure, since
+the build lane still works fine without roll-up.
 
 `spf watch init` seeds the type labels alongside the state ones — **re-run
 it** after upgrading to this version, so it can create the new
@@ -545,7 +584,7 @@ export JIRA_API_TOKEN=...   # id.atlassian.com -> Security -> API tokens
 
 State is modeled as Jira **labels** (`<prefix>:ready`, etc.), mirroring GitHub exactly, rather than native workflow status transitions — the latter would need per-project transition-id mapping, since workflows vary by project/scheme; labels work identically everywhere with zero per-project setup. One caveat: colons are a legal Jira label character and JQL matches on them fine, but they won't show up in Jira's own label autocomplete UI — cosmetic only.
 
-`spf watch init` is a no-op here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it just reports the labels this run will use.
+`spf watch init` still doesn't create any labels here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it reports the labels this run will use. But with `watch.refine.enabled`, it now also validates `watch.jira.issue_types` against the real project's issue types, read-only, and exits non-zero on a mismatch — see "Refining specs" above.
 
 ### Bitbucket (`code_host: bitbucket`)
 

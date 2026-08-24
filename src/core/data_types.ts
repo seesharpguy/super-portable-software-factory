@@ -616,10 +616,39 @@ export type WatchIssueProviderKind = v.InferOutput<typeof WatchIssueProviderSche
 export const WatchCodeHostSchema = v.picklist(["github", "bitbucket"]);
 export type WatchCodeHostKind = v.InferOutput<typeof WatchCodeHostSchema>;
 
-/** Only consulted when `issue_provider: jira`. Auth is `JIRA_EMAIL` + `JIRA_API_TOKEN` env vars, checked at startup like `GITHUB_TOKEN`. */
+/**
+ * What each `RefinedIssue.kind` creates as, on Jira — Jira's create endpoint
+ * requires a real `issuetype`, and project setups vary (renamed types,
+ * non-English instances, custom schemes), so this is a name -> name map,
+ * not a hardcoded assumption. Every field defaults independently: a config
+ * that only sets `bug: Defect` still gets Epic/Epic/Story/Task for the
+ * other four. `jira_provider.ts`'s `createIssue`/`validateIssueTypes` are
+ * the readers; `spf watch init` and `spf watch`'s own startup check
+ * (`cli/commands/watch.ts`) both validate this against the real project
+ * before anything unattended runs on it.
+ */
+export const JiraIssueTypeMapSchema = v.object({
+  epic: v.optional(v.string(), "Epic"),
+  feature: v.optional(v.string(), "Epic"),
+  story: v.optional(v.string(), "Story"),
+  bug: v.optional(v.string(), "Bug"),
+  task: v.optional(v.string(), "Task"),
+});
+export type JiraIssueTypeMap = v.InferOutput<typeof JiraIssueTypeMapSchema>;
+
+/**
+ * Only consulted when `issue_provider: jira`. Auth is `JIRA_EMAIL` +
+ * `JIRA_API_TOKEN` env vars, checked at startup like `GITHUB_TOKEN`. Whole-
+ * object replace on config-file-layer merge, like `refine`/
+ * `observability.otel` (see `agents.ts`'s `mergeRawConfig`) — an override
+ * file that touches `watch.jira` at all must repeat `issue_types` too if it
+ * wants to keep a customized mapping, same caveat that already applies to
+ * `base_url`/`project_key` today.
+ */
 export const WatchJiraConfigSchema = v.object({
   base_url: v.optional(v.string(), ""), // e.g. "https://your-domain.atlassian.net"
   project_key: v.optional(v.string(), ""), // e.g. "PROJ"
+  issue_types: v.optional(JiraIssueTypeMapSchema, () => v.parse(JiraIssueTypeMapSchema, {})),
 });
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 
@@ -628,10 +657,10 @@ export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
  * spec into a feature/story tree of real issues, instead of running
  * `watch.chain` against it directly (a spec is not individually workable —
  * see `core/refine.ts`). Off by default so an existing `watch:` config's
- * behavior is unchanged by upgrading; turning it on with
- * `issue_provider: jira` fails loudly at `spf watch` startup, since
- * `JiraProvider` doesn't implement `IssueAuthoringProvider` (create/link)
- * yet — see its module comment.
+ * behavior is unchanged by upgrading. Needs `issue_provider: github` or
+ * `"jira"` — both implement `IssueAuthoringProvider` (create/link/list) —
+ * any other value fails loudly at `spf watch` startup rather than running a
+ * refine lane that can never publish anything.
  */
 export const WatchRefineConfigSchema = v.object({
   enabled: v.optional(v.boolean(), false),

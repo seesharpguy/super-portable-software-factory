@@ -152,12 +152,13 @@ class FakeProvider implements IssueProvider {
   }
   /**
    * Not part of `IssueProvider` — `listChildren` lives on
-   * `IssueAuthoringProvider` instead (GitHub-only in production; see
-   * `provider.ts`'s doc comment), so this is a plain convenience a roll-up
-   * test wires directly into `WatchDeps.listChildren`
+   * `IssueAuthoringProvider` instead (GitHub and Jira both implement it in
+   * production; see `provider.ts`'s doc comment), so this is a plain
+   * convenience a roll-up test wires directly into `WatchDeps.listChildren`
    * (`{ listChildren: (parent) => provider.listChildren(parent) }`), mirroring
-   * how `cli/commands/watch.ts` wires the real `GitHubProvider.listChildren`.
-   * Reads the same hidden `spf-refine:` marker `getIssue`/`orderEligible` do.
+   * how `cli/commands/watch.ts` wires whichever real provider is
+   * authoring-capable. Reads the same hidden `spf-refine:` marker
+   * `getIssue`/`orderEligible` do.
    */
   async listChildren(parent: Issue): Promise<Issue[]> {
     return [...this.entries.values()].filter((e) => parseRefineMarker(e.issue.body).parent === parent.id).map((e) => e.issue);
@@ -589,14 +590,16 @@ test("finishReviews: a container already done is never re-processed", async () =
   assert.equal(listChildrenCalls, 0, "getIssue already saw spf:done on the container and returned before ever listing its children");
 });
 
-test("finishReviews: with no listChildren wired (a non-GitHub tracker), roll-up is a logged no-op, not a failure", async () => {
+test("finishReviews: with no listChildren wired, roll-up is a logged no-op, not a failure", async () => {
   const provider = new FakeProvider();
   provider.addIssue("111", "child", "review", { pr: 624, branch: "spf-watch/111-x" }, { body: markerBody({ parent: "110" }) });
   provider.addIssue("110", "the feature");
   const codeHost = new FakeCodeHost();
   codeHost.prs.set(624, { merged: true, state: "closed", ciStatus: "success" });
 
-  // makeDeps's default has no listChildren — same as a Jira-backed provider.
+  // makeDeps's default has no listChildren wired — any tracker without
+  // authoring support (or a caller that simply didn't wire it) behaves
+  // this way; GitHub and Jira both DO implement it in production.
   await finishReviews(makeDeps(provider, codeHost));
 
   assert.equal(provider.entries.get("111")!.state, "done", "the leaf itself still finishes normally");
