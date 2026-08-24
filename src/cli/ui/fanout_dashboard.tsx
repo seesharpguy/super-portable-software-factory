@@ -168,7 +168,11 @@ export function mountFanoutDashboard(opts: { n: number; chainName: string; baseB
   const handleRef: { current: Handle | null } = { current: null };
   const app = render(
     <FanoutRoot n={opts.n} chainName={opts.chainName} baseBranch={opts.baseBranch} baseAdwId={opts.baseAdwId} handleRef={handleRef} />,
-    { patchConsole: false },
+    // `interactive: true` overrides Ink's own CI auto-detection — see
+    // `ink_asker.tsx`'s identical `render()` call for why: the caller
+    // (`commands/fanout.ts`) only reaches this file after its own
+    // `isInteractive()` check has already passed.
+    { patchConsole: false, interactive: true },
   );
 
   return {

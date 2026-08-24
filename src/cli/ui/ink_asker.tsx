@@ -225,7 +225,23 @@ export function createInkAsker(streams: RenderStreams = {}): Asker {
             currentReject?.(new InterviewAborted());
           }}
         />,
-        { ...streams, exitOnCtrlC: false, patchConsole: false },
+        // `interactive: true` overrides Ink's own auto-detection
+        // (`stdout.isTTY` + the `is-in-ci` package) rather than relying on
+        // it: the caller here is `commands/init.ts`, which only ever
+        // reaches this file after `inkAvailable()` has ALREADY confirmed a
+        // real interactive terminal — that check is the one source of
+        // truth, and Ink's own CI detection is redundant at best. At
+        // worst it actively lies: GitHub Actions sets `CI=true`
+        // unconditionally, and `node --test` running there is exactly
+        // where this file's own test suite (`ink_asker.test.ts`) drives a
+        // real Ink instance against a fake TTY that reports `isTTY: true`
+        // — Ink's non-interactive mode then writes NOTHING incrementally
+        // (only the final frame, at unmount), so `stdout.frames` never
+        // grows and every keystroke-driven test hangs until its own
+        // timeout. Confirmed by reproducing the exact CI failure locally
+        // with `CI=1 node --test ...` before this fix, and confirming it
+        // disappears after.
+        { ...streams, exitOnCtrlC: false, patchConsole: false, interactive: true },
       );
     }
     // `InterviewRoot` populates this synchronously during its first render,

@@ -143,7 +143,11 @@ export function mountRunDashboard(opts: { maxCost?: number; maxTokens?: number }
         initialLive={currentPhase}
         initialUsage={currentUsage}
       />,
-      { patchConsole: false },
+      // `interactive: true` overrides Ink's own CI auto-detection — see
+      // `ink_asker.tsx`'s identical `render()` call for why: the caller
+      // (`commands/run.ts`) only reaches this file after its own
+      // `isInteractive()` check has already passed.
+      { patchConsole: false, interactive: true },
     );
   }
   mount();

@@ -40,7 +40,13 @@ import { render, Box, Text } from "ink";
  * cause.
  */
 async function paint(node: ReactElement): Promise<void> {
-  const app = render(node, { patchConsole: false });
+  // `interactive: true` overrides Ink's own `stdout.isTTY`/`is-in-ci`
+  // auto-detection — every caller here already reached this file only
+  // after its own `isInteractive()` check passed (which itself checks
+  // `!process.env["CI"]`), so Ink's redundant CI detection can only ever
+  // disagree by mistake. See `ink_asker.tsx`'s identical `render()` call
+  // for where disagreeing actually broke something (a CI-run test hung).
+  const app = render(node, { patchConsole: false, interactive: true });
   await app.waitUntilRenderFlush();
   app.unmount();
 }
