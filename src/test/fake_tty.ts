@@ -57,7 +57,17 @@ export class FakeStdout extends EventEmitter {
     return true;
   }
 
-  /** The most recent frame Ink wrote — analogous to `ink-testing-library`'s `lastFrame()`, minus the ANSI it never strips either. */
+  /**
+   * The most recent write Ink made — analogous to `ink-testing-library`'s
+   * `lastFrame()`, minus the ANSI it never strips either. NOT a reliable
+   * "did the screen content change" signal on its own: Ink writes a
+   * repaint as several separate `write()` calls, and the LAST one for
+   * almost every commit is a fixed synchronized-output-end marker
+   * (`\x1b[?2026l`) — this returns that same marker back to back across
+   * completely different renders. A test that needs to know whether a NEW
+   * commit has happened since some earlier point should compare
+   * `frames.length` instead (see `ink_asker.test.ts`'s `waitForReady`).
+   */
   lastFrame(): string | undefined {
     return this.frames.at(-1);
   }

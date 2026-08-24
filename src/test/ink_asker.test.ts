@@ -42,6 +42,51 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The gap this closes: `render()`/`rerender()` returns as soon as Ink's
+ * synchronous commit has painted a frame, but the `useInput` hook inside
+ * whatever `@inkjs/ui`/hand-rolled component just mounted attaches its
+ * actual stdin listener from a `useEffect` — a PASSIVE effect, flushed on
+ * its own schedule, not necessarily before that call returns. A keystroke
+ * sent into that gap reaches `FakeStdin`'s `EventEmitter` with no listener
+ * yet attached and is silently dropped — this is what actually happened in
+ * CI (`text: typed value + enter resolves to what was typed` got `''`
+ * instead of `'river'`: the "river" send landed in the gap, so only the
+ * following Enter ever registered, submitting nothing typed). A fixed 30ms
+ * margin covered this on a fast, idle machine every time it was tried
+ * locally, but not under whatever load the CI run hit.
+ *
+ * Counts `stdout.frames.length`, NOT `stdout.lastFrame()`: Ink writes a
+ * repaint as several separate `write()` calls, and the LAST one for
+ * almost every commit is a fixed synchronized-output-end marker
+ * (`\x1b[?2026l`) — `lastFrame()` returns that marker back-to-back across
+ * completely different renders, so comparing it never detects a change at
+ * all (confirmed empirically: a manual trace showed the "current" frame
+ * staying byte-identical across a prompt that had, in fact, already
+ * settled and resolved — `waitForReady` built on that check spun for the
+ * full timeout every time). `beforeCount` must be captured BEFORE minting
+ * the new prompt (the `asker.text()`/`select()`/etc. call): this asker's
+ * Ink instance stays mounted for the whole test (`createInkAsker`'s own
+ * "one persistent instance" design), so the count is already nonzero from
+ * the PRIOR prompt by the time a second or third prompt mounts — waiting
+ * for "any writes at all" would return immediately without observing the
+ * new prompt's own commit. A higher count only proves a new commit
+ * happened, not that the effect has flushed — there's no signal available
+ * from outside a `FakeStdin`/`FakeStdout` pair that would prove that
+ * directly — so this pairs the write-observed check with a generous floor
+ * (well above the 30ms that occasionally wasn't enough) rather than
+ * pretending the poll alone closes the gap.
+ */
+async function waitForReady(stdout: FakeStdout, beforeCount = 0, minMs = 150, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  while (stdout.frames.length <= beforeCount) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitForReady: timed out waiting for the next write");
+    await sleep(5);
+  }
+  const elapsed = Date.now() - start;
+  if (elapsed < minMs) await sleep(minMs - elapsed);
+}
+
 // A fake TTY pair has no real I/O handle, and `createInkAsker`'s own
 // timers (the `confirm` timeout) are deliberately `.unref()`'d — between
 // two `await sleep(...)` calls, the event loop can briefly hold zero
@@ -89,9 +134,9 @@ async function withAsker(
 // ── text ─────────────────────────────────────────────────────────────────
 
 test("text: typed value + enter resolves to what was typed", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.text("Name");
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send("river");
     await sleep(30);
     stdin.send(KEY.enter);
@@ -99,17 +144,17 @@ test("text: typed value + enter resolves to what was typed", () =>
   }));
 
 test("text: blank + enter resolves to the default", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.text("Name", { default: "bob" });
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.enter);
     assert.equal(await pending, "bob");
   }));
 
 test("text: a rejected answer does not bleed into the retry — regression for the TextInput concatenation bug", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.text("Age", { validate: (v) => (v === "bad" ? "not a real age" : null) });
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send("bad");
     await sleep(30);
     stdin.send(KEY.enter); // rejected — must not leave "bad" sitting in the box
@@ -123,17 +168,17 @@ test("text: a rejected answer does not bleed into the retry — regression for t
 // ── select ───────────────────────────────────────────────────────────────
 
 test("select: enter with no movement resolves to the default — regression for @inkjs/ui's Select never firing onChange here", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.select("Pick one", [{ value: "a" }, { value: "b" }, { value: "c" }], "a");
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.enter);
     assert.equal(await pending, "a");
   }));
 
 test("select: arrow-down then enter resolves to the highlighted choice, not the default", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.select("Pick one", [{ value: "a" }, { value: "b" }, { value: "c" }], "a");
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.down);
     await sleep(30);
     stdin.send(KEY.enter);
@@ -143,17 +188,17 @@ test("select: arrow-down then enter resolves to the highlighted choice, not the 
 // ── confirm ──────────────────────────────────────────────────────────────
 
 test("confirm: enter with no input resolves to the default", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.confirm("Proceed?", true);
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.enter);
     assert.equal(await pending, true);
   }));
 
 test("confirm: an explicit 'n' overrides a true default", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.confirm("Proceed?", true);
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send("n");
     assert.equal(await pending, false);
   }));
@@ -169,17 +214,17 @@ test("confirm: timeoutMs expires to the default, never to true regardless of def
 // ── secret ───────────────────────────────────────────────────────────────
 
 test('secret: a blank submit resolves to "" — the caller\'s signal to keep the existing value', () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.secret("API key", { current: "sk-abcdef1234" });
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.enter);
     assert.equal(await pending, "");
   }));
 
 test("secret: a typed value resolves to that value", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.secret("API key");
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send("sk-new-value");
     await sleep(30);
     stdin.send(KEY.enter);
@@ -189,26 +234,26 @@ test("secret: a typed value resolves to that value", () =>
 // ── Ctrl-C / Ctrl-D ──────────────────────────────────────────────────────
 
 test("ctrl-c mid-prompt rejects with InterviewAborted", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.text("Name");
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.ctrlC);
     await assert.rejects(pending, InterviewAborted);
   }));
 
 test("ctrl-d (EOF) is treated the same as ctrl-c", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     const pending = asker.confirm("Proceed?", false);
-    await sleep(30);
+    await waitForReady(stdout);
     stdin.send(KEY.ctrlD);
     await assert.rejects(pending, InterviewAborted);
   }));
 
 test("once aborted, every later call on the same asker rejects immediately without showing a new prompt", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     await assert.rejects(async () => {
       const pending = asker.text("Name");
-      await sleep(30);
+      await waitForReady(stdout);
       stdin.send(KEY.ctrlC);
       await pending;
     }, InterviewAborted);
@@ -221,10 +266,18 @@ test("once aborted, every later call on the same asker rejects immediately witho
 // ── a full sequential interview, one asker, one mount ───────────────────
 
 test("full sequential interview: heading, note, text, select (bare enter), select (arrow+enter), confirm, and secret all resolve in order on ONE persistent instance", () =>
-  withAsker(async ({ stdin, asker }) => {
+  withAsker(async ({ stdin, stdout, asker }) => {
     asker.heading("Coding agent");
     asker.note("this mirrors runInterview()'s own call shape, not just one prompt in isolation");
 
+    // One asker, one persistent Ink instance across every prompt below —
+    // `stdout.frames.length` is already nonzero by the second prompt
+    // onward, so each `waitForReady` call captures its own "before" count
+    // just ahead of minting the next prompt, rather than defaulting to 0
+    // (which would resolve immediately against writes the PRIOR prompt
+    // already made and reintroduce the exact race this file exists to
+    // close).
+    let before = stdout.frames.length;
     const backend = asker.select(
       "Which backend runs each agent?",
       [
@@ -233,15 +286,17 @@ test("full sequential interview: heading, note, text, select (bare enter), selec
       ],
       "claude_code",
     );
-    await sleep(30);
+    await waitForReady(stdout, before);
     stdin.send(KEY.enter); // accept the default with no arrow movement — the exact case that hung over a real pty pre-fix
     assert.equal(await backend, "claude_code");
 
+    before = stdout.frames.length;
     const launchCommand = asker.text("Launch command", { default: "claude" });
-    await sleep(30);
+    await waitForReady(stdout, before);
     stdin.send(KEY.enter);
     assert.equal(await launchCommand, "claude");
 
+    before = stdout.frames.length;
     const model = asker.select(
       "Model",
       [
@@ -251,19 +306,21 @@ test("full sequential interview: heading, note, text, select (bare enter), selec
       ],
       "sonnet",
     );
-    await sleep(30);
+    await waitForReady(stdout, before);
     stdin.send(KEY.down); // this arrow-then-enter step is exactly where the real bug's Enter got lost
     await sleep(30);
     stdin.send(KEY.enter);
     assert.equal(await model, "opus");
 
+    before = stdout.frames.length;
     const proceed = asker.confirm("Proceed?", true);
-    await sleep(30);
+    await waitForReady(stdout, before);
     stdin.send(KEY.enter);
     assert.equal(await proceed, true);
 
+    before = stdout.frames.length;
     const token = asker.secret("API key", { current: "sk-old" });
-    await sleep(30);
+    await waitForReady(stdout, before);
     stdin.send("sk-new");
     await sleep(30);
     stdin.send(KEY.enter);
