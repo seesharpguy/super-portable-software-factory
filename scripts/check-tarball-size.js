@@ -2,16 +2,21 @@
 /**
  * Tarball size gate, run in CI after `npm run build`. `npm pack --dry-run
  * --json` reports the real size without writing a .tgz to disk. Budget
- * verified against this package's build with `dist/test` excluded from
- * `files` (478.5kB packed / 1342.6kB unpacked, after tiering #14): ≤500 KB
- * packed, ≤1.41 MB unpacked — ~5% headroom so a modest PR doesn't trip CI,
- * without silently regressing back toward shipping compiled test files.
+ * re-verified against this package's build after the Jira issue-authoring
+ * work landed alongside priority/frontier/roll-up and spec-completion
+ * (514.1kB packed / 1455.7kB unpacked): ≤540 KB packed, ≤1.53 MB unpacked —
+ * ~5% headroom so a modest PR doesn't trip CI, without silently regressing
+ * back toward shipping compiled test files. Previously 478.5kB/1342.6kB
+ * (after tiering #14) — raise these again, the same way, whenever a real
+ * feature deliberately grows the package; this gate exists to catch
+ * unintentional bloat (an accidentally-included file, a runaway
+ * dependency), not to cap the project's size forever.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 500_000;
-const UNPACKED_BUDGET = 1_410_000;
+const PACKED_BUDGET = 540_000;
+const UNPACKED_BUDGET = 1_530_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the

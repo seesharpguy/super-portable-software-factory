@@ -33,6 +33,7 @@ import {
   TieringConfigSchema,
   VerifyOutput,
   WatchConfigSchema,
+  clampPriority,
   makePhaseParams,
 } from "../core/data_types.js";
 import { agentEnv, loadConfig } from "../core/agents.js";
@@ -99,6 +100,28 @@ test("RefineOutput: questions defaults to [] when absent — a pre-existing issu
   assert.equal(withQuestions.questions.length, 1);
   assert.equal(withQuestions.questions[0]!.id, "Q1");
   assert.equal(withQuestions.questions[0]!.why_it_matters, "", "optional question fields still default like the rest of the envelope schemas");
+});
+
+test("RefineOutput: a node's priority defaults to p2 when the model omits it", () => {
+  const parsed = v.parse(RefineOutput.schema, {
+    status: "success",
+    issues: [{ key: "S1", kind: "story", title: "A leaf", body: "## What to build" }],
+  });
+  assert.equal(parsed.issues[0]!.priority, "p2");
+
+  const explicit = v.parse(RefineOutput.schema, {
+    status: "success",
+    issues: [{ key: "S1", kind: "story", title: "A leaf", body: "## What to build", priority: "p0" }],
+  });
+  assert.equal(explicit.issues[0]!.priority, "p0");
+});
+
+test("clampPriority: pulls a node down to the ceiling when it outranks it, never raises it, and no-ops on a nullish ceiling", () => {
+  assert.equal(clampPriority("p0", "p2"), "p2", "p0 outranks p2 — clamp down");
+  assert.equal(clampPriority("p3", "p2"), "p3", "p3 does not outrank p2 — left alone");
+  assert.equal(clampPriority("p2", "p2"), "p2", "equal to the ceiling — left alone");
+  assert.equal(clampPriority("p0", null), "p0", "no ceiling — no-op");
+  assert.equal(clampPriority("p0", undefined), "p0", "no ceiling — no-op");
 });
 
 test("PhaseParamsSchema itself (the one schema WITH a rawTransform) correctly refuses JSON Schema conversion", () => {

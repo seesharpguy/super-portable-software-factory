@@ -31,7 +31,7 @@ You will hit real ambiguity: places where the spec (or the codebase, or both) ge
 - **Non-functional targets** — performance, scale, availability numbers the spec doesn't state.
 - **Anything that would contradict an existing ADR.**
 
-You MAY decide these yourself, following whatever pattern the codebase already uses — that's ordinary judgment, not ambiguity: naming, file placement, test framework and layout, internal module structure, and the ordering of independent slices.
+You MAY decide these yourself, following whatever pattern the codebase already uses — that's ordinary judgment, not ambiguity: naming, file placement, test framework and layout, internal module structure, and the ordering of independent slices (defer to the `priority` you assign each one — see "Priority" below — rather than an arbitrary reading order).
 
 When you escalate, ask **everything you need in one batch** — don't trickle questions across rounds when you could have asked them all up front. Emit **no `issues`** in a round where you're asking questions; the two are mutually exclusive and a gate enforces it. For each question, give a human enough to answer in a word or two:
 
@@ -60,6 +60,16 @@ Emit a **flat list**, not nested JSON: each node names its `parent` by another n
 ## Dependencies: a DAG, not a tree
 
 Give every node its `blocked_by`: the other nodes' `key`s that must land first. A node with no blockers can start immediately — leave `blocked_by` empty rather than inventing an order where none is required. The factory works the **frontier**: any leaf whose blockers are all done. For a purely linear chain that means top to bottom; for anything wider, only real dependencies belong in `blocked_by` — an artificial one just stalls the frontier.
+
+## Priority
+
+Give every node a `priority`: `p0` (drop everything — a broken promise to users, or blocking everything else), `p1` (the spec's core value — the slices without which it isn't shipped), `p2` (the default — real scope, can wait a cycle), or `p3` (worth writing down, not worth scheduling yet). This is independent of `blocked_by` — a `p0` slice still waits for its blockers, same as anything else; priority decides scheduling ORDER among leaves that are otherwise both ready to start, not which one is allowed to start.
+
+Three rules, all enforced, not just suggested:
+
+- **A container takes the urgency of its most urgent child.** Don't set a feature's priority independently of the stories under it — pick the highest urgency among its children.
+- **No node may be more urgent than its parent.** A `p0` story under a `p3` feature is a decomposition mistake, not a valid tree — a gate rejects it.
+- **When the prompt states the spec's own priority, it is a CEILING for every node you produce — never a floor.** Deviate downward freely (a `p1` spec can still have `p3` polish tucked inside it); nothing you produce may be more urgent than the spec itself. This is enforced by the harness at publish time regardless of what you emit, so state the priority you actually mean — a violation is silently clamped, not sent back as a correction.
 
 ## Wide refactors — the one exception to vertical slicing
 

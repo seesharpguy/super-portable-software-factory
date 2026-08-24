@@ -369,13 +369,25 @@ the Bitbucket identifier — finds no matching issues and looks exactly like
 nothing being configured at all.
 
 ```bash
-spf watch init                # idempotently seed tracker state (no-op for Jira — see below); run this first
+spf watch init                # idempotently seed tracker state (labels are a no-op report on Jira — see below); run this first
 spf watch                    # foreground daemon; Ctrl-C drains in-flight claims first
 spf watch --once             # one poll tick, then exit — good for cron
 spf watch --dry-run          # log intended claims/transitions, mutate nothing
 ```
 
 No GitHub App, no webhook, no Jira/Bitbucket app install — it's a plain REST poll against whichever combination is configured, same philosophy as the trace db's own polling contract. See [`assets/templates/`](assets/templates/) for full worked configs (also usable directly via `spf init --template <name>`), and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
+
+### Priority, dependencies, and picking what's next
+
+Among every `<prefix>:ready` issue, `spf watch` claims in this order:
+
+1. **Priority** — the `<prefix>:priority:p0|p1|p2|p3` label (`p0` drop-everything, `p2` the default, `p3` someday). `spf watch init` seeds all four. A human relabeling an issue is the whole override mechanism — there's no separate priority command.
+2. **Sibling affinity** — among issues at the same priority, one whose parent feature already has a sibling in flight goes first. This is what tends to finish one feature before starting the next without giving up the one-PR-per-story design (see "Refining specs" below): each story is still its own claim, its own worktree, its own PR — affinity only orders which claim happens next.
+3. **Creation order** (oldest first) — the final tiebreaker.
+
+Before claiming anything, `spf watch` also checks the **frontier**: an issue's `blocked_by` dependencies (set by the refine lane, or by hand) must all carry `<prefix>:done` first. A leaf whose blockers aren't done yet is skipped, not blocked — it's simply reconsidered next tick, once the log line naming what it's waiting on stops applying.
+
+This is a **label**, not this repo's own GitHub Projects v2 "Priority" field (if your board has one — Urgent/High/Medium/Low, say). `spf watch` never reads or writes Projects v2: no GraphQL, no `project` token scope, no Jira equivalent. If you use both, they're independent — nothing reconciles them, and `spf watch` obeys only the label. Keep them aligned yourself, or don't use the board field for this repo's issues.
 
 ### Refining specs (`watch.refine`)
 
@@ -385,12 +397,12 @@ anything to claim. `watch.refine` is a second lane over the same poll loop
 that does exactly that: it polls `<prefix>:spec-ready`, runs a decomposition
 chain (`refine` by default — `request → scout → refiner → publish`) against
 the spec in its own worktree, and publishes what it produces as real tracker
-issues — a feature/epic container plus story/bug/task leaves, linked via
-GitHub's native sub-issue hierarchy.
+issues — a feature/epic container plus story/bug/task leaves, linked into a
+real hierarchy: GitHub's native sub-issues API, or Jira's `parent` field.
 
 ```yaml
 watch:
-  issue_provider: github    # required — issue authoring isn't implemented for Jira yet
+  issue_provider: github    # or jira — both implement issue authoring
   repo: owner/name
   refine:
     enabled: true
@@ -398,14 +410,58 @@ watch:
     concurrency: 1          # this lane's own budget, independent of watch.concurrency
 ```
 
+On Jira, every `RefinedIssue.kind` (`epic`/`feature`/`story`/`bug`/`task`) maps
+to a real Jira issue type through `watch.jira.issue_types` — defaults
+`epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`,
+overridable per kind since real projects rename or customize these:
+
+```yaml
+watch:
+  issue_provider: jira
+  jira:
+    base_url: https://your-domain.atlassian.net
+    project_key: PROJ
+    issue_types:        # optional — shown are the defaults
+      epic: Epic
+      feature: Epic
+      story: Story
+      bug: Bug
+      task: Task
+  refine:
+    enabled: true
+```
+
+Hierarchy uses Jira's modern `parent` field only (no legacy "Epic Link"
+custom-field support) — this works on team-managed projects and on
+company-managed projects with Jira's current issue-hierarchy setting; a
+project not configured for it surfaces Jira's own API error, unmodified.
+One accepted platform limitation: Jira doesn't support Epic-under-Epic
+nesting the way GitHub's sub-issues API supports up to 8 levels, so a
+`feature` node parented under another `epic`/`feature` (both `Epic` by
+default) will fail at publish time on Jira specifically — a real platform
+difference, not a bug. Both `spf watch init` and `spf watch`'s own startup
+check validate `watch.jira.issue_types` against the real project before
+anything unattended runs — see "Jira" below.
+
 Every generated issue carries a `<prefix>:type:epic|feature|story|bug|task`
-label. A container (a feature/epic — something else names it as `parent`)
-gets only that label; a leaf additionally gets `<prefix>:refined` — **never**
-`<prefix>:ready`. Promoting a leaf to `<prefix>:ready` is a deliberate human
-decision: the refine lane never auto-promotes anything, so a spec fanning out
-into twenty stories doesn't turn into twenty unattended chain runs and twenty
-PRs with nobody having looked at the breakdown first. Once you do promote a
-leaf, the existing build lane picks it up completely unchanged.
+label AND a `<prefix>:priority:p0|p1|p2|p3` label (see "Priority, dependencies,
+and picking what's next" above) — the refiner proposes the priority, a human
+can relabel it before promoting. A container (a feature/epic — something
+else names it as `parent`) gets only those two labels; a leaf additionally
+gets `<prefix>:refined` — **never** `<prefix>:ready`. Promoting a leaf to
+`<prefix>:ready` is a deliberate human decision: the refine lane never
+auto-promotes anything, so a spec fanning out into twenty stories doesn't
+turn into twenty unattended chain runs and twenty PRs with nobody having
+looked at the breakdown first. Once you do promote a leaf, the existing build
+lane picks it up completely unchanged — including the frontier check: a
+promoted leaf isn't claimed until every issue named in its `blocked_by` is
+`<prefix>:done`.
+
+A spec issue's own `<prefix>:priority:pN` label, if it has one, reaches the
+refiner as a **ceiling**: no generated node may be more urgent than the spec
+itself (enforced regardless of what the refiner emits — see
+`core/refine.ts`'s `publish()`). `spf refine ... --priority p1` sets the same
+ceiling for a bare manual run with no spec issue to read a label from.
 
 Grounding the decomposition in real code is structural, not just prose: a
 `scout` phase maps the subsystems the spec touches before the refiner ever
@@ -421,11 +477,11 @@ model, an external dependency choice, a UX contract, a breaking change, or
 anything that would contradict an existing ADR — see
 `assets/prompts/refiner/system.md`'s "Ask, don't decide"). When it hits real
 ambiguity it raises questions instead of publishing a partial tree, and the
-spec moves through an extra loop before it reaches `done`:
+spec moves through an extra loop before it's even fully published:
 
 ```text
-spec-ready → refining ──┬─→ done / blocked            (published a tree)
-                         └─→ needs-feedback            (raised questions)
+spec-ready → refining ──┬─→ spec-in-progress → done / blocked   (published a tree, THEN tracked to completion)
+                         └─→ needs-feedback                      (raised questions)
                                   │  a human answers in the issue's comments,
                                   │  then adds continue-refinement
                                   ▼
@@ -440,18 +496,54 @@ already had, and it can loop through as many rounds as it takes; there's no
 cap. If channels are configured (see "Notifications" below), a
 `spec_needs_feedback` event fires every round.
 
-The spec issue itself moves through a `spec-ready → refining →
-needs-feedback ⇄ refining → done`/`blocked` lifecycle (the `needs-feedback ⇄
-refining` loop only when the refiner actually escalates), and a summary
-comment lists every issue it created — noting how many rounds of feedback it
-took, if any. Once a spec reaches `done`, `spf watch` also closes the issue
-on the tracker (best-effort: a tracker or a failed close never turns a
-successfully refined spec back to `blocked`). Try it by hand first, against
-a real spec, before turning on the daemon:
+**Publishing a tree does not mean the spec is done.** A product manager
+watching a spec's status needs "done" to mean the work is actually finished,
+not merely that a decomposition happened — so once the refiner publishes,
+the spec moves to `<prefix>:spec-in-progress`, not `<prefix>:done`. It stays
+there — with a summary comment listing every issue it created, noting how
+many rounds of feedback it took, if any — until **every one of those
+issues** reaches `<prefix>:done` (a leaf that lands, or a feature/epic
+container once `rollUp` has already finished it — see "Container roll-up"
+below). Only then does `spf watch` transition the spec to `<prefix>:done`,
+post a closing comment, and close it on the tracker where the tracker
+supports closing at all — GitHub does (best-effort: a failed close never
+turns completed work back into `blocked`); Jira doesn't have this wired up,
+so a Jira spec still relabels and comments correctly, just stays open. A
+`spec_done` event fires either way, distinct from the earlier
+`spec_refined`. A spec whose
+generated leaf never gets promoted, or whose work stalls `blocked`, simply
+stays `spec-in-progress` — which is the truthful state, not a bug.
+
+The spec issue's full lifecycle: `spec-ready → refining → needs-feedback ⇄
+refining → spec-in-progress → done`/`blocked` (the `needs-feedback ⇄
+refining` loop only when the refiner actually escalates). Try it by hand
+first, against a real spec, before turning on the daemon:
 
 ```bash
-spf refine "<spec text or path/to/spec.md>" --issue 42   # --issue renders a "## Parent: #42" back-reference
+spf refine "<spec text or path/to/spec.md>" --issue 42               # --issue renders a "## Parent" section, "Decomposed from #42."
+spf refine "<spec text or path/to/spec.md>" --issue 42 --priority p1 # --priority clamps every generated node to p1 or less urgent
 ```
+
+#### Container roll-up
+
+A feature or epic isn't itself a unit of work, so it's never claimed and
+never opens a PR — but it isn't abandoned once its children exist, either.
+Every time a leaf's PR merges, `spf watch` checks that leaf's parent: once
+**every** child under a container carries `<prefix>:done`, the container
+gets a summary comment (every child it rolled up, by id), transitions to
+`<prefix>:done`, and closes on the tracker if the tracker supports closing
+at all (GitHub does; Jira doesn't have this wired up, so a Jira container
+still relabels and comments, just stays open) — then the same check runs on
+*its* parent, so an epic of features rolls up once its last feature does.
+A container with even one unfinished child (including one still sitting at
+`<prefix>:refined`, never promoted) is left exactly as it is; nothing times
+out or force-closes it.
+
+Roll-up needs to read back the hierarchy `publish()` created — GitHub's
+native sub-issues API, or a Jira `parent = "<id>"` JQL search — so it works
+on both providers today, same as authoring itself. A tracker that isn't
+authoring-capable at all gets a logged no-op, not a startup failure, since
+the build lane still works fine without roll-up.
 
 `spf watch init` seeds the type labels alongside the state ones — **re-run
 it** after upgrading to this version, so it can create the new
@@ -492,7 +584,7 @@ export JIRA_API_TOKEN=...   # id.atlassian.com -> Security -> API tokens
 
 State is modeled as Jira **labels** (`<prefix>:ready`, etc.), mirroring GitHub exactly, rather than native workflow status transitions — the latter would need per-project transition-id mapping, since workflows vary by project/scheme; labels work identically everywhere with zero per-project setup. One caveat: colons are a legal Jira label character and JQL matches on them fine, but they won't show up in Jira's own label autocomplete UI — cosmetic only.
 
-`spf watch init` is a no-op here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it just reports the labels this run will use.
+`spf watch init` still doesn't create any labels here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it reports the labels this run will use. But with `watch.refine.enabled`, it now also validates `watch.jira.issue_types` against the real project's issue types, read-only, and exits non-zero on a mismatch — see "Refining specs" above.
 
 ### Bitbucket (`code_host: bitbucket`)
 
@@ -527,9 +619,12 @@ issues, watch errors, and a spec needing feedback (`spec_needs_feedback` —
 see "Human-in-the-loop escalation" above; it's `error`-level on purpose, the
 same class of event as a blocked issue, so an `errors`-scope channel sees it
 too); `all` adds every milestone — run started/finished, issue claimed, PR
-opened, issue done. A channel's own `events` overrides the top-level scope
-for just that channel. `spf doctor` reports whether each configured
-channel's env var is set.
+opened, issue done, a container's roll-up (`feature_done` — see "Container
+roll-up" above), and a spec reaching actual completion (`spec_done` —
+distinct from `spec_refined`, which fires the moment a tree is published;
+see "Human-in-the-loop escalation" above). A channel's own `events`
+overrides the top-level scope for just that channel. `spf doctor` reports
+whether each configured channel's env var is set.
 
 The webhook URL is a secret and lives only in `.env` — `webhook_url_env`
 names the key, never the URL itself, matching `GITHUB_TOKEN`/

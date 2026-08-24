@@ -8,6 +8,8 @@
 
 `prompt` may include a `## Discussion on the spec issue` section — the spec issue's own comment thread, if it has one. On a first pass this is whatever discussion already existed before the spec was labeled ready; on a resumed pass (after you raised questions and a human answered) it's split into "Answers to your open questions (round N)" and "Earlier discussion." Treat the answers section as authoritative — see your system instructions on resuming.
 
+`prompt` may also include a `## Priority` section, when the spec issue itself carries a priority label. Treat that as a **ceiling** for every node you produce — see your system instructions on priority. Its absence means no ceiling, not "assume p2."
+
 ### previous_envelope
 
 {{previous_envelope}}
@@ -46,7 +48,8 @@ Respond with ONLY valid JSON matching `RefineOutput` — no prose before or afte
       "title": "<feature title>",
       "body": "## What to build\n\n<end-to-end behavior this feature covers>\n\n## Acceptance criteria\n\n- [ ] <criterion>",
       "parent": "",
-      "blocked_by": []
+      "blocked_by": [],
+      "priority": "p1"
     },
     {
       "key": "S1",
@@ -54,7 +57,8 @@ Respond with ONLY valid JSON matching `RefineOutput` — no prose before or afte
       "title": "<leaf title>",
       "body": "## What to build\n\n<end-to-end behavior from the user's perspective>\n\n## Acceptance criteria\n\n- [ ] <criterion>\n- [ ] <criterion>",
       "parent": "F1",
-      "blocked_by": []
+      "blocked_by": [],
+      "priority": "p1"
     },
     {
       "key": "S2",
@@ -62,7 +66,8 @@ Respond with ONLY valid JSON matching `RefineOutput` — no prose before or afte
       "title": "<leaf title>",
       "body": "## What to build\n\n<the fix, described end-to-end>\n\n## Acceptance criteria\n\n- [ ] <criterion>",
       "parent": "F1",
-      "blocked_by": ["S1"]
+      "blocked_by": ["S1"],
+      "priority": "p2"
     }
   ],
   "questions": []
@@ -99,4 +104,5 @@ Rules on the shape (enforced by a gate — a violation sends this back to you as
 - `parent` is another node's `key`, or `""` for a top-level feature/epic.
 - `blocked_by` is a list of other nodes' `key`s — real dependencies only, and no cycles (through `parent` or `blocked_by`, or both together).
 - `body` is `## What to build` then `## Acceptance criteria` only — no "Blocked by" or "Parent" section; those are rendered for you once every node has a real issue number.
+- `priority` is one of `p0`|`p1`|`p2`|`p3`, defaulting to `p2` if you omit it. No node may be more urgent than its parent, and no node may exceed the spec's priority where the `## Priority` section states one — a violation is clamped, not sent back as a correction, so state the priority you actually mean.
 - `questions[].id` is your own local id for this round, unique within `questions` — stable enough that, on a resumed run, an answer in the thread can be matched back to the question it answers.

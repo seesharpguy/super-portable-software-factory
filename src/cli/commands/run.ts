@@ -5,10 +5,10 @@ import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { isInteractive } from "../ask.ts";
 
-const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base", "issue", "suite"];
+const KNOWN_OPTIONS = ["config", "adw-id", "cwd", "agent", "base", "issue", "suite", "priority"];
 
 export function usageFor(chain: ChainDefinition): string {
-  return `usage: spf ${chain.name} "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>] [--suite <name>]`;
+  return `usage: spf ${chain.name} "<prompt or path/to/prompt.md>" [--config <path>] [--adw-id <id>] [--cwd <dir>] [--suite <name>] [--priority p0|p1|p2|p3]`;
 }
 
 export async function dispatchChain(chain: ChainDefinition, argv: string[]): Promise<number> {
@@ -55,6 +55,12 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
   if (options["agent"] !== undefined) chainOptions["agent"] = options["agent"];
   if (options["base"] !== undefined) chainOptions["base"] = options["base"];
   if (options["suite"] !== undefined) chainOptions["suite"] = options["suite"];
+  // Only `refine`'s `publishIssues()` step reads this (a ceiling clamped
+  // onto every node it creates — see `core/refine.ts`'s `publish()`); every
+  // other chain ignores it, so it's harmless to always pass through, same
+  // as `issue` above. `publishIssues()` itself validates the value —
+  // rejecting anything but p0|p1|p2|p3 — so this stays a plain passthrough.
+  if (options["priority"] !== undefined) chainOptions["priority"] = options["priority"];
 
   return runChain(chain, ctx, chainOptions);
 }

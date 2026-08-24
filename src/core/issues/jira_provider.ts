@@ -30,17 +30,36 @@
  * Jira labels are freeform strings with no color/description registry to
  * seed, unlike GitHub's.
  *
- * Does NOT implement `IssueAuthoringProvider` — the refine lane's create/
- * link seam. Jira maps cleanly in principle (native issue types plus a
- * `parent` field give a real hierarchy, unlike the label trick this file
- * already leans on for state), but that is a real implementation, not a
- * one-line stub, so it is a deliberate follow-on rather than done here.
- * `resolveIssueAuthoringProvider()` (`cli/commands/watch.ts`) returns `null`
- * for this provider, and `watch.refine.enabled: true` with
- * `issue_provider: jira` fails loudly at startup rather than silently
- * running a refine lane that can never publish anything.
+ * Implements `IssueAuthoringProvider` — the refine lane's create/link seam
+ * — via Jira's native issue types plus the `parent` field: `createIssue`
+ * maps a `RefinedIssue.kind` to a real Jira issue type name through the
+ * configured `issueTypes` map (project setups rename/customize these often
+ * enough that hardcoding "Epic"/"Story"/"Bug"/"Task" would break silently
+ * on plenty of real projects), and `linkChild` sets the child's `parent`
+ * field to the parent's key. This is the MODERN mechanism only — it works
+ * on team-managed projects and on company-managed projects with Jira's
+ * current issue-hierarchy setting; it does NOT fall back to the legacy
+ * "Epic Link" custom field some older company-managed projects still rely
+ * on. A project not configured for `parent`-based hierarchy gets Jira's own
+ * API error surfaced as-is (this file's `jira()` wrapper never swallows a
+ * non-2xx), never silently ignored. `listChildren` reads the hierarchy back
+ * via a `parent = "<id>"` JQL search (same POST-body pattern
+ * `searchByLabel` already uses below), which is what makes container
+ * roll-up (`rollUp` in `watch.ts`) work here too, not just on GitHub.
+ * `validateIssueTypes()` (below) is a plain method, not part of any shared
+ * interface — GitHub has no equivalent concept — that `spf watch init` and
+ * `spf watch`'s own startup check (`cli/commands/watch.ts`) both call to
+ * catch a misconfigured `issueTypes` entry before anything unattended runs.
+ *
+ * One accepted platform limitation: Jira doesn't support Epic-under-Epic
+ * nesting the way GitHub's sub-issues API supports up to 8 levels. A
+ * refiner tree with a `feature` node parented under another `epic`/
+ * `feature` (both mapping to Jira's Epic type by default) surfaces a real
+ * Jira API error at publish time — a genuine platform difference, not
+ * something this file tries to paper over.
  */
-import type { EnsureLabelsResult, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
+import type { RefinedIssue, JiraIssueTypeMap } from "../data_types.ts";
+import type { EnsureLabelsResult, Issue, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
 const STATES: WatchState[] = [
   "ready",
@@ -53,6 +72,7 @@ const STATES: WatchState[] = [
   "refined",
   "needs-feedback",
   "continue-refinement",
+  "spec-in-progress",
 ];
 const MARKER_RE = /\[spf-watch-marker\]\s*(\{.*?\})/s;
 
@@ -90,13 +110,14 @@ function adfToText(adf: unknown): string {
   return "";
 }
 
-export class JiraProvider implements IssueProvider {
+export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   constructor(
     private readonly baseUrl: string, // e.g. "https://your-domain.atlassian.net", no trailing slash
     private readonly projectKey: string,
     private readonly labelPrefix: string,
     private readonly email: string,
     private readonly apiToken: string,
+    private readonly issueTypes: JiraIssueTypeMap,
   ) {}
 
   private authHeader(): string {
@@ -173,6 +194,94 @@ export class JiraProvider implements IssueProvider {
    */
   async listInState(state: WatchState): Promise<Issue[]> {
     return this.searchByLabel(this.label(state));
+  }
+
+  /**
+   * `null` on a real 404 (deleted, or a key that never existed) — any other
+   * non-2xx still throws, same as `jira()`. What `claimNewWork`'s frontier
+   * check (`watch.ts`) uses to look up a `blocked_by` id's current labels.
+   * Unlike `github_provider.ts`'s hidden `spf-refine:` body marker, this
+   * file has no equivalent for a Jira issue's OWN parent/blockers — a
+   * caller here only ever sees what `blocked_by` it already has in hand,
+   * never discovers it from the issue body itself.
+   */
+  async getIssue(id: string): Promise<Issue | null> {
+    const response = await fetch(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels`, {
+      headers: { Authorization: this.authHeader(), Accept: "application/json" },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Jira GET /rest/api/3/issue/${id} -> ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    return this.toIssue((await response.json()) as JiraIssue);
+  }
+
+  /** `IssueAuthoringProvider` — the refine lane's own need (see `provider.ts`'s module doc). `POST /rest/api/3/issue`'s response is `{id, key, self}`, not the full read shape `toIssue` expects, so this constructs the returned `Issue` locally rather than re-fetching. */
+  async createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue> {
+    const response = await this.jira<{ id: string; key: string }>("/rest/api/3/issue", {
+      method: "POST",
+      body: JSON.stringify({
+        fields: {
+          project: { key: this.projectKey },
+          summary: input.title,
+          description: toAdf(input.body),
+          issuetype: { name: this.issueTypes[input.kind] },
+          labels: input.labels,
+        },
+      }),
+    });
+    return { id: response.key, title: input.title, body: input.body, labels: input.labels };
+  }
+
+  /**
+   * The modern mechanism only — Jira's `parent` field, not the legacy
+   * "Epic Link" custom field. Works on team-managed projects and on
+   * company-managed projects with Jira's current issue-hierarchy setting;
+   * a project not configured for it surfaces Jira's own API error here,
+   * unmodified — see this file's module comment on the accepted
+   * Epic-under-Epic limitation this implies.
+   */
+  async linkChild(parent: Issue, child: Issue): Promise<void> {
+    await this.jira(`/rest/api/3/issue/${child.id}`, { method: "PUT", body: JSON.stringify({ fields: { parent: { key: parent.id } } }) });
+  }
+
+  /** The read-back half of `linkChild` — same JQL-in-body pattern as `searchByLabel`, since a GET with query params silently returns nothing on this endpoint (see the module comment). What makes container roll-up (`rollUp` in `watch.ts`) work on Jira too. */
+  async listChildren(parent: Issue): Promise<Issue[]> {
+    const jql = `parent = ${JSON.stringify(parent.id)}`;
+    const result = await this.jira<{ issues: JiraIssue[] }>("/rest/api/3/search/jql", {
+      method: "POST",
+      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels"] }),
+    });
+    return result.issues.map((i) => this.toIssue(i));
+  }
+
+  /**
+   * Read-only validation of the configured `issueTypes` map against this
+   * project's real issue types — what `spf watch init` and `spf watch`'s
+   * own refine-lane startup check (`cli/commands/watch.ts`) both call to
+   * catch a bad mapping before anything unattended runs on it, rather than
+   * discovering it the first time a spec tries to publish. Not part of
+   * `IssueAuthoringProvider` — GitHub has no equivalent concept, since it
+   * has no native issue-type field to get wrong.
+   *
+   * Fetches a single page (Jira's own default: 50) — a project with more
+   * issue types than that is exotic enough to warrant a loud warning
+   * rather than a silent multi-page fetch loop for an edge case this
+   * unlikely.
+   */
+  async validateIssueTypes(): Promise<Array<{ kind: string; jiraType: string; exists: boolean }>> {
+    const result = await this.jira<{ issueTypes: Array<{ name: string }>; isLast?: boolean }>(
+      `/rest/api/3/issue/createmeta/${encodeURIComponent(this.projectKey)}/issuetypes`,
+    );
+    if (result.isLast === false) {
+      console.error(
+        `spf watch: ${this.projectKey} has more issue types than one page reports — validateIssueTypes() may be missing some; ` +
+          `re-run with a narrower watch.jira.issue_types check if a false mismatch shows up`,
+      );
+    }
+    const available = new Set(result.issueTypes.map((t) => t.name));
+    return Object.entries(this.issueTypes).map(([kind, jiraType]) => ({ kind, jiraType, exists: available.has(jiraType) }));
   }
 
   async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {

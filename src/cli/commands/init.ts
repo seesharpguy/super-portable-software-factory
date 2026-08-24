@@ -104,7 +104,10 @@ const STARTER_CONFIG = `# .spf/spf.config.yaml — merged ON TOP of spf's packag
 #   base_branch: main
 #   # Optional second lane: decompose a spf:spec-ready product spec into a
 #   # feature/story-or-bug tree of real issues. Off by default; needs
-#   # issue_provider: github — issue authoring isn't implemented for Jira yet.
+#   # issue_provider: github OR jira — both support issue authoring. On Jira,
+#   # each kind maps to a real issue type via watch.jira.issue_types
+#   # (defaults: epic/feature -> Epic, story -> Story, bug -> Bug,
+#   # task -> Task) — \`spf watch init\` validates this against the project.
 #   refine:
 #     enabled: true
 #     chain: refine

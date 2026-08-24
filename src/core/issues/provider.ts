@@ -9,19 +9,26 @@
  * interfaces, not one bundled seam — a tracker and a code host are
  * independent choices in practice (Jira issues against a Bitbucket repo is
  * a real setup, not a hypothetical one). `github_provider.ts`'s single
- * class implements both, since GitHub natively is both; `jira_provider.ts`
- * implements only `IssueProvider`, `bitbucket_provider.ts` only
- * `CodeHostProvider` — any tracker x host combination is just config
- * (`watch.issue_provider` x `watch.code_host`), never a poll-loop change.
+ * class implements all three (GitHub natively is a tracker, a code host,
+ * AND an authoring API); `jira_provider.ts` implements `IssueProvider` and
+ * `IssueAuthoringProvider` (Jira is a tracker and can author, but never
+ * opens PRs); `bitbucket_provider.ts` only `CodeHostProvider` — any tracker
+ * x host combination is just config (`watch.issue_provider` x
+ * `watch.code_host`), never a poll-loop change.
  * `IssueAuthoringProvider` (create/link, at the bottom of this file) is a
- * third, again separate — the refine lane's own need, optional per tracker,
- * and orthogonal to which one is the code host.
+ * third, again separate — the refine lane's own need, optional per tracker
+ * (not every tracker's write API can author + link a hierarchy), and
+ * orthogonal to which one is the code host. `isAuthoringProvider()` (below)
+ * is how the rest of the codebase asks "can this provider author?" without
+ * caring which concrete class answers yes.
  *
  * The label-as-state-machine design is deliberate, copied from that same
  * reference: `transition()` is the ONE mutator, so every state change is
  * traceable to one call site, and a provider can layer notifications
  * (Slack, a webhook, whatever) on top of it without the poll loop caring.
  */
+
+import type { RefinedIssue } from "../data_types.ts";
 
 /**
  * `spec-ready`/`refining` drive the SECOND lane's state machine (a product
@@ -43,11 +50,21 @@
  * the issue id) with the comment thread folded into the prompt. This can
  * loop any number of rounds; there is no cap.
  *
- * All ten still live in one `WatchState` union (not several separate unions)
- * because `transition()`'s "strip every `<prefix>:<state>` label, then add
- * one" logic (see `github_provider.ts`/`jira_provider.ts`) has to know about
- * every one of them to strip correctly, and `ensureLabels()` seeds all of
- * them from one `STATES` array.
+ * `spec-in-progress` is where a spec lands once it's been decomposed and
+ * published — deliberately NOT `done` yet: a product manager watching this
+ * spec's status must not see "done" until every issue the refiner produced
+ * (every story/bug/task, and every feature/epic container once its own
+ * children finish — see `rollUp` in `watch.ts`) is itself `<prefix>:done`.
+ * `announceRefined` (`watch.ts`) makes the move `refining -> spec-in-progress`
+ * once publish succeeds; `finishTrackedSpecs` (`watch.ts`) polls every
+ * `spec-in-progress` spec each tick and moves it the rest of the way,
+ * `-> done`, once `WatchMarker.refined` is entirely `<prefix>:done`.
+ *
+ * All eleven still live in one `WatchState` union (not several separate
+ * unions) because `transition()`'s "strip every `<prefix>:<state>` label,
+ * then add one" logic (see `github_provider.ts`/`jira_provider.ts`) has to
+ * know about every one of them to strip correctly, and `ensureLabels()`
+ * seeds all of them from one `STATES` array.
  */
 export type WatchState =
   | "ready"
@@ -59,7 +76,8 @@ export type WatchState =
   | "refining"
   | "refined"
   | "needs-feedback"
-  | "continue-refinement";
+  | "continue-refinement"
+  | "spec-in-progress";
 
 export interface Issue {
   /** Opaque tracker identifier: a GitHub issue number stringified ("42"), a Jira key ("PROJ-123"). */
@@ -110,7 +128,10 @@ export interface PrStatus {
  * issue a completed publish pass created for this spec. A re-claimed spec
  * whose marker already lists them skips creation entirely — `to-tickets`
  * (the skill this lane's prompt is ported from) has no such guard and
- * duplicates every ticket on a re-run; this is what closes that gap.
+ * duplicates every ticket on a re-run; this is what closes that gap. It does
+ * double duty once the spec reaches `spec-in-progress`: `finishTrackedSpecs`
+ * (`watch.ts`) reads this same list back to check whether every one of them
+ * is `<prefix>:done` yet — the gate on the spec's OWN move to `done`.
  *
  * `feedback` is the refine lane's human-in-the-loop cursor: `rounds` counts
  * how many times this spec has been escalated (so a resumed run's summary
@@ -149,6 +170,15 @@ export interface IssueProvider {
   ensureLabels(): Promise<EnsureLabelsResult>;
   /** Issues currently labeled `<prefix>:ready`. */
   listEligible(): Promise<Issue[]>;
+  /**
+   * One issue by its tracker-facing id, or `null` if it no longer exists
+   * (deleted, or — on a tracker where a closed item 404s a plain fetch —
+   * closed). The frontier check needs this on every tracker (`claimNewWork`
+   * in `watch.ts` calls it once per distinct `blocked_by` id per tick, to
+   * decide whether a leaf's blockers all carry `<prefix>:done`), so unlike
+   * `IssueAuthoringProvider`'s methods below, this is required, not optional.
+   */
+  getIssue(id: string): Promise<Issue | null>;
   /**
    * Issues currently in `state`. `includeAll` queries closed issues too —
    * required for `review` on a tracker where closing an issue is a side
@@ -216,14 +246,43 @@ export interface CodeHostProvider {
  * provides (a tracker's read/claim/transition surface has no reason to
  * create new work items). Kept separate rather than folded into
  * `IssueProvider` for the same reason `CodeHostProvider` is separate: not
- * every tracker can do this (Jira could, in principle, via its native issue
- * types + `parent` field, but that is a real future implementation, not a
- * one-line stub — see `jira_provider.ts`'s module comment), and a tracker
- * that can't should be a `null` from `resolveIssueAuthoringProvider()`
- * (`cli/commands/watch.ts`), not a method that throws at call time.
+ * every tracker can do this — GitHub and Jira both implement it today
+ * (GitHub via sub-issues, Jira via native issue types + the `parent`
+ * field), Bitbucket does not — and a tracker that can't should be
+ * recognized as such via `isAuthoringProvider()` (below), not a method
+ * that throws at call time.
  */
 export interface IssueAuthoringProvider {
-  createIssue(input: { title: string; body: string; labels: string[] }): Promise<Issue>;
-  /** Link `child` under `parent` using the tracker's native hierarchy — GitHub's sub-issues API today. */
+  createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue>;
+  /** Link `child` under `parent` using the tracker's native hierarchy — GitHub's sub-issues API, Jira's `parent` field. */
   linkChild(parent: Issue, child: Issue): Promise<void>;
+  /**
+   * Read back what `linkChild` wrote — every issue currently linked under
+   * `parent`. What makes container roll-up possible at all (`rollUp` in
+   * `watch.ts`: a container is `done` once every one of these carries
+   * `<prefix>:done`); lives here rather than on `IssueProvider` for the same
+   * reason `linkChild` does — a tracker's plain list/claim/transition surface
+   * has no reason to know about a hierarchy it may not even have. A tracker
+   * without this (Bitbucket-as-issue-tracker isn't a real combination this
+   * codebase supports, so in practice: any provider that isn't `IssueAuthoringProvider`
+   * at all) makes roll-up a logged no-op, not a startup failure the way
+   * `watch.refine.enabled` without ANY authoring support is
+   * (`cli/commands/watch.ts`) — the build lane still functions without
+   * roll-up, refine cannot function without authoring at all.
+   */
+  listChildren(parent: Issue): Promise<Issue[]>;
+}
+
+/**
+ * Structural, not nominal: checks for the three methods rather than
+ * `instanceof SomeConcreteClass` — so a new authoring-capable provider is
+ * recognized automatically everywhere this is used (today: `cli/commands/
+ * watch.ts`'s container-roll-up wiring) without an edit to an `instanceof`
+ * chain. Every current implementer (`GitHubProvider`, `JiraProvider`)
+ * satisfies `IssueProvider` too, so the intersection type is sound in
+ * practice, not just at the type level.
+ */
+export function isAuthoringProvider(provider: IssueProvider): provider is IssueProvider & IssueAuthoringProvider {
+  const candidate = provider as Partial<IssueAuthoringProvider>;
+  return typeof candidate.createIssue === "function" && typeof candidate.linkChild === "function" && typeof candidate.listChildren === "function";
 }

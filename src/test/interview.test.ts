@@ -230,6 +230,47 @@ test("watch(jira/bitbucket): collects exactly JIRA_* + BITBUCKET_*, never GITHUB
   assert.equal(result!.env.GITHUB_TOKEN, undefined, "neither provider needs GitHub — must not ask for or write GITHUB_TOKEN");
 });
 
+test("watch(jira): the refine-lane question is now reachable on Jira too, not just GitHub", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Model (Claude": "sonnet",
+      Authentication: "login",
+      "Issue tracker": "jira",
+      "Code host": "bitbucket",
+      // "Chain to run per spec" must be checked before the shorter "Chain to
+      // run" — both are substrings of the "per spec" question's own label,
+      // and fake_asker.ts's firstMatch() returns whichever key it finds
+      // first in this object's own key order, not the most specific one.
+      "Chain to run per spec": "refine",
+      "Chain to run": "plan-build-test",
+    },
+    text: {
+      "Repo (workspace/repo_slug)": "acme/widgets-repo",
+      "Jira base URL": "https://acme.atlassian.net/",
+      "Jira project key": "proj",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": true,
+      "Also enable the refine lane": true,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { JIRA_API_TOKEN: "jira-token", BITBUCKET_API_TOKEN: "bb-token" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.watch.refine.enabled, true);
+  assert.equal(config.watch.refine.chain, "refine");
+});
+
 test("watch(github issues + bitbucket code): asks two repo questions and writes issue_repo separately from repo", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({

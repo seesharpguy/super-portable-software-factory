@@ -68,6 +68,7 @@ import {
   type GateFn,
   type QualityResult,
   type RefinedIssue,
+  type RefinedPriority,
   type RefineQuestion,
   type ReviewOutputT,
 } from "../core/data_types.ts";
@@ -887,6 +888,23 @@ export function refine(opts: { owner?: string; description?: string; retries?: n
  * work standalone, and just leaves the questions on disk for a human to
  * read.
  */
+/**
+ * `state.options["priority"]` -> a `RefinedPriority` ceiling, or `null` when
+ * unset — the generic chain-options path (`cli/commands/run.ts`'s
+ * `--priority`, or `core/watch.ts`'s `runSpec` threading a spec's own
+ * `<prefix>:priority:pN` label) is the ONLY place this string enters the
+ * system, so it's validated here rather than trusted: a typo'd or stale
+ * `--priority urgent` fails the phase with a clear message instead of
+ * silently publishing every node at its own, un-clamped priority.
+ */
+function parsePriorityOption(raw: string | undefined): RefinedPriority | null {
+  if (raw === undefined) return null;
+  if (raw !== "p0" && raw !== "p1" && raw !== "p2" && raw !== "p3") {
+    throw new Error(`publishIssues(): --priority ${JSON.stringify(raw)} is not one of p0|p1|p2|p3`);
+  }
+  return raw;
+}
+
 export function publishIssues(opts: { description?: string } = {}): Step {
   preflightDescription("publish", opts.description);
   const fn = async (run: Run, state: ChainState) => {
@@ -895,6 +913,7 @@ export function publishIssues(opts: { description?: string } = {}): Step {
       throw new Error("publishIssues() requires a preceding refine() step in the chain's step list");
     }
     const questions = envelope.questions ?? [];
+    const priorityCeiling = parsePriorityOption(state.options["priority"]);
     await run.phase(
       makePhaseParams({
         name: "publish",
@@ -912,12 +931,13 @@ export function publishIssues(opts: { description?: string } = {}): Step {
         const created = await refineLib.publish(tracker, envelope.issues!, {
           labelPrefix: run.cfg.watch.label_prefix,
           specIssueId: state.issue_id,
+          priorityCeiling,
         });
         writeFileSync(
           path.join(run.context_handoff_dir, "refine_publish.json"),
           JSON.stringify(created.map((c) => ({ id: c.issue.id, title: c.issue.title, kind: c.kind, isLeaf: c.isLeaf })), null, 2),
         );
-        ph.log({ created: created.length, leaves: created.filter((c) => c.isLeaf).length });
+        ph.log({ created: created.length, leaves: created.filter((c) => c.isLeaf).length, priority_ceiling: priorityCeiling });
       },
     );
   };

@@ -41,13 +41,29 @@
  *  - Worktree-per-issue, isolated outside the repo, made cheap by SPF's
  *    own `--cwd` support: no new chain-dispatch plumbing needed, just
  *    pointing an existing chain at a different working tree.
+ *
+ * What's NEW since the lean v1 above: `claimNewWork` no longer walks
+ * `listEligible()` in whatever order the tracker happened to return —
+ * `orderEligible` sorts by priority (a `<prefix>:priority:pN` label), then
+ * sibling affinity (prefer a leaf whose parent already has work in flight),
+ * then creation order; and it refuses to claim a leaf whose `blocked_by`
+ * isn't fully `<prefix>:done` yet (`frontierBlockedOn`) — making real, at
+ * last, the frontier `assets/prompts/refiner/system.md` has always promised
+ * the refiner. `finishReviews` also now closes a landed leaf and rolls a
+ * container up to `done` + closed once every child under it carries
+ * `<prefix>:done` (`rollUp`) — still no Projects v2 mirroring, no CI-fix
+ * retry loop, no auto-merge; those remain deliberately out of scope.
  */
 import path from "node:path";
 import type { GitHandle } from "./git_helper.ts";
 import type { CodeHostProvider, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./issues/provider.ts";
 import type { NotifyEvent } from "./notify/channel.ts";
+import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
+import { parseRefineMarker } from "./refine.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
+/** GitHub's own documented sub-issue nesting cap (see `github_provider.ts`'s `linkChild` doc comment) — `rollUp`'s own recursion bound, so a malformed/cyclic hierarchy can't spin forever. */
+const MAX_ROLLUP_DEPTH = 8;
 
 export interface ChainRunResult {
   accepted: boolean;
@@ -67,7 +83,7 @@ export interface ChainRunResult {
   reviewRequired?: boolean;
 }
 
-/** One issue the refine lane created — enough for `finishSpec`'s summary comment and the marker's idempotency record. */
+/** One issue the refine lane created — enough for `announceRefined`'s summary comment and the marker's idempotency record. */
 export interface RefinedIssueRef {
   id: string;
   title: string;
@@ -151,6 +167,18 @@ export interface WatchDeps {
   linkDataDir: (worktreePath: string) => void;
   dryRun: boolean;
   runChain: (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }) => Promise<ChainRunResult>;
+  /**
+   * `IssueAuthoringProvider.listChildren`'s read-back, injected as a bound
+   * function rather than a whole provider object — same reasoning as
+   * `runChain`/`runRefine`/`linkDataDir`: this module drives whatever it's
+   * given without importing a concrete provider type. `undefined` on any
+   * tracker that doesn't implement `IssueAuthoringProvider` (Jira today —
+   * see `jira_provider.ts`'s module comment); `rollUp` treats that as a
+   * logged no-op, not a failure — the build lane still functions without
+   * container roll-up, unlike the refine lane, which cannot function
+   * without authoring at all (see `cli/commands/watch.ts`'s startup check).
+   */
+  listChildren?: (parent: Issue) => Promise<Issue[]>;
   log: (message: string) => void;
   /**
    * Structured push, alongside `log`'s plain string — a required field, like
@@ -176,10 +204,24 @@ export interface WatchRunState {
    * that isn't why this is separate — the budgets are what require it.
    */
   refining: Set<string>;
+  /**
+   * Issue id -> its container's real issue id, recorded the moment
+   * `claimNewWork` claims a leaf whose hidden `spf-refine:` marker names a
+   * parent, deleted in the same `.finally()` that clears `inflight`. Zero
+   * API cost — no tracker read needed to populate it — and it's the whole
+   * basis of sibling affinity in `orderEligible`: a sibling of something
+   * already in flight sorts ahead of an equal-priority issue from an
+   * unrelated feature, so a feature already underway tends to finish before
+   * the daemon starts a new one instead of interleaving both. This holds
+   * only while a sibling is ACTUALLY in flight — a daemon restart begins
+   * with this empty, so ordering falls back to priority + created-asc until
+   * the in-memory picture rebuilds itself over the next few ticks.
+   */
+  inflightParents: Map<string, string>;
 }
 
 export function createWatchState(): WatchRunState {
-  return { inflight: new Set(), refining: new Set() };
+  return { inflight: new Set(), refining: new Set(), inflightParents: new Map() };
 }
 
 function slugifyTitle(title: string): string {
@@ -268,16 +310,24 @@ export async function reconcileOrphans(deps: WatchDeps, state: WatchRunState): P
 }
 
 /**
- * Post the summary comment on a decomposed spec and transition it to `done`
- * — the refine lane's one shared finishing move, reached from both the
- * normal path (`runSpec`, right after a successful publish) and the
- * orphan-resume path (`reconcileRefining`, when a completed publish's
- * marker survived a crash the `transition` itself didn't). `created` only
- * has titles/kinds in the normal path — an orphan resume has nothing but
- * the ids `WatchMarker.refined` recorded, and the comment degrades to a
- * bare list of `#id`s rather than blocking on a re-fetch.
+ * Post the summary comment on a decomposed spec and move it to
+ * `spec-in-progress` — deliberately NOT `done`: a product manager watching
+ * this spec's status must not see "done" until every issue the refiner
+ * produced is itself `<prefix>:done` (`finishTrackedSpecs`, below, is what
+ * makes THAT move, once it's actually true). Reached from both the normal
+ * path (`runSpec`, right after a successful publish) and the orphan-resume
+ * path (`reconcileRefining`, when a completed publish's marker survived a
+ * crash the `transition` itself didn't). `created` only has titles/kinds in
+ * the normal path — an orphan resume has nothing but the ids
+ * `WatchMarker.refined` recorded, and the comment degrades to a bare list of
+ * `#id`s rather than blocking on a re-fetch.
+ *
+ * One exception: a decomposition that produced ZERO issues (shouldn't
+ * happen — `gates.refinementWellFormed` requires at least one leaf, but this
+ * stays defensive rather than assumed) has nothing for `finishTrackedSpecs`
+ * to ever wait on, so it goes straight to `done` instead of `spec-in-progress`.
  */
-async function finishSpec(
+async function announceRefined(
   deps: WatchDeps,
   issue: Issue,
   created: Array<{ id: string; title?: string; kind?: string }>,
@@ -288,7 +338,8 @@ async function finishSpec(
     created.length > 0
       ? `spf watch refined this spec into ${created.length} issue(s)${roundsNote}:\n\n` +
         created.map((c) => (c.title ? `- #${c.id} (${c.kind}): ${c.title}` : `- #${c.id}`)).join("\n") +
-        `\n\nPromote any of them to \`${deps.labelPrefix}:ready\` when it's worth building.`
+        `\n\nPromote any of them to \`${deps.labelPrefix}:ready\` when it's worth building. ` +
+        `This spec moves to \`${deps.labelPrefix}:done\` once every one of them does.`
       : `spf watch refined this spec but the refiner produced no issues.`;
   deps.notify({
     kind: "spec_refined",
@@ -299,14 +350,91 @@ async function finishSpec(
   });
   if (!deps.dryRun) {
     await deps.provider.comment(issue, body);
-    await deps.provider.transition(issue, "done");
-    // Best-effort and never fatal: publishing already succeeded and the spec
-    // is already `done` by the time this runs, so a tracker that can't close
-    // (or a `closeIssue` that isn't implemented at all — see `IssueProvider`'s
-    // doc comment) must not turn a successfully refined spec into `blocked`.
-    await deps.provider.closeIssue?.(issue).catch((error) => {
-      deps.log(`watch: spec ${issue.id}: closeIssue failed — left open, still \`${deps.labelPrefix}:done\`: ${(error as Error).message}`);
+    if (created.length === 0) {
+      await deps.provider.transition(issue, "done");
+      // Best-effort and never fatal, same reasoning as finishTrackedSpecs'
+      // own closeIssue call below: the spec is already `done` by the time
+      // this runs, so a tracker that can't close must not turn a
+      // successfully refined spec into `blocked`.
+      await deps.provider.closeIssue?.(issue).catch((error) => {
+        deps.log(`watch: spec ${issue.id}: closeIssue failed — left open, still \`${deps.labelPrefix}:done\`: ${(error as Error).message}`);
+      });
+      return;
+    }
+    await deps.provider.transition(issue, "spec-in-progress");
+  }
+}
+
+/**
+ * Poll every `spec-in-progress` spec: once every id `WatchMarker.refined`
+ * recorded — every issue the refiner produced, leaf or container — carries
+ * `<prefix>:done`, the spec's own decomposed work is actually finished, and
+ * only then does this move it `-> done`. This is the whole point of
+ * `announceRefined` landing on `spec-in-progress` rather than `done`
+ * straight away: the spec's status is what a product manager reads to know
+ * whether the work is finished, and "done" the instant a tree gets PUBLISHED
+ * would be a lie — the work hasn't started yet, let alone finished.
+ *
+ * A container in the refined list is done exactly when `rollUp` (see
+ * `finishReviews`) has already rolled it up — by the time every id here is
+ * `<prefix>:done`, every leaf beneath every container is too, transitively,
+ * with no need to walk the hierarchy again from this side.
+ *
+ * A referenced id that 404s (deleted from the tracker) is treated as
+ * satisfied — same policy as `frontierBlockedOn`'s blockers: a removed issue
+ * must not wedge the spec's completion forever. A spec with no marker, or an
+ * empty `refined` list, is left alone with a log line rather than assumed
+ * done — data that shouldn't exist given the gate's at-least-one-leaf rule,
+ * but never silently marked complete on that assumption.
+ */
+export async function finishTrackedSpecs(deps: WatchDeps): Promise<void> {
+  const tracked = await deps.provider.listInState("spec-in-progress");
+  const doneLabel = `${deps.labelPrefix}:done`;
+  for (const issue of tracked) {
+    const marker = await deps.provider.readMarker(issue);
+    const refined = marker?.refined ?? [];
+    if (refined.length === 0) {
+      deps.log(`watch: spec ${issue.id} is spec-in-progress with no refined issues recorded — leaving it alone`);
+      continue;
+    }
+
+    const finished: Issue[] = [];
+    let allDone = true;
+    for (const id of refined) {
+      const child = await deps.provider.getIssue(id);
+      if (!child) {
+        deps.log(`watch: spec ${issue.id}: refined issue #${id} no longer exists — treating it as done rather than wedging the spec forever`);
+        continue;
+      }
+      if (!child.labels.includes(doneLabel)) {
+        allDone = false;
+        break; // one unfinished issue is enough to know — no need to check the rest this tick
+      }
+      finished.push(child);
+    }
+    if (!allDone) {
+      deps.log(`watch: spec ${issue.id}: still waiting on work — not every refined issue is \`${doneLabel}\` yet`);
+      continue;
+    }
+
+    deps.log(`watch: spec ${issue.id}: every refined issue is \`${doneLabel}\` — closing`);
+    deps.notify({
+      kind: "spec_done",
+      level: "info",
+      title: `spec ${issue.id} done`,
+      detail: `${refined.length} issue(s) all landed.`,
+      fields: [["issue", issue.id], ["title", issue.title], ["refined", String(refined.length)]],
     });
+    if (!deps.dryRun) {
+      const body =
+        `spf watch: every issue decomposed from this spec is now \`${doneLabel}\`:\n\n` +
+        finished.map((c) => `- #${c.id}: ${c.title}`).join("\n");
+      await deps.provider.comment(issue, body);
+      await deps.provider.transition(issue, "done");
+      await deps.provider.closeIssue?.(issue).catch((error) => {
+        deps.log(`watch: spec ${issue.id}: closeIssue failed — left open, still \`${doneLabel}\`: ${(error as Error).message}`);
+      });
+    }
   }
 }
 
@@ -327,10 +455,21 @@ const MAX_THREAD_CHARS = 20_000;
  * `MAX_THREAD_CHARS`, dropping the oldest comments first — an explicit
  * "N earlier comment(s) omitted" line, never a silent truncation.
  *
+ * `priority` — the spec's own `<prefix>:priority:pN` label, read by
+ * `runSpec` below — renders as its own `## Priority` section right after the
+ * header, present or absent independent of whether there's any comment
+ * thread at all: a spec with no priority label (the common case today) omits
+ * the section entirely, exactly the prompt this function produced before
+ * priority existed. `core/refine.ts`'s `publish()` is what actually ENFORCES
+ * the ceiling this section only asks for — see its own doc comment.
+ *
  * Exported and pure (no provider, no I/O) so it's directly unit-testable.
  */
-export function buildSpecPrompt(issue: Issue, comments: IssueComment[], feedback?: WatchMarker["feedback"]): string {
-  const header = `${issue.title}\n\n${issue.body}`.trim();
+export function buildSpecPrompt(issue: Issue, comments: IssueComment[], feedback?: WatchMarker["feedback"], priority?: RefinedPriority | null): string {
+  const withoutPriority = `${issue.title}\n\n${issue.body}`.trim();
+  const header = priority
+    ? `${withoutPriority}\n\n## Priority\n\nThis spec is labeled ${priority}. That's a CEILING for everything you produce: no node may be more urgent than ${priority} — less urgent is fine, more urgent is not.`
+    : withoutPriority;
   if (comments.length === 0) return header;
 
   const render = (list: IssueComment[]): string => list.map((c) => `**@${c.author}** (${c.created_at}):\n${c.body.trim()}`).join("\n\n");
@@ -357,7 +496,7 @@ export function buildSpecPrompt(issue: Issue, comments: IssueComment[], feedback
 
 /**
  * The refine lane's own finishing move for "the refiner can't proceed
- * without a human" — the escalation twin of `finishSpec` above. Posts every
+ * without a human" — the escalation twin of `announceRefined` above. Posts every
  * question as its own rich comment section (the question, why it matters,
  * the options considered, its recommendation, and the evidence it read — so
  * a human can often answer in a word or two), records the round in the
@@ -433,7 +572,7 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
     const marker = await deps.provider.readMarker(issue);
     if (marker?.refined && marker.refined.length > 0) {
       deps.log(`watch: spec ${issue.id} orphaned after publish already completed — finishing`);
-      await finishSpec(deps, issue, marker.refined.map((id) => ({ id })), marker.feedback?.rounds ?? 0);
+      await announceRefined(deps, issue, marker.refined.map((id) => ({ id })), marker.feedback?.rounds ?? 0);
       continue;
     }
     if (marker?.feedback) {
@@ -472,6 +611,71 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
   }
 }
 
+/**
+ * `containerId`'s parent's parent's ... — the chain of `parent`s a nested
+ * epic-of-features roll-up needs to climb, each hop read straight out of an
+ * already-fetched `Issue.body`'s hidden `spf-refine:` marker (no extra
+ * tracker call). `depth` guards against a cycle a malformed marker could
+ * otherwise spin on forever, bounded to `MAX_ROLLUP_DEPTH` — GitHub's own
+ * documented sub-issue nesting cap (see `github_provider.ts`'s `linkChild`
+ * doc comment).
+ */
+function parentOf(issue: Issue): string | null {
+  return parseRefineMarker(issue.body).parent;
+}
+
+/**
+ * A container is `done` the instant every child `listChildren` reports
+ * carries `<prefix>:done` — reached reactively, from the child that just
+ * finished (`finishReviews` below), never a periodic full scan: cheap on a
+ * quiet tick, and it means the moment the LAST child lands is the moment the
+ * container notices, not up to a poll interval later.
+ *
+ * A no-op, logged once, when `deps.listChildren` is unset (any tracker but
+ * GitHub today — see `WatchDeps`'s own doc comment) or when `containerId`
+ * is `null` (a top-level leaf has no container to roll up at all).
+ *
+ * Recurses on the container's OWN parent once it finishes, so an epic whose
+ * features each roll up in turn eventually rolls up itself — bounded by
+ * `MAX_ROLLUP_DEPTH` against a cyclic or absurdly deep marker.
+ */
+async function rollUp(deps: WatchDeps, containerId: string | null, depth = 0): Promise<void> {
+  if (!containerId || depth >= MAX_ROLLUP_DEPTH) return;
+  if (!deps.listChildren) {
+    deps.log(`watch: ${containerId}: no listChildren on this tracker — container roll-up is GitHub-only, skipping`);
+    return;
+  }
+  const container = await deps.provider.getIssue(containerId);
+  if (!container) return; // deleted — nothing left to roll up
+  const doneLabel = `${deps.labelPrefix}:done`;
+  if (container.labels.includes(doneLabel)) return; // already rolled up — never re-process, never loop on its own parent again
+
+  const children = await deps.listChildren(container);
+  const unfinished = children.filter((c) => !c.labels.includes(doneLabel));
+  if (unfinished.length > 0) {
+    deps.log(`watch: ${containerId} waiting on ${unfinished.map((c) => `#${c.id}`).join(", ")} before it can roll up`);
+    return;
+  }
+
+  deps.log(`watch: ${containerId}: every child is done — rolling up`);
+  deps.notify({
+    kind: "feature_done",
+    level: "info",
+    title: `feature ${containerId} done`,
+    detail: `${children.length} child issue(s) all landed.`,
+    fields: [["issue", containerId], ["title", container.title], ["children", String(children.length)]],
+  });
+  if (!deps.dryRun) {
+    const body = `spf watch: every child issue landed:\n\n${children.map((c) => `- #${c.id}: ${c.title}`).join("\n")}`;
+    await deps.provider.comment(container, body);
+    await deps.provider.transition(container, "done");
+    await deps.provider.closeIssue?.(container).catch((error) => {
+      deps.log(`watch: ${containerId}: closeIssue failed — left open, still \`${doneLabel}\`: ${(error as Error).message}`);
+    });
+  }
+  await rollUp(deps, parentOf(container), depth + 1);
+}
+
 /** Poll every `review`-labeled issue's PR for merged (-> done) or closed-without-merging (-> blocked). */
 export async function finishReviews(deps: WatchDeps): Promise<void> {
   const reviewing = await deps.provider.listInState("review", { includeAll: true });
@@ -490,6 +694,15 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
       });
       if (!deps.dryRun) {
         await deps.provider.transition(issue, "done");
+        // Best-effort, never fatal — same pattern as announceRefined's own
+        // closeIssue call: the issue is already correctly `<prefix>:done`
+        // by the time this runs, so a tracker that can't close (or doesn't
+        // implement it at all) must not turn a successfully landed issue
+        // into `blocked`.
+        await deps.provider.closeIssue?.(issue).catch((error) => {
+          deps.log(`watch: ${issue.id}: closeIssue failed — left open, still \`${deps.labelPrefix}:done\`: ${(error as Error).message}`);
+        });
+        await rollUp(deps, parentOf(issue));
         cleanupWorktree(deps, marker);
       }
     } else if (status.state === "closed") {
@@ -616,6 +829,24 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
 }
 
 /**
+ * The spec's own `<prefix>:priority:pN` label, or `null` if it was never
+ * set. Deliberately NOT `issuePriority`'s default-to-`p2` behavior: `null`
+ * here means "no ceiling" (`clampPriority`'s own no-op case, `core/refine.ts`),
+ * so a spec predating this feature — the common case, since nothing sets
+ * this label automatically on a spec issue — publishes exactly as it always
+ * has, uncapped, rather than silently forcing every generated leaf down to
+ * `p2`. A spec's OWN priority never comes from a hidden `spf-refine:`
+ * marker: only refine-lane-created issues carry that marker, and a spec is,
+ * by definition, not one of those.
+ */
+function specPriorityLabel(issue: Issue, labelPrefix: string): RefinedPriority | null {
+  for (const p of ["p0", "p1", "p2", "p3"] as const) {
+    if (issue.labels.includes(`${labelPrefix}:priority:${p}`)) return p;
+  }
+  return null;
+}
+
+/**
  * One spec's full claim -> decompose -> publish path, run in the background
  * — `claimSpecs` doesn't await this. The build lane's `runIssue`, minus the
  * PR half: no `diffFiles` check (the refiner has `writes: []`, so an empty
@@ -636,7 +867,7 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     const existingMarker = await deps.provider.readMarker(issue);
     if (existingMarker?.refined && existingMarker.refined.length > 0) {
       deps.log(`watch: spec ${issue.id}: a previous attempt already published ${existingMarker.refined.length} issue(s) — finishing without re-running the refiner`);
-      await finishSpec(deps, issue, existingMarker.refined.map((id) => ({ id })), existingMarker.feedback?.rounds ?? 0);
+      await announceRefined(deps, issue, existingMarker.refined.map((id) => ({ id })), existingMarker.feedback?.rounds ?? 0);
       return;
     }
 
@@ -660,8 +891,18 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     // existingMarker.feedback.asked_at (unset on a spec that's never been
     // escalated, in which case every comment is "earlier discussion").
     const comments = await deps.provider.listComments(issue);
-    const prompt = buildSpecPrompt(issue, comments, existingMarker?.feedback);
-    const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id, chainOptions: deps.chainOptions });
+    // The spec's own priority label, threaded two ways: into the prompt
+    // (buildSpecPrompt's `## Priority` section, so the refiner's per-node
+    // judgment is informed) AND into chainOptions (steps.publishIssues()
+    // reads `options["priority"]` and passes it to `core/refine.ts`'s
+    // `publish()` as a hard ceiling) — the prompt makes the rule sensible,
+    // the ceiling is what makes it TRUE regardless of what the model does
+    // with the prompt. `null` (no label set) reaches both as "no ceiling",
+    // unchanged from before this feature existed.
+    const specPriority = specPriorityLabel(issue, deps.labelPrefix);
+    const prompt = buildSpecPrompt(issue, comments, existingMarker?.feedback, specPriority);
+    const chainOptions = specPriority ? { ...deps.chainOptions, priority: specPriority } : deps.chainOptions;
+    const result = await deps.runRefine({ prompt, cwd: worktreePath, adwId, issueId: issue.id, chainOptions });
 
     if (!result.accepted) {
       deps.log(`watch: spec ${issue.id}: refine chain "${deps.refineChain}" did not succeed — blocked`);
@@ -689,7 +930,7 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     }
 
     await deps.provider.writeMarker(issue, { ...marker, refined: result.created.map((c) => c.id) });
-    await finishSpec(deps, issue, result.created, existingMarker?.feedback?.rounds ?? 0);
+    await announceRefined(deps, issue, result.created, existingMarker?.feedback?.rounds ?? 0);
     cleanupWorktree(deps, { worktree: worktreePath, branch });
   } catch (error) {
     const message = (error as Error).message;
@@ -706,13 +947,114 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
   }
 }
 
-/** Claim as many `ready` issues as the concurrency budget allows, and kick off `runIssue` for each in the background. */
+/**
+ * `issue`'s priority, as `claimNewWork` schedules by: the `<prefix>:priority:pN`
+ * LABEL first — a human relabeling an issue is the whole override mechanism
+ * (see `RefinedPrioritySchema`'s doc comment and the "Priority" section of
+ * `assets/prompts/refiner/system.md`), so it must win over whatever the
+ * hidden `spf-refine:` marker still says from publish time — and the marker
+ * only as a fallback, for an issue whose label was never applied at all (a
+ * hand-created issue with no `spf:priority:*` label, or one predating this
+ * feature). `parseRefineMarker` itself defaults to `p2` absent a marker, so
+ * this never needs its own fallback beyond that.
+ */
+function issuePriority(issue: Issue, labelPrefix: string): RefinedPriority {
+  for (const p of ["p0", "p1", "p2", "p3"] as const) {
+    if (issue.labels.includes(`${labelPrefix}:priority:${p}`)) return p;
+  }
+  return parseRefineMarker(issue.body).priority;
+}
+
+/**
+ * Sort `issues` the way `claimNewWork` walks them: priority first (p0 ahead
+ * of p2 regardless of creation order), then sibling affinity (a leaf whose
+ * hidden marker names a parent already in `inflightParents.values()` sorts
+ * ahead of an equal-priority leaf from an unrelated feature — the mechanism
+ * that tends to finish one feature before starting the next, without giving
+ * up the one-PR-per-story design), then creation order (oldest first,
+ * matching `listByLabel`'s own `sort=created&direction=asc` — the final,
+ * stable tiebreaker when priority and affinity both tie).
+ *
+ * Pure and exported so it's directly unit-testable without a provider, same
+ * spirit as `buildSpecPrompt` below. Two honest limits, both already true of
+ * what feeds it: affinity only reflects a sibling ACTUALLY in flight in this
+ * process right now — a daemon restart begins with `inflightParents` empty,
+ * so ordering degrades to priority + created-asc until it rebuilds itself
+ * over the next few ticks; and priority is read from the label, so an issue
+ * a human just relabeled sorts by its NEW priority starting next tick, never
+ * retroactively re-ordering claims a previous tick already made.
+ */
+export function orderEligible(issues: Issue[], inflightParents: Map<string, string>, labelPrefix: string): Issue[] {
+  const inflightParentIds = new Set(inflightParents.values());
+  return issues
+    .map((issue, index) => ({
+      issue,
+      index, // preserves listEligible's own created-asc order as the final tiebreaker
+      priority: PRIORITY_RANK[issuePriority(issue, labelPrefix)],
+      hasAffinity: (() => {
+        const parent = parseRefineMarker(issue.body).parent;
+        return parent !== null && inflightParentIds.has(parent);
+      })(),
+    }))
+    .sort((a, b) => {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      if (a.hasAffinity !== b.hasAffinity) return a.hasAffinity ? -1 : 1;
+      return a.index - b.index;
+    })
+    .map((w) => w.issue);
+}
+
+/**
+ * Whether every id in `blockedBy` currently carries `<prefix>:done` — the
+ * frontier check `assets/prompts/refiner/system.md:62` has always promised
+ * the refiner ("the factory works the frontier: any leaf whose blockers are
+ * all done") but nothing enforced before this. `cache` is per-tick, shared
+ * across every candidate `claimNewWork` considers in one pass, so a blocker
+ * several leaves share costs exactly one `getIssue` call, not one per leaf.
+ * A blocker that 404s (deleted) is treated as satisfied, with a warning —
+ * a removed blocker must not wedge its dependents forever.
+ */
+async function frontierBlockedOn(deps: WatchDeps, blockedBy: string[], cache: Map<string, boolean>): Promise<string | null> {
+  const doneLabel = `${deps.labelPrefix}:done`;
+  for (const id of blockedBy) {
+    let done = cache.get(id);
+    if (done === undefined) {
+      const blocker = await deps.provider.getIssue(id);
+      if (!blocker) {
+        deps.log(`watch: blocker #${id} no longer exists — treating it as satisfied rather than wedging its dependents`);
+        done = true;
+      } else {
+        done = blocker.labels.includes(doneLabel);
+      }
+      cache.set(id, done);
+    }
+    if (!done) return id;
+  }
+  return null;
+}
+
+/**
+ * Claim as many `ready` issues as the concurrency budget allows, in priority
+ * + sibling-affinity + created-asc order (`orderEligible`), skipping any
+ * whose `blocked_by` isn't fully `<prefix>:done` yet (`frontierBlockedOn`),
+ * and kick off `runIssue` for each claimed one in the background.
+ */
 export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promise<void> {
   if (state.inflight.size >= deps.concurrency) return;
   const eligible = await deps.provider.listEligible();
-  for (const issue of eligible) {
+  const ordered = orderEligible(eligible, state.inflightParents, deps.labelPrefix);
+  const blockerCache = new Map<string, boolean>(); // per-tick — see frontierBlockedOn's doc comment
+  for (const issue of ordered) {
     if (state.inflight.size >= deps.concurrency) break;
     if (state.inflight.has(issue.id)) continue;
+    const marker = parseRefineMarker(issue.body);
+    if (marker.blocked_by.length > 0) {
+      const waitingOn = await frontierBlockedOn(deps, marker.blocked_by, blockerCache);
+      if (waitingOn) {
+        deps.log(`watch: ${issue.id} waiting on #${waitingOn} — not yet at the frontier`);
+        continue;
+      }
+    }
     if (deps.dryRun) {
       deps.log(`watch: [dry-run] would claim ${issue.id} (${issue.title}) and run chain "${deps.chain}"`);
       continue;
@@ -730,7 +1072,11 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
       fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
     });
     state.inflight.add(issue.id);
-    runIssue(deps, issue).finally(() => state.inflight.delete(issue.id));
+    if (marker.parent) state.inflightParents.set(issue.id, marker.parent);
+    runIssue(deps, issue).finally(() => {
+      state.inflight.delete(issue.id);
+      state.inflightParents.delete(issue.id);
+    });
   }
 }
 
@@ -802,6 +1148,12 @@ export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void>
   await reconcileOrphans(deps, state).catch(tickErrorHandler(deps, "reconcileOrphans"));
   await reconcileRefining(deps, state).catch(tickErrorHandler(deps, "reconcileRefining"));
   await finishReviews(deps).catch(tickErrorHandler(deps, "finishReviews"));
+  // Right after finishReviews, not before it: a leaf that just landed this
+  // very tick (and, transitively, any container rollUp() rolled up because
+  // of it) can also be the last thing a spec-in-progress spec was waiting
+  // on — checking in the same tick is strictly cheaper than making a product
+  // manager wait one extra poll interval to see it.
+  await finishTrackedSpecs(deps).catch(tickErrorHandler(deps, "finishTrackedSpecs"));
   await claimSpecs(deps, state, "continue-refinement").catch(tickErrorHandler(deps, "claimSpecs(resume)"));
   await claimSpecs(deps, state).catch(tickErrorHandler(deps, "claimSpecs"));
   await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));
