@@ -294,6 +294,15 @@ export interface FanoutDeps {
    * ABORT GRANULARITY note.
    */
   firstSuccess?: boolean;
+  /**
+   * Fires once per attempt the moment it settles (success, fail, error, or
+   * skipped) — the same record that lands in the final `attempts` array, just
+   * as it happens instead of only once every worker has finished. Purely
+   * observational: nothing here changes selection or cleanup. `cli/commands/
+   * fanout.ts` uses it to update a live results table row by row on a TTY;
+   * omitted (the default) everywhere else, including every test.
+   */
+  onAttempt?: (attempt: FanoutAttempt) => void;
 }
 
 /**
@@ -412,10 +421,14 @@ export async function runBestOf(deps: FanoutDeps): Promise<FanoutResult> {
       if (index === undefined) return;
       if (decided) {
         deps.log(`fanout: attempt ${index} skipped — an earlier attempt already succeeded`);
-        attempts.push(skipped(index));
+        const attempt = skipped(index);
+        attempts.push(attempt);
+        deps.onAttempt?.(attempt);
         continue;
       }
-      attempts.push(await runOne(index));
+      const attempt = await runOne(index);
+      attempts.push(attempt);
+      deps.onAttempt?.(attempt);
     }
   };
 

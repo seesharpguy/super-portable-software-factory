@@ -58,6 +58,22 @@ interface Tracer {
   event(record: EventRecord): string;
 }
 
+/**
+ * A run-scoped hook for a live TTY view (`cli/ui/run_dashboard.tsx`) to
+ * track phase state and spend without re-parsing `Console`'s formatted
+ * lines — deliberately narrow (phase transitions + usage, not every method
+ * below) since that's the whole surface a "which phase is running, how
+ * long, how much so far" dashboard needs. Every hook is optional and every
+ * `Console` call site that doesn't pass one behaves exactly as before this
+ * existed.
+ */
+export interface RunObserver {
+  onPhaseStart?(phase: Phase): void;
+  onPhaseEnd?(phase: Phase, seconds: number): void;
+  onUsage?(tokens: number, cost: number): void;
+  onSessionEnd?(ok: boolean): void;
+}
+
 /** Bound to one run's tracer. Reachable as `run.console` everywhere. */
 export class Console {
   private phaseId = ""; // current lane — log events attach to it
@@ -72,11 +88,22 @@ export class Console {
     private notifier: Notifier | null = null,
     /** The CLI chain name (`"plan-build-test"`), for a notification's title — see session.ts. */
     private chainName: string = "adw",
+    /**
+     * Where a printed line actually goes — defaults to `console.log`, exactly
+     * the prior behavior. `cli/commands/run.ts` is the only caller that ever
+     * passes something else: on a real TTY, a sink that feeds a live Ink
+     * dashboard's scrollback instead of writing straight to stdout. The
+     * tracer side of `emit()` below is UNCHANGED either way — this only
+     * repoints the print half of "one narrative, two destinations".
+     */
+    private sink: (line: string) => void = console.log,
+    /** See `RunObserver`'s own doc comment. `null` outside an interactive `cli/commands/run.ts` dispatch. */
+    private observer: RunObserver | null = null,
   ) {}
 
   // ── the one helper: print AND trace, always together ────────────────────
   private emit(line: string, level: string = "info"): void {
-    console.log(line);
+    this.sink(line);
     this.tracer.event(
       makeEventRecord({
         adw_id: this.adwId,
@@ -117,7 +144,8 @@ export class Console {
       ` ${paint("dim", "next")}     ${paint("bold", `just phases ${this.adwId}`)}`,
     ];
     const rendered = panel(rows, "ADW complete", ok ? "green" : "red");
-    console.log(rendered);
+    this.sink(rendered);
+    this.observer?.onSessionEnd?.(ok);
     const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`;
     this.tracer.event(
       makeEventRecord({
@@ -152,11 +180,13 @@ export class Console {
       `  ${paint(color, p.kind)} ${paint("dim", `· ${p.owner}`)}`;
     if (p.description) line += `  ${paint("dim", clip(p.description))}`;
     this.emit(line);
+    this.observer?.onPhaseStart?.(phase);
   }
 
   phaseEnded(phase: Phase, seconds: number): void {
     const ok = phase.status === "success";
     this.results.push(phase.status);
+    this.observer?.onPhaseEnd?.(phase, seconds);
     let line = `  ${ok ? paint("green", "✓") : paint("red", "✗")} ${phase.params.name} ${paint("dim", `${seconds.toFixed(1)}s`)}`;
     if (!ok && phase.error) line += `  ${paint("red", clip(phase.error))}`;
     this.emit(line, ok ? "info" : "error");
@@ -180,6 +210,11 @@ export class Console {
   /** Free-form detail inside the current phase — what `ph.log()` recorded. */
   note(message: string): void {
     this.emit(`  ${paint("dim", `· ${clip(message)}`)}`);
+  }
+
+  /** `Run.addUsage()`'s only hook into `Console` — the running total lives on `Run`, not here, so this just forwards it to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. */
+  notifyUsage(tokens: number, cost: number): void {
+    this.observer?.onUsage?.(tokens, cost);
   }
 
   // ── agents ──────────────────────────────────────────────────────────────

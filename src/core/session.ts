@@ -9,6 +9,7 @@
 import path from "node:path";
 import * as paths from "./paths.ts";
 import { Run } from "./runner.ts";
+import type { RunObserver } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import type { SFConfig } from "./data_types.ts";
 import { engineerName, newId } from "./utils.ts";
@@ -143,7 +144,14 @@ export function activeRunIdsForTest(): string[] {
  * longer a `process.argv[1]` basename that means anything. Direct callers
  * that have no chain of their own fall back to `"adw"`.
  */
-export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string, chainName?: string): Run {
+export function ensure(
+  cfg: SFConfig,
+  adwId?: string | null,
+  cwd?: string,
+  chainName?: string,
+  /** See `RunObserver`'s doc comment (`core/console.ts`). Omitted for every caller except an interactive `cli/commands/run.ts` dispatch — a `spf watch` per-issue run, `spf fanout`'s per-attempt runs, and every test all continue to build a plain, unobserved `Console`. */
+  renderHooks?: { sink?: (line: string) => void; observer?: RunObserver | null },
+): Run {
   const id = adwId || newId(8);
   const anchor = paths.resolveAnchor(cwd);
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
@@ -167,6 +175,8 @@ export function ensure(cfg: SFConfig, adwId?: string | null, cwd?: string, chain
     dataDir: dataPaths.data_dir,
     chainName: chainName || "adw",
     notifier: resolveNotifier(cfg),
+    sink: renderHooks?.sink,
+    observer: renderHooks?.observer,
   });
   const scriptPath = process.argv[1] || "adw";
   tracer.sessionStart(id, run.engineer, chainName || "adw");

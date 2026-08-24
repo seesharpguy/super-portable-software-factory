@@ -24,6 +24,8 @@ import type { ChainContext } from "../../chains/context.ts";
 import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
+import { isInteractive } from "../ask.ts";
+import type { WatchDashboard } from "../ui/watch_dashboard.tsx";
 
 /** Kept well under Slack's own 2900-char slice on `detail` (see `slack_channel.ts`) — a reviewer can emit a lot of findings, but the PR body/notification only needs enough to tell a human whether to look closer. */
 const MAX_REVIEW_DIGEST_CHARS = 1200;
@@ -486,6 +488,24 @@ export async function watchCommand(argv: string[]): Promise<number> {
   // validation already ran to produce `provider` itself.
   const authoringProvider = isAuthoringProvider(provider) ? provider : null;
 
+  // Only for the one dispatch a human is actually watching a terminal for —
+  // `core/watch.ts` itself is untouched; this only ever swaps `deps.log`
+  // below and reads `state.inflight`/`state.refining` sizes after each
+  // `tick()`, exactly the seam the plan called for.
+  let dashboard: WatchDashboard | undefined;
+  if (isInteractive()) {
+    const { mountWatchDashboard } = await import("../ui/watch_dashboard.tsx");
+    dashboard = mountWatchDashboard({
+      repo: `${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}`,
+      labelPrefix: cfg.watch.label_prefix,
+      chain: cfg.watch.chain,
+      concurrency: cfg.watch.concurrency,
+      refineChain: cfg.watch.refine.enabled ? cfg.watch.refine.chain : undefined,
+      refineConcurrency: cfg.watch.refine.enabled ? cfg.watch.refine.concurrency : undefined,
+      dryRun: Boolean(flags["dry-run"]),
+    });
+  }
+
   const deps: WatchDeps = {
     provider,
     codeHost,
@@ -505,8 +525,11 @@ export async function watchCommand(argv: string[]): Promise<number> {
     dryRun: Boolean(flags["dry-run"]),
     runChain,
     listChildren: authoringProvider ? (parent) => authoringProvider.listChildren(parent) : undefined,
-    log: (message) => console.log(message),
-    notify: (event) => notifier?.send(event),
+    log: (message) => (dashboard ? dashboard.log(message) : console.log(message)),
+    notify: (event) => {
+      notifier?.send(event); // unaffected either way — see mountWatchDashboard's own doc comment
+      dashboard?.mirrorNotify(event);
+    },
   };
 
   const state = createWatchState();
@@ -531,6 +554,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     interrupt?.();
     sigints++;
     if (sigints >= 2) {
+      dashboard?.unmountNow(); // best-effort cursor-visibility restore before the abrupt exit — see WatchDashboard.unmountNow's own comment
       console.error("\n[spf] watch     second interrupt — exiting immediately, without draining");
       releaseLock(lockPath);
       process.exit(130);
@@ -541,11 +565,17 @@ export async function watchCommand(argv: string[]): Promise<number> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  console.log(
-    `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}` +
-      (cfg.watch.refine.enabled ? `  refine "${cfg.watch.refine.chain}" concurrency ${cfg.watch.refine.concurrency}` : "") +
-      (flags["dry-run"] ? "  (dry run)" : ""),
-  );
+  // The dashboard already renders this exact information as its own live
+  // header (repo/label/chain/concurrency/dry-run) — printing it again here
+  // would both duplicate it and interleave a raw console.log with an
+  // active Ink region.
+  if (!dashboard) {
+    console.log(
+      `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}` +
+        (cfg.watch.refine.enabled ? `  refine "${cfg.watch.refine.chain}" concurrency ${cfg.watch.refine.concurrency}` : "") +
+        (flags["dry-run"] ? "  (dry run)" : ""),
+    );
+  }
   deps.notify({
     kind: "watch_started",
     level: "info",
@@ -559,13 +589,16 @@ export async function watchCommand(argv: string[]): Promise<number> {
 
   try {
     for (;;) {
+      dashboard?.setNextPollAt(null); // clears any stale countdown while a tick is actually running
       await tick(deps, state);
+      dashboard?.setCounts(state.inflight.size, state.refining.size);
       if (flags["once"] || stopping) break;
+      dashboard?.setNextPollAt(Date.now() + cfg.watch.poll_ms);
       await interruptibleSleep(cfg.watch.poll_ms);
       if (stopping) break;
     }
     while (state.inflight.size > 0) {
-      console.log(`[spf] watch     draining ${state.inflight.size} in-flight issue(s)...`);
+      deps.log(`[spf] watch     draining ${state.inflight.size} in-flight issue(s)...`); // deps.log already routes to the dashboard when one is mounted, console.log otherwise
       await interruptibleSleep(1000);
       if (stopping && sigints >= 2) break; // stop() itself already exits on the 2nd signal; this is belt-and-suspenders
     }
@@ -576,5 +609,6 @@ export async function watchCommand(argv: string[]): Promise<number> {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     releaseLock(lockPath);
+    await dashboard?.close();
   }
 }

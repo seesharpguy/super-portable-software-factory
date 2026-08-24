@@ -1,5 +1,6 @@
 /** Shared by both `spf <chain> "..."` and `spf run <chain> "..."` — same dispatch. */
 import * as paths from "../../core/paths.ts";
+import * as agents from "../../core/agents.ts";
 import { parseCli, resolvePrompt } from "../../core/utils.ts";
 import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
@@ -61,6 +62,26 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
   // as `issue` above. `publishIssues()` itself validates the value —
   // rejecting anything but p0|p1|p2|p3 — so this stays a plain passthrough.
   if (options["priority"] !== undefined) chainOptions["priority"] = options["priority"];
+
+  // A live dashboard only ever makes sense for the one dispatch a human is
+  // actually watching — `spf watch`'s per-issue runs and `spf fanout`'s
+  // per-attempt runs go through `runChain`/`startRun` directly, never this
+  // function, so they're untouched. Loaded here (not left to `startRun`'s
+  // own `loadConfig` call moments later) purely to read the ceilings the
+  // dashboard displays — a second, cheap parse of the same small YAML, not
+  // a second source of truth: `startRun` still owns the real, validated
+  // config the run actually executes against.
+  if (isInteractive()) {
+    const { mountRunDashboard } = await import("../ui/run_dashboard.tsx");
+    const cfg = agents.loadConfig(ctx.config_paths);
+    const dashboard = mountRunDashboard({ maxCost: cfg.defaults.max_run_cost, maxTokens: cfg.defaults.max_run_tokens });
+    ctx.render_hooks = { sink: dashboard.sink, observer: dashboard.observer, pause: dashboard.pause, resume: dashboard.resume };
+    try {
+      return await runChain(chain, ctx, chainOptions);
+    } finally {
+      await dashboard.close();
+    }
+  }
 
   return runChain(chain, ctx, chainOptions);
 }

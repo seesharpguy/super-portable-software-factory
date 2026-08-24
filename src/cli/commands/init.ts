@@ -27,7 +27,7 @@ import * as agents from "../../core/agents.ts";
 import { ensureGitignore } from "../gitignore.ts";
 import { parseCli } from "../../core/utils.ts";
 import { paint } from "../../core/console.ts";
-import { createAsker, isInteractive, InterviewAborted } from "../ask.ts";
+import { createAsker, inkAvailable, isInteractive, InterviewAborted } from "../ask.ts";
 import { gatherContext, runInterview } from "../interview.ts";
 import { readEnvFile, upsertEnvFile, writeEnvExample } from "../env_file.ts";
 import { installSkillCommand } from "./install-skill.ts";
@@ -265,7 +265,12 @@ export async function initCommand(argv: string[]): Promise<number> {
     }
     installSkill();
   } else {
-    const asker = createAsker();
+    // Ink needs raw-mode stdin to drive arrow-key selects and inline
+    // validation; `inkAvailable()` is `isInteractive()` plus one extra
+    // guard for the (practically never, but cheap to check) case where a
+    // TTY-reporting stdin still doesn't expose `setRawMode`. Either way
+    // falls back to the original readline asker, never to a hang.
+    const asker = inkAvailable() ? (await import("../ui/ink_asker.tsx")).createInkAsker() : createAsker();
     try {
       if (existsSync(configPath) && !flags["force"]) {
         const overwrite = await asker.confirm(`${configPath} already exists — overwrite it?`, false);
