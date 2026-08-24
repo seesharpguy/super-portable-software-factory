@@ -705,16 +705,21 @@ export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
  * everything else (`spf doctor`, `list`, `sessions`, ...) is interactive, so
  * it stays console-only on purpose; see `core/notify/notifier.ts`.
  *
- * `events` is the whole filter: "off" sends nothing, "errors" sends only
- * NotifyEvents whose `level` is "error", "all" sends every curated
- * milestone. A channel's own `events` overrides the top-level scope for
- * just that channel (e.g. Slack gets everything, Teams gets errors only).
+ * `events` is the whole filter, from narrowest to widest:
+ *   - "off": sends nothing.
+ *   - "errors": only NotifyEvents whose `level` is "error" (true failures —
+ *     run_failed, phase_failed, watch_error).
+ *   - "attention": "errors" PLUS `level: "notice"` events — things that
+ *     need a human but aren't a failure (issue_blocked, spec_needs_feedback).
+ *   - "all": every curated milestone, `level: "info"` included.
+ * A channel's own `events` overrides the top-level scope for just that
+ * channel (e.g. Slack gets everything, Teams gets errors only).
  *
  * `webhook_url_env` names the .env key holding the secret URL — never the
  * URL itself, matching GITHUB_TOKEN/JIRA_API_TOKEN. Empty = the kind's own
  * default key (see core/notify/notifier.ts's DEFAULT_ENV_KEY).
  */
-export const NotifyScopeSchema = v.picklist(["off", "errors", "all"]);
+export const NotifyScopeSchema = v.picklist(["off", "errors", "attention", "all"]);
 export type NotifyScope = v.InferOutput<typeof NotifyScopeSchema>;
 
 export const NotifyChannelKindSchema = v.picklist(["slack", "teams", "webhook"]);

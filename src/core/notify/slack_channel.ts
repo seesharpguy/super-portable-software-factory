@@ -17,7 +17,7 @@ export class SlackChannel implements NotificationChannel {
   }
 
   async send(event: NotifyEvent, timeoutMs: number): Promise<void> {
-    const emoji = event.level === "error" ? ":x:" : ":white_check_mark:";
+    const emoji = event.level === "error" ? ":x:" : event.level === "notice" ? ":warning:" : ":white_check_mark:";
     const fieldsText = event.fields.map(([k, v]) => `*${k}:* ${v}`).join("  ·  ");
     const body = {
       text: `${emoji} ${event.title}`,

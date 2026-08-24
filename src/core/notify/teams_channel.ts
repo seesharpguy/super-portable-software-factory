@@ -21,7 +21,7 @@ export class TeamsChannel implements NotificationChannel {
   }
 
   async send(event: NotifyEvent, timeoutMs: number): Promise<void> {
-    const color = event.level === "error" ? "attention" : "good";
+    const color = event.level === "error" ? "attention" : event.level === "notice" ? "warning" : "good";
     const facts = event.fields.map(([title, value]) => ({ title, value }));
     const card = {
       type: "AdaptiveCard",

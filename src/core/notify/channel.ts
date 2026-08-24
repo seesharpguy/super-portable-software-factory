@@ -32,8 +32,14 @@ export type NotifyKind =
 
 export interface NotifyEvent {
   kind: NotifyKind;
-  /** "error" sends under both `events: errors` and `events: all`; "info" only under `all`. */
-  level: "info" | "error";
+  /**
+   * The whole filter predicate a scope applies (see `NotifyScopeSchema` in
+   * `core/data_types.ts`): "error" is a true failure (sends under `errors`,
+   * `attention`, and `all`); "notice" needs a human but isn't a failure
+   * (sends under `attention` and `all`); "info" is a routine milestone
+   * (sends only under `all`).
+   */
+  level: "info" | "notice" | "error";
   /** One line, e.g. "run failed — plan-build-test". */
   title: string;
   /** The error text / PR body / block detail, if any. */

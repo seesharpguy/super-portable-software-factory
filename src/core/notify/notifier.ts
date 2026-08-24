@@ -22,10 +22,14 @@ export const DEFAULT_NOTIFY_ENV_KEY: Record<string, string> = {
   webhook: "SPF_WEBHOOK_URL",
 };
 
-/** `errors` mode only sends `level: "error"`; `all` sends everything; `off` sends nothing. */
-function scopeAllows(scope: NotifyScope, level: "info" | "error"): boolean {
+/**
+ * `off` sends nothing; `errors` only `level: "error"`; `attention` also
+ * lets `level: "notice"` through; `all` sends everything.
+ */
+function scopeAllows(scope: NotifyScope, level: "info" | "notice" | "error"): boolean {
   if (scope === "off") return false;
   if (scope === "all") return true;
+  if (scope === "attention") return level === "error" || level === "notice";
   return level === "error";
 }
 

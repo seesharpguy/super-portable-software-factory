@@ -410,10 +410,11 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     const events = await asker.select(
       "Notify on",
       [
-        { value: "errors", label: "errors — failed runs, blocked issues, watch errors" },
-        { value: "all", label: "all — every milestone (claimed, PR opened, done, ...) plus errors" },
+        { value: "errors", label: "errors — failed runs and watch errors only" },
+        { value: "attention", label: "attention — errors, plus blocked issues and feedback requests" },
+        { value: "all", label: "all — every milestone (claimed, PR opened, done, ...) plus attention and errors" },
       ],
-      "errors",
+      "attention",
     );
     const channels: Record<string, unknown>[] = [];
     for (;;) {

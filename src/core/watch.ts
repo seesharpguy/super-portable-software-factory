@@ -296,7 +296,7 @@ export async function reconcileOrphans(deps: WatchDeps, state: WatchRunState): P
       deps.log(`watch: ${issue.id} orphaned past ${MAX_ORPHAN_ATTEMPTS} attempts — blocked`);
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `issue ${issue.id} blocked`,
         detail: `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned attempts.`,
         fields: [["issue", issue.id], ["title", issue.title]],
@@ -529,11 +529,11 @@ async function escalateSpec(
     `\n\n---\n\nAnswer inline, then add the \`${deps.labelPrefix}:continue-refinement\` label — refinement resumes from where it left off (adw_id \`${adwId}\`).`;
 
   deps.notify({
-    // "error" level, not "info" — this is the same class of event as
-    // issue_blocked ("spf needs a human"), and it belongs on an `errors`-scope
-    // channel just as much as an `all`-scope one.
+    // "notice" level, not "info" — this is the same class of event as
+    // issue_blocked ("spf needs a human"), and it belongs on an
+    // `attention`-scope channel just as much as an `all`-scope one.
     kind: "spec_needs_feedback",
-    level: "error",
+    level: "notice",
     title: `spec ${issue.id} needs feedback`,
     detail: `${questions.length} question(s), round ${round}.`,
     fields: [
@@ -579,7 +579,7 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
       deps.log(`watch: spec ${issue.id} orphaned after asking round ${marker.feedback.rounds} — finishing the transition to needs-feedback`);
       deps.notify({
         kind: "spec_needs_feedback",
-        level: "error",
+        level: "notice",
         title: `spec ${issue.id} needs feedback`,
         detail: `Round ${marker.feedback.rounds}.`,
         fields: [["issue", issue.id], ["title", issue.title], ["round", String(marker.feedback.rounds)]],
@@ -598,7 +598,7 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
       deps.log(`watch: spec ${issue.id} orphaned past ${MAX_ORPHAN_ATTEMPTS} attempts — blocked`);
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `spec ${issue.id} blocked`,
         detail: `Gave up after ${MAX_ORPHAN_ATTEMPTS} orphaned refine attempts.`,
         fields: [["issue", issue.id], ["title", issue.title]],
@@ -709,7 +709,7 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
       deps.log(`watch: ${issue.id}'s PR #${marker.pr} closed without merging — blocked`);
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `issue ${issue.id} blocked`,
         detail: `PR #${marker.pr} was closed without merging.`,
         fields: [["issue", issue.id], ["title", issue.title], ["pr", `#${marker.pr}`]],
@@ -751,7 +751,7 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
       const detail = result.detail || `Chain "${deps.chain}" (adw_id ${adwId}) did not complete successfully. Run \`spf phases ${adwId}\` for detail.`;
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `issue ${issue.id} blocked`,
         detail,
         fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", adwId]],
@@ -766,7 +766,7 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
       deps.log(`watch: ${issue.id}: chain succeeded but committed nothing — blocked`);
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `issue ${issue.id} blocked`,
         detail: `Chain "${deps.chain}" (adw_id ${adwId}) completed but left no committed changes.`,
         fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", adwId]],
@@ -909,7 +909,7 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
       const detail = result.detail || `Refine chain "${deps.refineChain}" (adw_id ${adwId}) did not complete successfully. Run \`spf phases ${adwId}\` for detail.`;
       deps.notify({
         kind: "issue_blocked",
-        level: "error",
+        level: "notice",
         title: `spec ${issue.id} blocked`,
         detail,
         fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.refineChain], ["adw_id", adwId]],

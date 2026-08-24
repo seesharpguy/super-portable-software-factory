@@ -24,6 +24,9 @@ function infoEvent(): NotifyEvent {
 function errorEvent(): NotifyEvent {
   return { kind: "run_failed", level: "error", title: "run failed", fields: [] };
 }
+function noticeEvent(): NotifyEvent {
+  return { kind: "issue_blocked", level: "notice", title: "issue blocked", fields: [] };
+}
 
 class RecordingChannel implements NotificationChannel {
   received: NotifyEvent[] = [];
@@ -79,21 +82,36 @@ test("events: off never sends, regardless of level", () => {
   assert.deepEqual(channel.received, []);
 });
 
-test("events: errors sends only level=error", () => {
+test("events: errors sends only level=error, not notice", () => {
   const channel = new RecordingChannel();
   const notifier = new Notifier([{ channel, scope: "errors" }], 1000, false, () => {});
   notifier.send(infoEvent());
+  notifier.send(noticeEvent());
   notifier.send(errorEvent());
   assert.equal(channel.received.length, 1);
   assert.equal(channel.received[0].level, "error");
 });
 
-test("events: all sends both info and error", () => {
+test("events: attention sends notice and error, not info", () => {
+  const channel = new RecordingChannel();
+  const notifier = new Notifier([{ channel, scope: "attention" }], 1000, false, () => {});
+  notifier.send(infoEvent());
+  notifier.send(noticeEvent());
+  notifier.send(errorEvent());
+  assert.equal(channel.received.length, 2);
+  assert.deepEqual(
+    channel.received.map((e) => e.level),
+    ["notice", "error"],
+  );
+});
+
+test("events: all sends info, notice, and error", () => {
   const channel = new RecordingChannel();
   const notifier = new Notifier([{ channel, scope: "all" }], 1000, false, () => {});
   notifier.send(infoEvent());
+  notifier.send(noticeEvent());
   notifier.send(errorEvent());
-  assert.equal(channel.received.length, 2);
+  assert.equal(channel.received.length, 3);
 });
 
 test("a per-channel scope overrides the top-level scope", () => {

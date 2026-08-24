@@ -707,7 +707,7 @@ test("claim -> PR opened -> merged fires issue_claimed, pr_opened, then issue_do
   assert.equal(events.at(-1)!.level, "info");
 });
 
-test("a rejected chain run fires issue_blocked at error level", async () => {
+test("a rejected chain run fires issue_blocked at notice level", async () => {
   const provider = new FakeProvider();
   provider.addIssue("51", "Flaky feature");
   const codeHost = new FakeCodeHost();
@@ -723,7 +723,7 @@ test("a rejected chain run fires issue_blocked at error level", async () => {
 
   const blocked = events.filter((e) => e.kind === "issue_blocked");
   assert.equal(blocked.length, 1);
-  assert.equal(blocked[0]!.level, "error");
+  assert.equal(blocked[0]!.level, "notice");
   assert.equal(blocked[0]!.detail, "build-test failed");
 });
 
@@ -774,7 +774,7 @@ test("finishReviews: a closed-without-merging PR fires issue_blocked", async () 
   await finishReviews(makeDeps(provider, codeHost, { notify }));
 
   assert.deepEqual(events.map((e) => e.kind), ["issue_blocked"]);
-  assert.equal(events[0]!.level, "error");
+  assert.equal(events[0]!.level, "notice");
 });
 
 test("reconcileOrphans: giving up past the retry cap fires issue_blocked", async () => {
@@ -1043,7 +1043,7 @@ test("reconcileRefining: a refining spec whose marker already has feedback finis
 
   assert.deepEqual(provider.transitions, [{ id: "153", to: "needs-feedback", detail: undefined }]);
   assert.deepEqual(events.map((e) => e.kind), ["spec_needs_feedback"]);
-  assert.equal(events[0]!.level, "error");
+  assert.equal(events[0]!.level, "notice");
 });
 
 test("reconcileRefining: a disabled refine lane is a complete no-op", async () => {
@@ -1111,7 +1111,7 @@ test("claimSpecs: a refiner that raises questions escalates instead of publishin
   assert.equal(provider.entries.get("200")!.state, "needs-feedback");
   assert.deepEqual(provider.transitions.map((t) => t.to), ["needs-feedback"]);
   assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "spec_needs_feedback"]);
-  assert.equal(events[1]!.level, "error", "spec_needs_feedback is the same class of event as issue_blocked — must reach an errors-scope channel");
+  assert.equal(events[1]!.level, "notice", "spec_needs_feedback is the same class of event as issue_blocked — must reach an attention-scope channel");
   const marker = provider.entries.get("200")!.marker;
   assert.equal(marker?.feedback?.rounds, 1);
   assert.ok(marker?.feedback?.asked_at);

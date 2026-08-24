@@ -608,23 +608,28 @@ for those.
 ```yaml
 # .spf/spf.config.yaml
 notifications:
-  events: errors            # off (default) | errors | all
+  events: attention         # off (default) | errors | attention | all
   channels:
     - kind: slack            # slack | teams | webhook
       webhook_url_env: SLACK_WEBHOOK_URL   # optional; this is the default for slack
 ```
 
-`events` is the whole filter: `errors` sends only failed runs/phases, blocked
-issues, watch errors, and a spec needing feedback (`spec_needs_feedback` —
-see "Human-in-the-loop escalation" above; it's `error`-level on purpose, the
-same class of event as a blocked issue, so an `errors`-scope channel sees it
-too); `all` adds every milestone — run started/finished, issue claimed, PR
-opened, issue done, a container's roll-up (`feature_done` — see "Container
-roll-up" above), and a spec reaching actual completion (`spec_done` —
-distinct from `spec_refined`, which fires the moment a tree is published;
-see "Human-in-the-loop escalation" above). A channel's own `events`
-overrides the top-level scope for just that channel. `spf doctor` reports
-whether each configured channel's env var is set.
+`events` is the whole filter, narrowest to widest:
+
+- `errors` sends only true failures — a failed run/phase (`run_failed`,
+  `phase_failed`) or a `watch_error`.
+- `attention` adds anything that needs a human but isn't itself a failure —
+  a blocked issue (`issue_blocked`) or a spec needing feedback
+  (`spec_needs_feedback` — see "Human-in-the-loop escalation" above).
+- `all` adds every remaining milestone — run started/finished, issue
+  claimed, PR opened, issue done, a container's roll-up (`feature_done` —
+  see "Container roll-up" above), and a spec reaching actual completion
+  (`spec_done` — distinct from `spec_refined`, which fires the moment a
+  tree is published; see "Human-in-the-loop escalation" above).
+
+Each tier includes everything the narrower tiers send. A channel's own
+`events` overrides the top-level scope for just that channel. `spf doctor`
+reports whether each configured channel's env var is set.
 
 The webhook URL is a secret and lives only in `.env` — `webhook_url_env`
 names the key, never the URL itself, matching `GITHUB_TOKEN`/

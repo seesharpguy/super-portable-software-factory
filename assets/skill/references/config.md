@@ -247,7 +247,7 @@ default; adding it is entirely additive.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `events` | `"off"` \| `"errors"` \| `"all"` | The whole filter. `off` (default): nothing. `errors`: only failed runs/phases, blocked issues, watch errors, and a spec needing feedback (`spec_needs_feedback` — `error`-level on purpose, same class as a blocked issue). `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus errors. |
+| `events` | `"off"` \| `"errors"` \| `"attention"` \| `"all"` | The whole filter, narrowest to widest. `off` (default): nothing. `errors`: only true failures — failed runs/phases (`run_failed`/`phase_failed`), `watch_error`. `attention`: `errors` plus anything needing a human but not itself a failure — a blocked issue (`issue_blocked`) or a spec needing feedback (`spec_needs_feedback`). `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus `attention` and `errors`. |
 | `timeout_ms` | int | Per-request timeout for a channel's HTTP POST. Default `5000`. |
 | `channels[]` | array | See below. |
 
@@ -261,7 +261,7 @@ kind.
 
 ```yaml
 notifications:
-  events: errors
+  events: attention
   channels:
     - kind: slack
       webhook_url_env: SLACK_WEBHOOK_URL   # optional; this is the default for slack
