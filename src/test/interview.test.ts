@@ -99,6 +99,75 @@ test("claude_code + watch(github/github): overrides the three pinned agents and 
   validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir); // throws on any problem
 });
 
+// Regression for a real production bug: SPF_CLAUDE_CMD="ollama launch
+// claude --model <fixed-tag>" baked one model into the whole process, so
+// every claude_code agent's own model: field was inert regardless of what
+// it said. Picking "ollama" here must write the {model}-templated wrapper
+// (agent_cc.ts substitutes it per call) and ask for a real Ollama tag —
+// never Claude Code's own sonnet/opus/haiku vocabulary, which `ollama
+// launch`'s own --model flag (the one that actually selects the served
+// model) would not understand.
+test("claude_code + ollama launcher: writes the {model}-templated SPF_CLAUDE_CMD and asks for an Ollama tag, not Claude Code's alias vocabulary", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Launch command for the `claude` CLI": "ollama",
+    },
+    text: { "Ollama model tag": "kimi-k2.7-code:cloud" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.env.SPF_CLAUDE_CMD, "ollama launch claude --model {model}");
+  assert.equal(config.defaults.model, "kimi-k2.7-code:cloud");
+  for (const a of config.agents) assert.equal(a.model, "kimi-k2.7-code:cloud");
+  assert.equal(result!.env.SPF_CLAUDE_CMD, undefined, "declarative, not a secret — belongs in config.env, not .env");
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.equal(cfg.env.SPF_CLAUDE_CMD, "ollama launch claude --model {model}");
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
+});
+
+test("claude_code + plain claude: no SPF_CLAUDE_CMD written, Model stays Claude Code's own alias vocabulary", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Launch command for the `claude` CLI": "claude",
+      "Model (Claude": "opus",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.env, undefined, "no launcher chosen -> nothing to write into env:");
+  assert.equal(config.defaults.model, "opus");
+});
+
 test("flue + openrouter: no pinned-agent overrides needed, provider key collected", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({

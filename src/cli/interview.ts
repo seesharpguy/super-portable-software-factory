@@ -131,29 +131,55 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
 
   if (codingAgent === "claude_code") {
     if (!ctx.claudeOnPath) {
-      asker.note("warning: `claude` was not found on PATH — install it (or set a launch command below) before running spf.");
+      asker.note("warning: `claude` was not found on PATH — install it (or pick a launch command below) before running spf.");
     }
-    // Kept short on purpose: TextPromptView renders the label and the
-    // live-growing input on one unwrapped terminal row, so a long label
-    // desyncs Ink's redraw math the moment label+input exceeds the terminal
-    // width (reproduced live: a ~195-char label here produced garbled,
-    // overlapping keystrokes). Put anything beyond a one-line question in a
-    // note() instead — printed once, never re-rendered.
-    asker.note('e.g. "ollama launch claude --model {model}" to route through a wrapper — {model} substitutes per-agent, written to spf.config.yaml\'s env.SPF_CLAUDE_CMD');
-    const launchCommand = await asker.text("Launch command for the `claude` CLI", { default: "claude" });
+    // A select, not free text: the three shapes below are the only ones
+    // agent_cc.ts actually supports (see its module doc comment), and
+    // getting one wrong by hand-typing is exactly how the two doctor.ts
+    // hard-fails here (a missing "--" separator, a missing "--model" before
+    // it) get triggered in practice. "ollama" is fully determined by
+    // picking it — no further typing, and no way to omit the `--model`
+    // flag or the `{model}` token by mistake. "custom" is the escape hatch
+    // for anything else (a proxy, a bespoke wrapper script).
+    const launchMode = await asker.select(
+      "Launch command for the `claude` CLI",
+      [
+        { value: "claude", label: "claude — resolved from PATH" },
+        { value: "ollama", label: "ollama launch claude --model {model} — routes through Ollama, per-agent model" },
+        { value: "custom", label: "custom — type your own launch command" },
+      ],
+      "claude",
+    );
+    let launchCommand = "claude";
+    if (launchMode === "ollama") {
+      launchCommand = "ollama launch claude --model {model}";
+      asker.note("{model} substitutes with each agent's own model: field before spawning — the model asked for next, or per-agent later via \"Customize models per agent?\".");
+    } else if (launchMode === "custom") {
+      launchCommand = await asker.text("Custom launch command", { default: "claude" });
+    }
     if (launchCommand !== "claude") configEnv["SPF_CLAUDE_CMD"] = launchCommand;
 
-    const model = await asker.select(
-      "Model (Claude Code's own vocabulary — not provider/model-id)",
-      [
-        { value: "sonnet", label: "sonnet" },
-        { value: "opus", label: "opus" },
-        { value: "haiku", label: "haiku" },
-        { value: "custom", label: "custom — type an exact model name" },
-      ],
-      "sonnet",
-    );
-    defaults.model = model === "custom" ? await asker.text("Exact model name") : model;
+    let defaultModel: string;
+    if (launchMode === "ollama") {
+      // Not Claude Code's own alias vocabulary (sonnet/opus/haiku) — under
+      // this launcher, `ollama launch`'s OWN --model is what actually picks
+      // the served model (see agent_cc.ts's module doc comment), so this
+      // has to be a real Ollama tag from `ollama list`.
+      defaultModel = await asker.text("Ollama model tag (from `ollama list`)");
+    } else {
+      const model = await asker.select(
+        "Model (Claude Code's own vocabulary — not provider/model-id)",
+        [
+          { value: "sonnet", label: "sonnet" },
+          { value: "opus", label: "opus" },
+          { value: "haiku", label: "haiku" },
+          { value: "custom", label: "custom — type an exact model name" },
+        ],
+        "sonnet",
+      );
+      defaultModel = model === "custom" ? await asker.text("Exact model name") : model;
+    }
+    defaults.model = defaultModel;
 
     const auth = await asker.select(
       "Authentication",
