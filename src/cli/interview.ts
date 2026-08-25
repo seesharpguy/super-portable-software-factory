@@ -133,10 +133,14 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     if (!ctx.claudeOnPath) {
       asker.note("warning: `claude` was not found on PATH — install it (or set a launch command below) before running spf.");
     }
-    const launchCommand = await asker.text(
-      'Launch command for the `claude` CLI — e.g. "ollama launch claude --model {model}" to route through a wrapper, with {model} substituted per-agent (writes env.SPF_CLAUDE_CMD to spf.config.yaml)',
-      { default: "claude" },
-    );
+    // Kept short on purpose: TextPromptView renders the label and the
+    // live-growing input on one unwrapped terminal row, so a long label
+    // desyncs Ink's redraw math the moment label+input exceeds the terminal
+    // width (reproduced live: a ~195-char label here produced garbled,
+    // overlapping keystrokes). Put anything beyond a one-line question in a
+    // note() instead — printed once, never re-rendered.
+    asker.note('e.g. "ollama launch claude --model {model}" to route through a wrapper — {model} substitutes per-agent, written to spf.config.yaml\'s env.SPF_CLAUDE_CMD');
+    const launchCommand = await asker.text("Launch command for the `claude` CLI", { default: "claude" });
     if (launchCommand !== "claude") configEnv["SPF_CLAUDE_CMD"] = launchCommand;
 
     const model = await asker.select(
