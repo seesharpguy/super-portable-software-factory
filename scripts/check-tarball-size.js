@@ -2,21 +2,24 @@
 /**
  * Tarball size gate, run in CI after `npm run build`. `npm pack --dry-run
  * --json` reports the real size without writing a .tgz to disk. Budget
- * re-verified against this package's build after the Jira issue-authoring
- * work landed alongside priority/frontier/roll-up and spec-completion
- * (514.1kB packed / 1455.7kB unpacked): ≤540 KB packed, ≤1.53 MB unpacked —
- * ~5% headroom so a modest PR doesn't trip CI, without silently regressing
- * back toward shipping compiled test files. Previously 478.5kB/1342.6kB
- * (after tiering #14) — raise these again, the same way, whenever a real
- * feature deliberately grows the package; this gate exists to catch
- * unintentional bloat (an accidentally-included file, a runaway
- * dependency), not to cap the project's size forever.
+ * re-verified against this package's build after the doctor.ts
+ * built-in-chain validation fix plus the declarative `env:` config block /
+ * `{model}` per-agent-under-Ollama fix (README/config.md/roster.md doc
+ * growth + new tests) (541.4kB packed / 1536.3kB unpacked): ≤570 KB packed,
+ * ≤1.62 MB unpacked — ~5% headroom so a modest PR doesn't trip CI, without
+ * silently regressing back toward shipping compiled test files. Previously
+ * 514.1kB/1455.7kB (after Jira issue-authoring + priority/frontier/roll-up +
+ * spec-completion), and 478.5kB/1342.6kB before that (after tiering #14) —
+ * raise these again, the same way, whenever a real feature deliberately
+ * grows the package; this gate exists to catch unintentional bloat (an
+ * accidentally-included file, a runaway dependency), not to cap the
+ * project's size forever.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 540_000;
-const UNPACKED_BUDGET = 1_530_000;
+const PACKED_BUDGET = 570_000;
+const UNPACKED_BUDGET = 1_620_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
