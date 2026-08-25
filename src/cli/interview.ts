@@ -109,6 +109,11 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
   const defaults: Record<string, unknown> = {};
   const agentOverrides: Record<string, unknown>[] = [];
   const env: Record<string, string> = {};
+  // Declarative, non-secret env vars — written to spf.config.yaml's `env:`
+  // (committable) rather than `.env` (gitignored, and read once from the
+  // shell rather than declared). `SPF_CLAUDE_CMD` is the one case so far:
+  // it names a launcher/wrapper command, not a credential.
+  const configEnv: Record<string, string> = {};
   const envExampleKeys: string[] = [];
   const notes: string[] = [];
 
@@ -129,10 +134,10 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       asker.note("warning: `claude` was not found on PATH — install it (or set a launch command below) before running spf.");
     }
     const launchCommand = await asker.text(
-      'Launch command for the `claude` CLI — e.g. "ollama launch claude" to route through a wrapper (SPF_CLAUDE_CMD)',
+      'Launch command for the `claude` CLI — e.g. "ollama launch claude --model {model}" to route through a wrapper, with {model} substituted per-agent (writes env.SPF_CLAUDE_CMD to spf.config.yaml)',
       { default: "claude" },
     );
-    if (launchCommand !== "claude") env["SPF_CLAUDE_CMD"] = launchCommand;
+    if (launchCommand !== "claude") configEnv["SPF_CLAUDE_CMD"] = launchCommand;
 
     const model = await asker.select(
       "Model (Claude Code's own vocabulary — not provider/model-id)",
@@ -500,6 +505,7 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
   delete defaults["__quality__"];
 
   const config: Record<string, unknown> = { defaults };
+  if (Object.keys(configEnv).length > 0) config.env = configEnv;
   if (agentOverrides.length > 0) config.agents = agentOverrides;
   if (quality) config.quality = quality;
   if (watch) config.watch = watch;

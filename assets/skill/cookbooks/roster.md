@@ -99,11 +99,25 @@ SPF-specific plumbing, no `provider:` config section to write.
 
 There's a second, different way to reach Ollama through `claude_code`: route
 the `claude` command itself through `ollama launch claude` via
-`SPF_CLAUDE_CMD`, instead of pointing `ANTHROPIC_BASE_URL` at Ollama's
-OpenAI-compatible surface. That launcher form needs its own `--model <tag>`
-flag (from `ollama list`) in the command string, since SPF always spawns
-headless — see README.md's "Proxy or wrapper launchers" section for the
-full command and why `--model` is mandatory there, not optional.
+`SPF_CLAUDE_CMD` — as a declarative `env:` entry in `spf.config.yaml`
+(non-secret; see `config.md`'s "Declarative env vars" section), not a raw
+shell export. That launcher form needs its own `--model <tag>` flag in the
+command string, since SPF always spawns headless — use the literal token
+`{model}` there (substituted with each call's own agent `model:` field)
+rather than one fixed tag, or every `claude_code` agent ends up sharing the
+same model regardless of its own `model:`:
+
+```yaml
+env:
+  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"
+agents:
+  - name: builder
+    coding_agent: claude_code
+    model: kimi-k2.7-code:cloud
+```
+
+See README.md's "Proxy or wrapper launchers" section for the full command
+and why `--model` is mandatory there, not optional.
 
 ## Retune tools
 

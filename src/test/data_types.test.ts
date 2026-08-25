@@ -210,6 +210,38 @@ test("review merges key-by-key across two layered config files, like observabili
   }
 });
 
+test("env: defaults to {} — SFConfigSchema parses fine with no env: key at all", () => {
+  const cfg = loadConfig([]);
+  assert.deepEqual(cfg.env, {});
+});
+
+test("env survives loadConfig's merge — the silent-drop trap mergeRawConfig's fixed-shape literal sets, for a single config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-env-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, 'env:\n  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"\n');
+    const cfg = loadConfig([configPath]);
+    assert.deepEqual(cfg.env, { SPF_CLAUDE_CMD: "ollama launch claude --model {model}" }, "an env: value from a real config file must reach SFConfig, not be dropped by mergeRawConfig's object literal");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("env merges key-by-key across two layered config files, like defaults/watch — an override adding one key keeps the base's other keys", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-env-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "env:\n  SPF_CLAUDE_CMD: claude\n  FOO: base-value\n");
+    writeFileSync(override, "env:\n  SPF_CLAUDE_CMD: ollama launch claude --model {model}\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.env.SPF_CLAUDE_CMD, "ollama launch claude --model {model}", "override wins for the key it names");
+    assert.equal(cfg.env.FOO, "base-value", "unset in the override -> the base's value survives, key-by-key, not a whole-block replace");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("WatchConfigSchema: chain_options defaults to {} — an existing watch: config with no chain_options is unaffected", () => {
   const parsed = v.parse(WatchConfigSchema, {});
   assert.deepEqual(parsed.chain_options, {});

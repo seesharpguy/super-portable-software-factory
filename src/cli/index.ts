@@ -5,6 +5,7 @@
  * common case. Everything else is a named subcommand.
  */
 import path from "node:path";
+import * as agents from "../core/agents.ts";
 import * as agentCc from "../core/agent_cc.ts";
 import * as agentFlue from "../core/agent_flue.ts";
 import * as notify from "../core/notify/notifier.ts";
@@ -60,6 +61,12 @@ function findCwdFlag(argv: string[]): string | undefined {
   return idx !== -1 ? argv[idx + 1] : undefined;
 }
 
+/** Same idea, for `--config` — needed before dispatch too, to resolve `cfg.env` early. */
+function findConfigFlag(argv: string[]): string | undefined {
+  const idx = argv.indexOf("--config");
+  return idx !== -1 ? argv[idx + 1] : undefined;
+}
+
 /**
  * The moment someone types a chain name that doesn't resolve is the highest-
  * traffic place a broken `.spf/chains/*.yaml` file is ever discovered — and,
@@ -105,6 +112,20 @@ export async function main(): Promise<void> {
     process.loadEnvFile(path.join(anchor.repo_root, ".env"));
   } catch {
     // no .env there — fine, nothing to load
+  }
+
+  // `cfg.env` (spf.config.yaml's declarative env-var defaults — see
+  // data_types.ts's SFConfigSchema doc comment) has to land in process.env
+  // BEFORE any command reads it (SPF_CLAUDE_CMD, a provider key, ...), and
+  // .env/the real shell (just loaded above) must still win over it. Best-
+  // effort only: a config that fails to load here (missing, invalid yaml) is
+  // reported properly by whatever the actual command's own `agents.loadConfig`
+  // call does moments later — this pass exists purely to apply `env`, early.
+  try {
+    const resolution = paths.resolveConfigPaths(anchor, findConfigFlag(rest));
+    agents.applyConfigEnv(agents.loadConfig(resolution.paths).env);
+  } catch {
+    // reported properly by the real command dispatch below, if it matters there
   }
 
   // Repo-local chains as DATA: a `.spf/chains/*.yaml` file names existing

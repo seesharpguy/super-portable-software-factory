@@ -12,7 +12,7 @@ always shows the resolved, merged result for the repo you're in.
 1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
 2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
-   field by field (`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`/`tiering`
+   field by field (`env`/`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`/`tiering`
    merge key-by-key — `notifications.channels` replaces wholesale, same as
    `quality.checks` and `tiering.tiers`/`tiering.roles`; `agents` merges by
    `name`: a matching name patches that entry, a new name appends).
@@ -20,7 +20,9 @@ always shows the resolved, merged result for the repo you're in.
    underneath it.
 
 `spf init` seeds step 2 — on a TTY, via an interview that asks the fields
-below and appends whatever secrets they imply to `.env`; non-interactively
+below and appends whatever secrets they imply to `.env` (a non-secret,
+declarative setting like `SPF_CLAUDE_CMD` goes into this file's own `env:`
+block instead — see "Declarative env vars" below); non-interactively
 (`--yes`, `--template <name>`, or no TTY) it writes a commented starter
 instead. Omitting `.spf/spf.config.yaml` entirely means running off pure
 built-ins, which is a fully supported, valid state.
@@ -497,28 +499,60 @@ change made inside that backend's own module, not config — see
 
 ## Pointing `claude_code` at Ollama
 
-No config section for this — it's an environment-variable recipe, since
-`agent_cc.ts` passes the operator's environment straight through to the
-`claude` subprocess, exactly like every other env var. Set
-`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (local or cloud Ollama) before
-running `spf`; see `roster.md`'s "Coding agent backends" section for the
-exact commands. `spf doctor` probes `ANTHROPIC_BASE_URL` (informational — a
-down endpoint or wrong path is reported, never a hard failure) and flags a
-base URL that already ends in `/v1` as a likely double-path mistake, since
+Set `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (local or cloud Ollama)
+before running `spf`; see `roster.md`'s "Coding agent backends" section for
+the exact commands. `spf doctor` probes `ANTHROPIC_BASE_URL` (informational
+— a down endpoint or wrong path is reported, never a hard failure) and flags
+a base URL that already ends in `/v1` as a likely double-path mistake, since
 the `claude` CLI appends `/v1/messages` itself.
 
-Routing through `SPF_CLAUDE_CMD="ollama launch claude --model granite4.1:8b"`
-instead needs an explicit `--` before `claude`'s own flags (cobra flag
-parsing otherwise consumes them as `ollama launch`'s own) — `agent_cc.ts`
-detects this exact `ollama launch ...` token shape and inserts that
-separator automatically, so you never add it by hand. The `--model` before
-that separator is NOT optional, though: it's `ollama launch`'s own flag, and
-it's mandatory in headless mode (SPF always pipes stdio, so the interactive
-model picker `ollama launch` falls back to without it can never run) — a
-`--model` typed after the `--` belongs to `claude`, not to `ollama launch`,
-and doesn't help. `spf doctor` hard-fails a `SPF_CLAUDE_CMD` missing it. See
-README.md's "Proxy or wrapper launchers" section for the full explanation.
+Routing through `SPF_CLAUDE_CMD` instead — e.g.
+`env: { SPF_CLAUDE_CMD: "ollama launch claude --model {model}" }` in
+`spf.config.yaml` (declarative, not a secret — see "Declarative env vars"
+below; a plain shell export also works and still wins) — needs an explicit
+`--` before `claude`'s own flags (cobra flag parsing otherwise consumes them
+as `ollama launch`'s own) — `agent_cc.ts` detects this exact
+`ollama launch ...` token shape and inserts that separator automatically, so
+you never add it by hand. The `--model` before that separator is NOT
+optional, though: it's `ollama launch`'s own flag, and it's mandatory in
+headless mode (SPF always pipes stdio, so the interactive model picker
+`ollama launch` falls back to without it can never run) — a `--model` typed
+after the `--` belongs to `claude`, not to `ollama launch`, and doesn't help.
+`spf doctor` hard-fails a `SPF_CLAUDE_CMD` missing it. A literal `{model}`
+token anywhere in `SPF_CLAUDE_CMD` is substituted with the calling agent's
+own `model:` field before spawning — since `ollama launch`'s `--model` is
+what actually pins the model for the whole launched process, a FIXED tag
+there means every `claude_code` agent shares one model regardless of its own
+`model:`; `{model}` is what makes per-agent model choice real under this
+launcher. See README.md's "Proxy or wrapper launchers" section for the full
+explanation.
 
 For `flue` (the default backend) pointed at Ollama instead of `claude_code`
 — i.e. `model: ollama/<tag>` — see "Model resolution" above and README.md's
 "flue + local Ollama" section.
+
+## Declarative env vars
+
+A top-level `env:` map in `spf.config.yaml` sets `process.env` defaults for
+settings that are configuration, not secrets — `SPF_CLAUDE_CMD` above is the
+motivating case. Applied once, in `cli/index.ts`'s `main()`, right after
+`.env` loads and before any command runs. Merge is key-by-key (like
+`defaults`/`watch`), so a `.spf/spf.config.yaml` override can add one key
+without repeating the rest.
+
+```yaml
+env:
+  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"
+  SOME_TOKEN: "${SOME_SECRET_FROM_DOTENV}"
+```
+
+A plain value commits as literal text. `${VAR}` interpolates from whatever's
+already in `process.env` at that point — the real shell, or `.env`, both of
+which load first — so a genuine secret can stay in `.env` (gitignored) and
+be referenced here without ever being written into this (committed) file.
+Precedence: an already-set `process.env` value always wins over `env:`'s —
+this block supplies a default, never forces an override, the same way
+`process.loadEnvFile()` itself never overwrites an already-set var. A
+`${VAR}` reference to something genuinely unset fails loudly at startup,
+naming the missing variable — see `agents.ts`'s `interpolateEnvValue`/
+`applyConfigEnv`.

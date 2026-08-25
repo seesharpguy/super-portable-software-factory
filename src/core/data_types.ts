@@ -828,6 +828,17 @@ export const TieringConfigSchema = v.object({
 export type TieringConfig = v.InferOutput<typeof TieringConfigSchema>;
 
 export const SFConfigSchema = v.object({
+  // Declarative env vars, applied to process.env before anything else reads
+  // it (see cli/index.ts's main()) — for non-secret settings that used to
+  // require an out-of-band shell export (e.g. SPF_CLAUDE_CMD) to be
+  // committable, plain text config instead of hidden process state. A value
+  // already set in process.env (the real shell, or .env, which loads first)
+  // always wins — this only supplies a DEFAULT, never forces an override.
+  // `${VAR}` inside a value interpolates from process.env at that same
+  // point, specifically so a real secret can be pulled in from `.env`
+  // without ever being written into this (committed) file — see
+  // `applyConfigEnv`/`interpolateEnvValue` in agents.ts.
+  env: v.optional(v.record(v.string(), v.string()), () => ({})),
   defaults: v.optional(ConfigDefaultsSchema, () => v.parse(ConfigDefaultsSchema, {})),
   observability: v.optional(ObservabilityConfigSchema, () => v.parse(ObservabilityConfigSchema, {})),
   agents: v.optional(v.array(AgentConfigSchema), () => []),

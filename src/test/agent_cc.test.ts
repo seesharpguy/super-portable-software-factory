@@ -1,6 +1,50 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isKnownToolName, CcToolCallTracker } from "../core/agent_cc.js";
+import { isKnownToolName, CcToolCallTracker, resolveClaudeCmdSpec } from "../core/agent_cc.js";
+
+/** Saves/restores SPF_CLAUDE_CMD around a test — process.env is real global state. */
+function withClaudeCmd(value: string | undefined, fn: () => void): void {
+  const original = process.env.SPF_CLAUDE_CMD;
+  if (value === undefined) delete process.env.SPF_CLAUDE_CMD;
+  else process.env.SPF_CLAUDE_CMD = value;
+  try {
+    fn();
+  } finally {
+    if (original === undefined) delete process.env.SPF_CLAUDE_CMD;
+    else process.env.SPF_CLAUDE_CMD = original;
+  }
+}
+
+// Regression for a real production bug: routing coding_agent: claude_code
+// through `SPF_CLAUDE_CMD="ollama launch claude --model <fixed-tag>"` made
+// every claude_code agent's own model: field inert — the fixed tag baked
+// into the ONE process-wide env var served every agent identically,
+// regardless of what each agent's own config said. `{model}` substitutes
+// per call instead, so `ollama launch`'s OWN --model flag (the one that
+// actually pins the served model) can vary per agent.
+test("resolveClaudeCmdSpec: {model} substitutes with this call's own model", () => {
+  withClaudeCmd("ollama launch claude --model {model}", () => {
+    assert.equal(resolveClaudeCmdSpec("kimi-k2.7-code:cloud"), "ollama launch claude --model kimi-k2.7-code:cloud");
+  });
+});
+
+test("resolveClaudeCmdSpec: a second, different agent's model reaches the same wrapper string differently — the actual bug this closes", () => {
+  withClaudeCmd("ollama launch claude --model {model}", () => {
+    assert.equal(resolveClaudeCmdSpec("qwen3-coder:cloud"), "ollama launch claude --model qwen3-coder:cloud");
+  });
+});
+
+test("resolveClaudeCmdSpec: no {model} token in SPF_CLAUDE_CMD -> unchanged, model is simply unused", () => {
+  withClaudeCmd("ollama launch claude --model granite4.1:8b", () => {
+    assert.equal(resolveClaudeCmdSpec("sonnet"), "ollama launch claude --model granite4.1:8b");
+  });
+});
+
+test("resolveClaudeCmdSpec: SPF_CLAUDE_CMD unset -> plain claude, byte-identical to before {model} existed", () => {
+  withClaudeCmd(undefined, () => {
+    assert.equal(resolveClaudeCmdSpec("sonnet"), "claude");
+  });
+});
 
 test("isKnownToolName: SPF's lowercase vocabulary maps onto Claude Code's own tool names, ls is known-but-dropped, typos are unknown", () => {
   for (const name of ["read", "write", "edit", "bash", "grep", "glob"]) {

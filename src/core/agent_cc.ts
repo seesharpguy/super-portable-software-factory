@@ -8,14 +8,28 @@
  * dependencies, the same trade the pre-Flue `agent_pi.ts` made for `pi`.
  *
  * The `claude` command is resolved from `PATH` by default. To route it through
- * a wrapper, proxy server, or launcher (e.g., Ollama), set `SPF_CLAUDE_CMD`
- * before running spf. Space-separated command chains are supported:
+ * a wrapper, proxy server, or launcher (e.g., Ollama), set `SPF_CLAUDE_CMD` —
+ * ordinarily via `env: { SPF_CLAUDE_CMD: "..." }` in `spf.config.yaml`
+ * (see `SFConfigSchema`'s doc comment), since this is a declarative launcher
+ * choice, not a secret; a real shell export still works and still wins, for
+ * a one-off local override. Space-separated command chains are supported:
  *   - `SPF_CLAUDE_CMD="claude"` (default)
  *   - `SPF_CLAUDE_CMD="ollama launch claude --model <tag>"` (Ollama launcher —
  *     the `--model` is `ollama launch`'s OWN flag, and is mandatory in
  *     headless mode; see below)
  * The command/launcher must support the full Claude Code CLI interface.
  * When unset, defaults to `claude`.
+ *
+ * A literal `{model}` token anywhere in `SPF_CLAUDE_CMD` is substituted with
+ * THIS call's own `request.model` before spawning — e.g.
+ * `SPF_CLAUDE_CMD="ollama launch claude --model {model}"` with one agent's
+ * `model: kimi-k2.7-code:cloud` and another's `model: qwen3-coder:cloud`
+ * genuinely dispatches each to its own model, since `ollama launch`'s
+ * `--model` (its OWN flag, resolved BEFORE `--`, not `claude`'s) is what
+ * actually pins which model serves the whole launched process — without
+ * `{model}`, that flag would have to be one fixed value for every
+ * claude_code agent in the roster, making each agent's own `model:` field
+ * inert no matter what it said.
  *
  * Wrapper contract for the flags this module appends (`-p`, `--json-schema`,
  * `--model`, ...): a wrapper token chain is spawned as `[...cmdTokens,
@@ -245,6 +259,17 @@ const EFFORT_MAP: Record<ThinkingLevel, string> = {
   max: "max",
 };
 
+/**
+ * Resolve `SPF_CLAUDE_CMD` for THIS call, substituting a literal `{model}`
+ * token with `model` — see the module doc comment for why a fixed tag baked
+ * into the wrapper string can't give per-agent model choice under a
+ * launcher like `ollama launch`. Exported as its own pure function so this
+ * substitution is unit-testable without spawning a real subprocess.
+ */
+export function resolveClaudeCmdSpec(model: string): string {
+  return (process.env.SPF_CLAUDE_CMD || "claude").replaceAll("{model}", model);
+}
+
 // ── process lifecycle ────────────────────────────────────────────────────────
 
 const inFlight = new Set<ChildProcessWithoutNullStreams>();
@@ -306,7 +331,7 @@ export async function run(
     "--strict-mcp-config", // see the module doc comment — required, not optional
   ];
 
-  const cmdSpec = process.env.SPF_CLAUDE_CMD || "claude";
+  const cmdSpec = resolveClaudeCmdSpec(request.model);
   const cmdTokens = cmdSpec.split(/\s+/).filter(Boolean);
   const [cmd, ...cmdArgs] = cmdTokens;
   // See the module doc comment for why `ollama launch ...` (and ONLY that

@@ -7,6 +7,8 @@ A software factory does one thing: it gives you more leverage on your prompt. Ho
 
 Everyone can get an agent to write code once. Almost nobody gets the same result twice. This fixes that by moving the control plane out of the prompt and into TypeScript. A chain script owns sequencing, retries, and acceptance. Agents work inside named phases. Typed JSON envelopes carry context across the seams. Every event streams into SQLite while it is still happening. **Agent proposes, code disposes.**
 
+> **Beta.** SPF is under active development — config schema, chain/CLI surface, and trace/event shapes may change between releases without a deprecation period. Pin a version if you depend on any of these staying stable.
+
 ---
 
 ## Install
@@ -124,17 +126,34 @@ Set `coding_agent: claude_code` on any agent (or in `defaults`) to run it on you
 
 #### Proxy or wrapper launchers
 
-To route the `claude` command through a wrapper, proxy server, or launcher (e.g., [Ollama](https://ollama.com)), set the `SPF_CLAUDE_CMD` environment variable before running `spf`. Space-separated command chains are supported:
+To route the `claude` command through a wrapper, proxy server, or launcher (e.g., [Ollama](https://ollama.com)), set `SPF_CLAUDE_CMD` — as a declarative `env:` entry in `spf.config.yaml`, since it's a launcher choice, not a secret (see [Declarative env vars](#declarative-env-vars) below), or as a plain shell export for a one-off override. Space-separated command chains are supported:
+
+```yaml
+env:
+  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"
+```
 
 ```bash
-# Route through Ollama's launcher
-export SPF_CLAUDE_CMD="ollama launch claude --model granite4.1:8b"
 spf build "your prompt"
 ```
 
 `ollama launch <cmd>` uses cobra flag parsing, which treats anything typed after it as its own flags unless a literal `--` says otherwise — without one, `claude`'s own flags (`-p`, `--json-schema`, ...) fail with `unknown shorthand flag: 'p' in -p` before `claude` is ever reached. `agent_cc.ts` detects exactly this `ollama launch ...` shape and inserts that `--` automatically, so you never add the separator by hand for this specific launcher.
 
-That `--` alone is not enough to reach `claude`, though: `ollama launch` also needs its OWN `--model <tag>` flag (a tag from `ollama list`), typed BEFORE the auto-inserted `--`, whenever it runs headless — which it always does under SPF, since SPF spawns with piped stdio. Without it, `ollama launch` falls back to an interactive model picker that can never run, and fails one step later than the `--` problem, with `model selection requires an interactive terminal; use --model to run in headless mode`. A `--model` typed after the `--` doesn't help — at that point it belongs to `claude`, not to `ollama launch`. So `SPF_CLAUDE_CMD` must include `ollama launch`'s `--model` yourself, exactly as written above; `spf doctor` hard-fails if it's missing.
+That `--` alone is not enough to reach `claude`, though: `ollama launch` also needs its OWN `--model <tag>` flag, typed BEFORE the auto-inserted `--`, whenever it runs headless — which it always does under SPF, since SPF spawns with piped stdio. Without it, `ollama launch` falls back to an interactive model picker that can never run, and fails one step later than the `--` problem, with `model selection requires an interactive terminal; use --model to run in headless mode`. A `--model` typed after the `--` doesn't help — at that point it belongs to `claude`, not to `ollama launch`. So `SPF_CLAUDE_CMD` must include `ollama launch`'s `--model` yourself; `spf doctor` hard-fails if it's missing.
+
+**Per-agent model choice:** a literal `{model}` token in `SPF_CLAUDE_CMD` is substituted with each call's own agent-config `model:` field before spawning. Since `ollama launch`'s `--model` (its OWN flag) is what actually pins the model serving the whole launched process — not `claude`'s own `--model`, appended after the `--` — a FIXED tag in `SPF_CLAUDE_CMD` means every `claude_code` agent runs on that one model regardless of what each agent's `model:` says. Using `{model}` instead makes it genuinely per-agent:
+
+```yaml
+env:
+  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"
+agents:
+  - name: planner
+    coding_agent: claude_code
+    model: kimi-k2.7-code:cloud
+  - name: builder
+    coding_agent: claude_code
+    model: qwen3-coder:cloud
+```
 
 ```bash
 # Or use a custom wrapper script
@@ -143,6 +162,18 @@ spf build "your prompt"
 ```
 
 The command/launcher must support the full Claude Code CLI interface: `-p` for prompt, `--json-schema`, `--model`, `--session-id`/`--resume`, `--output-format stream-json`, and all other flags `agent_cc` uses. When unset, `SPF_CLAUDE_CMD` defaults to `claude` (resolved from `PATH` normally). A cmdSpec that already contains its own literal `--` is left completely alone — `agent_cc.ts` never inserts a second one.
+
+#### Declarative env vars
+
+`spf.config.yaml` supports an `env:` block for settings like `SPF_CLAUDE_CMD` that are configuration, not secrets — so they can be committed as plain, reviewable text instead of hidden in an out-of-band shell export:
+
+```yaml
+env:
+  SPF_CLAUDE_CMD: "ollama launch claude --model {model}"
+  SOME_TOKEN: "${SOME_SECRET_FROM_DOTENV}"
+```
+
+Applied to `process.env` before any command runs. A plain value commits as literal text; `${VAR}` interpolates from whatever's already in `process.env` at that point (the real shell, or `.env`, both of which load first) — so a real secret can live in `.env` (gitignored) and be referenced here without ever being written into this file. An already-set `process.env` value always wins over `env:`'s — `spf.config.yaml` supplies the default, a real export still overrides it per machine/session. A `${VAR}` reference to something that's genuinely unset fails loudly at startup, naming the missing variable, rather than silently interpolating to an empty string.
 
 ### flue + local Ollama
 

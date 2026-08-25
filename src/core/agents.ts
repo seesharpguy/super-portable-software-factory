@@ -176,6 +176,9 @@ function mergeAgentLists(base: any[], override: any[]): any[] {
  */
 function mergeRawConfig(base: Record<string, any>, override: Record<string, any>): Record<string, any> {
   return {
+    // Key-by-key, like `defaults`/`watch` — a repo override adding ONE env
+    // var shouldn't have to repeat every built-in one.
+    env: { ...(base.env || {}), ...(override.env || {}) },
     defaults: { ...(base.defaults || {}), ...(override.defaults || {}) },
     observability: { ...(base.observability || {}), ...(override.observability || {}) },
     quality: { ...(base.quality || {}), ...(override.quality || {}) },
@@ -245,6 +248,43 @@ export function loadConfig(configPaths: string[]): SFConfig {
     return v.parse(SFConfigSchema, raw);
   } catch (error) {
     throw new Error(`invalid config (${configPaths.join(", ")}): ${describeParseError(error)}`);
+  }
+}
+
+const ENV_VAR_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+/**
+ * `${VAR}` substitutes from `process.env` at call time — a real secret can
+ * live in `.env` (gitignored) and be referenced from the committed
+ * `spf.config.yaml` without ever being written into it. An undefined
+ * reference throws rather than silently interpolating to `""`: a value like
+ * `SPF_CLAUDE_CMD="ollama launch claude --model ${OLLAMA_TAG}"` silently
+ * missing its tag would fail confusingly far downstream (a launcher error,
+ * or a wrong-but-plausible model), not here where the actual cause is known.
+ */
+export function interpolateEnvValue(key: string, raw: string): string {
+  return raw.replace(ENV_VAR_REF, (_match, name) => {
+    const value = process.env[name];
+    if (value === undefined) {
+      throw new Error(`env.${key}: references \${${name}}, which is not set (.env or the shell) — set it before running spf`);
+    }
+    return value;
+  });
+}
+
+/**
+ * Apply `cfg.env` to `process.env` — called once, in `cli/index.ts`'s
+ * `main()`, right after `.env` loads and before any command runs, so every
+ * later `process.env[...]` read (provider keys, `SPF_CLAUDE_CMD`, ...) sees
+ * the result. A key already set in `process.env` (a real shell export, or
+ * `.env`, both of which load before this) is left untouched — `cfg.env`
+ * supplies a DEFAULT, never forces an override, mirroring
+ * `process.loadEnvFile()`'s own precedence for `.env` itself.
+ */
+export function applyConfigEnv(env: Record<string, string>): void {
+  for (const [key, rawValue] of Object.entries(env)) {
+    if (process.env[key] !== undefined) continue;
+    process.env[key] = interpolateEnvValue(key, rawValue);
   }
 }
 
