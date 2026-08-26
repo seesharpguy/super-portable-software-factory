@@ -852,6 +852,38 @@ export const WatchRefineConfigSchema = v.object({
 });
 export type WatchRefineConfig = v.InferOutput<typeof WatchRefineConfigSchema>;
 
+/**
+ * Best-of-N per claimed issue — `core/fanout.ts`'s proven machinery pointed at
+ * watch's per-issue dispatch. `n: 1` (the DEFAULT) leaves the daemon's
+ * behaviour untouched: `core/watch.ts`'s `runIssue` takes its existing
+ * single-dispatch path, same adw_id (`issue-<id>`), same one worktree, same
+ * everything. (`spf doctor` gains one informational line either way — see
+ * that command; nothing about a running daemon changes.)
+ *
+ * `concurrency` is DELIBERATELY NOT `watch.concurrency`, which counts ISSUES in
+ * flight (`core/watch.ts`'s `state.inflight`, a set of issue ids). This one
+ * counts ATTEMPTS in flight WITHIN one issue. The two multiply — see
+ * `spf doctor`'s `watch.fanout budget` line, which prints the product rather
+ * than leaving an operator to discover it on an invoice. Same "each axis of
+ * parallelism gets its own named budget" rule `refine.concurrency` already
+ * follows (see `WatchRunState.refining`'s doc comment).
+ *
+ * NOTE that `concurrency` bounds attempts IN FLIGHT, not worktrees ON DISK: a
+ * successful attempt's tree is KEPT until every sibling has settled (it is a
+ * selection candidate), so peak disk is `n` trees per issue regardless of this
+ * number. Doctor prints both.
+ *
+ * The `n` ceiling is 8, the twin of `MAX_N` in `cli/commands/fanout.ts` — kept
+ * as a literal here rather than imported because this module imports nothing
+ * but valibot, on purpose (see `SandboxSpec`'s placement note). A daemon typing
+ * a bigger number is strictly worse than an interactive command doing so.
+ */
+export const WatchFanoutConfigSchema = v.object({
+  n: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(8)), 1),
+  concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),
+});
+export type WatchFanoutConfig = v.InferOutput<typeof WatchFanoutConfigSchema>;
+
 export const WatchConfigSchema = v.object({
   issue_provider: v.optional(WatchIssueProviderSchema, "github"),
   code_host: v.optional(WatchCodeHostSchema, "github"),
@@ -880,6 +912,7 @@ export const WatchConfigSchema = v.object({
   chain_options: v.optional(v.record(v.string(), v.string()), () => ({})),
   jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
   refine: v.optional(WatchRefineConfigSchema, () => v.parse(WatchRefineConfigSchema, {})),
+  fanout: v.optional(WatchFanoutConfigSchema, () => v.parse(WatchFanoutConfigSchema, {})),
 });
 export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
 

@@ -156,13 +156,15 @@ Full mechanism: the main README's "`spf watch`" section. Field reference:
 | `chain` | string | Which registered chain runs per claimed `<prefix>:ready` issue. Default `plan-build-test`. |
 | `base_branch` | string | Branch worktrees fork from and PRs target. Default `main`. |
 | `poll_ms` | int | Tick interval. Default `60000`. |
-| `concurrency` | int ≥1 | Max issues claimed and run at once, the build lane's own budget (independent of `refine.concurrency`). Default `2`. |
+| `concurrency` | int ≥1 | Max ISSUES claimed and run at once — not attempts; see `fanout.concurrency`. The build lane's own budget (independent of `refine.concurrency`). Default `2`. |
 | `chain_options` | map of string -> string | Options passed straight through to `chain` (and `refine.chain`) for every unattended dispatch — the same shape an interactive `spf <chain> --suite <name>` builds, e.g. `{suite: strict}` or `{agent: some-agent}`. Default `{}`. Only useful for a chain whose behavior actually reads the option (a step-derived chain's `--suite`; an imperative chain ignores an option it doesn't know about). |
 | `jira.base_url` / `jira.project_key` | string | Only consulted when `issue_provider: jira`. |
 | `jira.issue_types` | map: `epic`/`feature`/`story`/`bug`/`task` -> string | Only consulted when `issue_provider: jira` AND `refine.enabled`. What each `RefinedIssue.kind` creates as on Jira — defaults `epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`, overridable per kind. Validated against the real project by both `spf watch init` and `spf watch`'s own startup check. |
 | `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` or `"jira"` — both implement issue authoring (create + link a hierarchy); any other value fails loudly at startup. |
 | `refine.chain` | string | Which registered chain runs per claimed spec. Default `refine`. |
 | `refine.concurrency` | int ≥1 | The refine lane's own budget, separate from `concurrency`. Default `1`. |
+| `fanout.n` | int, 1-8 | Best-of-N per claimed issue: run `n` sibling attempts of the same issue and let code pick a winner (`core/fanout.ts`'s `pickBest`, the same mechanism `spf fanout` uses standalone). Default `1` — single dispatch, byte-identical to `spf watch` before this key existed. `n > 1` requires `chain` to have a commit step (`spf watch` refuses to start otherwise — a chain with no commit step would have its N-1 losing attempts' uncommitted work destroyed by best-of-N's own cleanup). |
+| `fanout.concurrency` | int ≥1 | Attempts of ONE issue's fan-out IN FLIGHT at once — **not** `concurrency`, which counts issues. The two multiply: `concurrency: 2` × `fanout.concurrency: 2` is up to 4 chain runs in flight; `spf doctor`'s `watch.fanout` line prints the exact product. Does **not** bound worktrees on disk — a successful attempt's tree is kept until every sibling in its fan-out has settled, so disk peak is `concurrency × fanout.n`, not `concurrency × fanout.concurrency`. Default `2`. |
 
 ```yaml
 watch:
@@ -175,6 +177,9 @@ watch:
     enabled: true       # decompose spf:spec-ready specs into a feature/story tree
     chain: refine
     concurrency: 1
+  fanout:
+    n: 1                 # attempts per claimed issue. 1 = single dispatch (default) — no-op for the daemon
+    concurrency: 2        # attempts IN FLIGHT per issue — not watch.concurrency (issues in flight)
 ```
 
 Generated issues carry a second, independent label vocabulary —

@@ -194,6 +194,93 @@ test("doctor: the credential grant line prints the static broker's honest descri
   }
 });
 
+// ── watch.fanout (best-of-N per claimed issue) ──────────────────────────────
+
+test("doctor: watch.fanout — n=3 reports the C x A / C x N multiplier line, and no commit-phase/budget checks fire for a chain that already commits with a ceiling set", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      `watch:\n  repo: acme/widgets\n  chain: plan-build-test\n  concurrency: 2\n  fanout:\n    n: 3\n    concurrency: 2\n` +
+        `quality:\n  checks:\n    - {name: test, operation: build, argv: ["true"]}\n  suites:\n    test: [test]\n` +
+        `defaults:\n  max_run_cost: 5\n`,
+    );
+    const report = await runDoctor(dir);
+    const fanoutCheck = report.checks.find((c) => c.name === "watch.fanout");
+    assert.ok(fanoutCheck, "expected a watch.fanout line");
+    assert.match(fanoutCheck!.detail, /2 x 2 = 4/, `expected the chain-runs-in-flight multiplier; got: ${fanoutCheck!.detail}`);
+    assert.match(fanoutCheck!.detail, /2 x 3 = 6/, `expected the worktrees-on-disk multiplier; got: ${fanoutCheck!.detail}`);
+    const commitPhaseCheck = report.checks.find((c) => c.name === "watch.fanout commit phase");
+    assert.ok(commitPhaseCheck, "plan-build-test has a commit step, so the check fires (and passes)");
+    assert.equal(commitPhaseCheck!.ok, true);
+    assert.equal(report.checks.some((c) => c.name === "watch.fanout budget ceiling"), false, "max_run_cost is set — the warn check must not fire");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doctor: watch.fanout — n=3 with a chain that has no commit phase (build-review) fails "watch.fanout commit phase" and flips report.ok', async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, `watch:\n  repo: acme/widgets\n  chain: build-review\n  fanout:\n    n: 3\n`);
+    const report = await runDoctor(dir);
+    const commitPhaseCheck = report.checks.find((c) => c.name === "watch.fanout commit phase");
+    assert.ok(commitPhaseCheck, "expected a watch.fanout commit phase check");
+    assert.equal(commitPhaseCheck!.ok, false);
+    assert.equal(report.ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: watch.fanout — n=1 (the default) prints only the informational line, none of the n>1-only checks", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, `watch:\n  repo: acme/widgets\n  chain: build-review\n`);
+    const report = await runDoctor(dir);
+    const fanoutCheck = report.checks.find((c) => c.name === "watch.fanout");
+    assert.ok(fanoutCheck, "the informational watch.fanout line must print even at n=1 — not a total no-op at the CLI surface");
+    assert.match(fanoutCheck!.detail, /n=1/);
+    assert.equal(report.checks.some((c) => c.name === "watch.fanout commit phase"), false);
+    assert.equal(report.checks.some((c) => c.name === "watch.fanout sandbox cost"), false);
+    assert.equal(report.checks.some((c) => c.name === "watch.fanout budget ceiling"), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: watch.fanout budget ceiling — n=3 with no defaults.max_run_cost/max_run_tokens warns without flipping report.ok", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      `watch:\n  repo: acme/widgets\n  chain: plan-build-test\n  fanout:\n    n: 3\n` +
+        `quality:\n  checks:\n    - {name: test, operation: build, argv: ["true"]}\n  suites:\n    test: [test]\n`,
+    );
+    const report = await runDoctor(dir);
+    const budgetCheck = report.checks.find((c) => c.name === "watch.fanout budget ceiling");
+    assert.ok(budgetCheck, "expected a watch.fanout budget ceiling check");
+    assert.equal(budgetCheck!.severity, "warn");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: watch.chain review posture uses the SAME hasCommitStep predicate as the hard watch.fanout commit phase check — the two can never disagree", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, `watch:\n  repo: acme/widgets\n  chain: build-review\n  fanout:\n    n: 3\n`);
+    const report = await runDoctor(dir);
+    const postureCheck = report.checks.find((c) => c.name === "watch.chain review posture");
+    const commitPhaseCheck = report.checks.find((c) => c.name === "watch.fanout commit phase");
+    assert.ok(postureCheck && commitPhaseCheck);
+    assert.match(postureCheck!.detail, /does not include a commit phase/);
+    assert.equal(commitPhaseCheck!.ok, false, "the hard check must agree: build-review has no commit phase");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("doctor: an unregistered sandbox.credentials.broker fails the credential grant check, roster-wide, naming the known registry", async () => {
   const dir = tmpRepo();
   try {

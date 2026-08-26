@@ -21,7 +21,7 @@
  * makes N machine-written candidates safe to have produced at all.
  */
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import * as agents from "../../core/agents.ts";
@@ -36,9 +36,10 @@ import {
   type AttemptMetrics,
   type FanoutAttempt,
 } from "../../core/fanout.ts";
-import { findChain, runChain as runChainDef } from "../../chains/index.ts";
+import { findChain, hasCommitStep, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
+import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { newId, parseCli, resolvePrompt } from "../../core/utils.ts";
 import { isInteractive } from "../ask.ts";
@@ -57,11 +58,6 @@ const USAGE =
   `usage: spf fanout <chain> "<prompt or path/to/prompt.md>" [--n 3] [--concurrency N] ` +
   `[--base <branch>] [--adw-id <id>] [--first-success] [--config <path>] [--cwd <dir>]\n` +
   `       spf fanout --clean <base-adw-id> [--cwd <dir>]   # remove leftover worktrees/branches from a killed or discarded run`;
-
-/** Chains eligible to fan out: their derived phase string must show at least one commit step. See the check at dispatch time for why. */
-function hasCommitStep(phases: string): boolean {
-  return phases.includes("git(commit");
-}
 
 /** `42.1s` / `3m 07s` — a wall time a human reads, not a millisecond count. */
 function formatDuration(ms: number): string {
@@ -156,30 +152,13 @@ export function linkFanoutDataDir(worktreePath: string, dataDir: string): void {
 }
 
 /**
- * Keep the `.spf/data` symlink invisible to `git status`/`git add -A` in the
- * attempt's own worktree. `.spf/data/` — a trailing-slash DIRECTORY pattern,
- * the shape this repo's own gitignore uses — does NOT match a SYMLINK of
- * the same name, so without this, `git status` shows `?? .spf/data` and a
- * committing chain's `git_helper.commitAll` (`git add -A`) stages it.
- * Following the printed `git merge <winner-branch>` instruction then
- * fast-forwards the symlink straight into the MAIN repo, replacing its real
- * `.spf/data` directory with a symlink pointing back at itself — destroying
- * the trace db (`ls .spf/data` becomes `ELOOP`). `info/exclude` is
- * per-worktree, local-only, and idempotent to append to — the opposite of
- * adding a pattern to a tracked `.gitignore`, which would ship this
- * workaround into every clone for a symlink only `spf fanout` itself ever
- * creates.
+ * Re-exported so existing callers (`src/test/fanout_cli.test.ts`,
+ * `src/test/sandbox_fanout.test.ts`) keep compiling with no edit — the
+ * function itself moved to `core/worktree_data.ts` (§6.6) so
+ * `cli/commands/watch.ts`'s own `linkDataDir` can call it too without
+ * importing this command module.
  */
-export function excludeSpfDataFromGit(worktreePath: string): void {
-  const resolved = spawnSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd: worktreePath, encoding: "utf-8" });
-  if (resolved.status !== 0) return; // best-effort: worst case is the pre-existing staging risk, not a crash
-  const excludePath = path.resolve(worktreePath, resolved.stdout.trim());
-  const line = ".spf/data";
-  const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf-8") : "";
-  if (existing.split("\n").some((l) => l.trim() === line)) return;
-  mkdirSync(path.dirname(excludePath), { recursive: true });
-  appendFileSync(excludePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}${line}\n`);
-}
+export { excludeSpfDataFromGit };
 
 /**
  * `spf fanout --clean <base-adw-id>` — the cleanup half of the deterministic
@@ -193,6 +172,16 @@ export function excludeSpfDataFromGit(worktreePath: string): void {
  * explicitly a "the trees are trash now" command, unlike a normal run's own
  * cleanup, which never force-removes a dirty tree it didn't already decide
  * to discard (see `git_helper.ts`'s `createRunWorktree`).
+ *
+ * Scans BOTH `~/.spf/fanout/<basename>/worktrees` (this command's own attempt
+ * trees) AND `~/.spf/watch/<basename>/worktrees` (`spf watch`'s fan-out lane,
+ * `watch.fanout.n > 1` — see `core/watch.ts`'s design doc): the attempt naming
+ * scheme (`fanout-<base>-<i>` / `spf/fanout/<base>-<i>`) is identical either
+ * way, watch's automatic pre-sweep only ever reaches an issue it re-claims,
+ * and an issue `reconcileOrphans` gave up on permanently is never claimed
+ * again — so its attempt trees, and a §8.7 salt cap-fallback base's debris
+ * (whose random suffix the pre-sweep cannot enumerate by construction), have
+ * no other operator-facing cleanup tool.
  */
 function cleanFanoutAttempts(baseAdwId: string, cwdOpt: string | undefined): number {
   const anchor = paths.resolveAnchor(cwdOpt);
@@ -200,11 +189,15 @@ function cleanFanoutAttempts(baseAdwId: string, cwdOpt: string | undefined): num
     console.error(`${anchor.repo_root} is not a git repository`);
     return 1;
   }
-  const worktreesDir = path.join(homedir(), ".spf", "fanout", path.basename(anchor.repo_root), "worktrees");
+  const worktreesDirs = [
+    path.join(homedir(), ".spf", "fanout", path.basename(anchor.repo_root), "worktrees"),
+    path.join(homedir(), ".spf", "watch", path.basename(anchor.repo_root), "worktrees"),
+  ];
   const git = makeGit(anchor.repo_root);
   let removed = 0;
 
-  if (existsSync(worktreesDir)) {
+  for (const worktreesDir of worktreesDirs) {
+    if (!existsSync(worktreesDir)) continue;
     for (const entry of readdirSync(worktreesDir)) {
       if (!entry.startsWith(`fanout-${baseAdwId}-`)) continue;
       const worktreePath = path.join(worktreesDir, entry);
@@ -289,11 +282,14 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
   const git = makeGit(anchor.repo_root);
 
-  // Reused rather than given a knob of its own: `watch.concurrency` (default
-  // 2) is already this repo's answer to "how many chains may run at once
-  // here", and it is the same machine, the same SQLite and the same agent
-  // quota either way. `--concurrency` overrides it for one invocation.
-  const concurrency = options["concurrency"] ? Number.parseInt(options["concurrency"], 10) : cfg.watch.concurrency;
+  // Reused rather than given a knob of its own: `watch.fanout.concurrency`
+  // (default 2) is already this repo's answer to "how many ATTEMPTS of one
+  // prompt may run at once" — the exact thing `--concurrency` controls here —
+  // and it is the same machine, the same SQLite and the same agent quota
+  // either way. NOT `watch.concurrency`, which counts ISSUES in flight under
+  // `spf watch` and means something different (see `WatchFanoutConfigSchema`'s
+  // doc comment). `--concurrency` overrides it for one invocation.
+  const concurrency = options["concurrency"] ? Number.parseInt(options["concurrency"], 10) : cfg.watch.fanout.concurrency;
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     console.error(`--concurrency must be a positive integer (got ${JSON.stringify(options["concurrency"])})`);
     return 1;

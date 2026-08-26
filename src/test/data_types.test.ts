@@ -34,6 +34,7 @@ import {
   TieringConfigSchema,
   VerifyOutput,
   WatchConfigSchema,
+  WatchFanoutConfigSchema,
   clampPriority,
   makePhaseParams,
 } from "../core/data_types.js";
@@ -281,6 +282,66 @@ test("watch.chain_options is a whole-map replace across layered config files, li
       { suite: "override-suite" },
       "override replaces the whole chain_options map — the base's agent key does not survive alongside it",
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// watch.fanout — best-of-N per claimed issue (core/watch.ts's design doc).
+// `watch` is spread WHOLE by mergeRawConfig (see the chain_options tests
+// above), so the boundary that actually matters for a new WatchConfigSchema
+// field is WatchConfigSchema itself, which is what these pin.
+test("WatchFanoutConfigSchema defaults: n=1, concurrency=2", () => {
+  const parsed = v.parse(WatchFanoutConfigSchema, {});
+  assert.deepEqual(parsed, { n: 1, concurrency: 2 });
+});
+
+test("watch.fanout defaults — a watch: block with no fanout: key parses to {n: 1, concurrency: 2}", () => {
+  const parsed = v.parse(WatchConfigSchema, {});
+  assert.deepEqual(parsed.fanout, { n: 1, concurrency: 2 });
+});
+
+test("watch.fanout survives loadConfig's merge for a single config file — not stripped by mergeRawConfig or by WatchConfigSchema", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-watch-fanout-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, "watch:\n  chain: plan-build-test\n  fanout:\n    n: 3\n");
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.watch.fanout.n, 3, "a watch.fanout.n value from a real config file must reach SFConfig, not be dropped");
+    assert.equal(cfg.watch.fanout.concurrency, 2, "concurrency keeps its own schema default since the file above never set it");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch.fanout is a whole-object replace across layered config files, like watch.jira/watch.refine", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-watch-fanout-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "watch:\n  fanout:\n    n: 3\n    concurrency: 4\n");
+    writeFileSync(override, "watch:\n  fanout:\n    n: 2\n");
+    const cfg = loadConfig([base, override]);
+    assert.deepEqual(
+      cfg.watch.fanout,
+      { n: 2, concurrency: 2 },
+      "override replaces the whole fanout object — the base's concurrency: 4 does not survive alongside the override's n: 2; concurrency falls back to the schema default",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch.fanout.n rejects 0 and 9 — the schema bounds (minValue(1), maxValue(8)) fail at loadConfig", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-watch-fanout-bounds-test-"));
+  try {
+    const tooLow = join(dir, "too-low.yaml");
+    writeFileSync(tooLow, "watch:\n  fanout:\n    n: 0\n");
+    assert.throws(() => loadConfig([tooLow]), /invalid config/);
+
+    const tooHigh = join(dir, "too-high.yaml");
+    writeFileSync(tooHigh, "watch:\n  fanout:\n    n: 9\n");
+    assert.throws(() => loadConfig([tooHigh]), /invalid config/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
