@@ -193,9 +193,26 @@ test("validateSandboxConfig: opensandbox requires base_url and image; cloudflare
   assert.ok(!cfOk.some((p) => p.includes("sandbox.image")));
 });
 
-test("validateSandboxConfig: sandbox.fanout: \"sandbox\" is rejected in this PR — only \"worktree\" is honored", () => {
-  const problems = validateSandboxConfig(makeCfg({ fanout: "sandbox" }), makeAgent());
-  assert.ok(problems.some((p) => p.includes("sandbox.fanout")));
+test("validateSandboxConfig: sandbox.fanout: \"sandbox\" is honored as of PR B — no longer rejected", () => {
+  const problems = validateSandboxConfig(makeCfg({ backend: "opensandbox", image: "debian-git", opensandbox: { base_url: "http://x" }, fanout: "sandbox" }), makeAgent());
+  assert.ok(!problems.some((p) => p.includes("sandbox.fanout")), `sandbox.fanout: "sandbox" must not be rejected any more — got:\n${problems.join("\n")}`);
+});
+
+// ── credentials.broker (SPF #15 PR B, §6.1) ─────────────────────────────────
+
+test("validateSandboxConfig: an unregistered sandbox.credentials.broker name is rejected, naming the value and the known registry", () => {
+  const problems = validateSandboxConfig(makeCfg({ credentials: { broker: "openrouter" } }), makeAgent());
+  assert.ok(problems.some((p) => p.includes("sandbox.credentials.broker") && p.includes("openrouter") && p.includes("static")));
+});
+
+test("validateSandboxConfig: the default \"static\" broker, and any other case-sensitive spelling of it, are accepted / rejected exactly", () => {
+  assert.deepEqual(
+    validateSandboxConfig(makeCfg({}), makeAgent()).filter((p) => p.includes("credentials.broker")),
+    [],
+    "the default (unset -> \"static\") must not be rejected",
+  );
+  const cased = validateSandboxConfig(makeCfg({ credentials: { broker: "Static" } }), makeAgent());
+  assert.ok(cased.some((p) => p.includes("credentials.broker")), "broker ids are compared exactly — \"Static\" is not \"static\"");
 });
 
 test("validateSandboxConfig: max_total_lifetime_seconds < lifetime_seconds and request_timeout_seconds < exec_timeout_seconds are both rejected, naming both values", () => {
@@ -427,6 +444,69 @@ test("teardownLease: a position-2 step runs even when position 1 throws, every f
   await assert.doesNotReject(() => sandbox.teardownLease(lease));
   assert.deepEqual(order, ["kill", "revoke", "close"], "revoke (position 2) must never be skipped because kill (position 1) threw");
   assert.ok(logged.some((m) => m.includes("provider:kill")));
+});
+
+// ── staticBroker / CredentialGrant (SPF #15 PR B, §6.1/§6.2) ────────────────
+
+test("staticBroker.issue: returns spec.env VERBATIM — identity on the env plane, exactly §6.1's 'observably a no-op' claim", async () => {
+  const spec = makeSpec({
+    host_root: "/repo",
+    workspace_dir: "/workspace",
+    handoff_host: "/repo/h",
+    handoff_sandbox: "/spf/handoff",
+    env: { GH_TOKEN: "secret-value", NPM_TOKEN: "another-secret" },
+  });
+  const grant = await sandbox.staticBroker.issue(spec);
+  assert.deepEqual(grant.env, { GH_TOKEN: "secret-value", NPM_TOKEN: "another-secret" });
+  // A DIFFERENT object from spec.env — mutating the grant must never mutate the spec.
+  assert.notEqual(grant.env, spec.env);
+});
+
+test("staticBroker.issue().describe(): key NAMES only, sorted, NEVER a value", async () => {
+  const spec = makeSpec({
+    host_root: "/repo",
+    workspace_dir: "/workspace",
+    handoff_host: "/repo/h",
+    handoff_sandbox: "/spf/handoff",
+    env: { NPM_TOKEN: "leak-me-not", GH_TOKEN: "also-leak-me-not" },
+  });
+  const grant = await sandbox.staticBroker.issue(spec);
+  const description = grant.describe();
+  assert.ok(description.includes("GH_TOKEN") && description.includes("NPM_TOKEN"), `expected both key names in: ${description}`);
+  assert.ok(description.indexOf("GH_TOKEN") < description.indexOf("NPM_TOKEN"), "key names are sorted");
+  assert.ok(!description.includes("leak-me-not") && !description.includes("also-leak-me-not"), `describe() must never include a value: ${description}`);
+});
+
+test("staticBroker.issue().describe(): the empty-env case names reality, not a fake key list", async () => {
+  const spec = makeSpec({ host_root: "/repo", workspace_dir: "/workspace", handoff_host: "/repo/h", handoff_sandbox: "/spf/handoff", env: {} });
+  const grant = await sandbox.staticBroker.issue(spec);
+  assert.ok(/no credentials issued/.test(grant.describe()));
+});
+
+test("staticBroker.issue().revoke(): clears the grant's OWN env object in place — honest about meaning nothing beyond that (§6.2)", async () => {
+  const spec = makeSpec({
+    host_root: "/repo",
+    workspace_dir: "/workspace",
+    handoff_host: "/repo/h",
+    handoff_sandbox: "/spf/handoff",
+    env: { GH_TOKEN: "secret" },
+  });
+  const grant = await sandbox.staticBroker.issue(spec);
+  assert.deepEqual(grant.env, { GH_TOKEN: "secret" });
+  await grant.revoke();
+  assert.deepEqual(grant.env, {}, "revoke() clears SPF's own in-memory copy — it cannot un-inject an already-created container's env");
+  await assert.doesNotReject(() => grant.revoke(), "revoke() must be safe to call more than once");
+});
+
+test("describeStaticCredentials: pure function of key names — no SandboxSpec required, matching doctor's config-only call site", () => {
+  assert.equal(sandbox.describeStaticCredentials([]), sandbox.describeStaticCredentials([]));
+  const withDupes = sandbox.describeStaticCredentials(["B_TOKEN", "A_TOKEN", "A_TOKEN"]);
+  assert.ok(withDupes.includes("2 key(s)"), `duplicates must be deduplicated: ${withDupes}`);
+  assert.ok(withDupes.indexOf("A_TOKEN") < withDupes.indexOf("B_TOKEN"), "sorted");
+});
+
+test("KNOWN_CREDENTIAL_BROKER_IDS: contains exactly \"static\" in this build (§10 non-goal 2 — no other broker registered)", () => {
+  assert.deepEqual(sandbox.KNOWN_CREDENTIAL_BROKER_IDS, ["static"]);
 });
 
 test("withRunScope: two concurrent scopes with different adw_ids tear down disjoint lease sets, and a throwing body still tears down", async () => {

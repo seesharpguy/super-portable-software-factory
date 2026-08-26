@@ -829,6 +829,29 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       );
     }
 
+    // #9b — SPF #15 PR B (§6.1/§7): the credential broker's own describe()
+    // line, one per non-local agent. `static` (the only registered broker)
+    // issues exactly the key set check #9 just printed — reused here rather
+    // than re-resolved, and reused rather than a real `broker.issue(spec)`
+    // call: doctor has no live SandboxSpec (no Run exists), and deliberately
+    // never reads an operator-env VALUE just to build this string.
+    if (nonLocalAgents.length > 0) {
+      const brokerKnown = sandbox.KNOWN_CREDENTIAL_BROKER_IDS.includes(cfg.sandbox.credentials.broker);
+      for (const agent of nonLocalAgents) {
+        const agentAllow = agent.env_allowlist;
+        const keyNames = agentAllow == null ? cfg.sandbox.env_allowlist : cfg.sandbox.env_allowlist.filter((k) => agentAllow.includes(k));
+        check(
+          report,
+          `agent "${agent.name}" credential grant`,
+          brokerKnown,
+          brokerKnown
+            ? sandbox.describeStaticCredentials(keyNames)
+            : `sandbox.credentials.broker ${JSON.stringify(cfg.sandbox.credentials.broker)} is not registered — known: ${sandbox.KNOWN_CREDENTIAL_BROKER_IDS.join(", ")}`,
+          brokerKnown ? "info" : undefined,
+        );
+      }
+    }
+
     // #10 — egress policy, verbatim, info only.
     if (nonLocalAgents.length > 0) {
       check(

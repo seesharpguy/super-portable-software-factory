@@ -38,7 +38,7 @@ import path from "node:path";
 import { SandboxOperationUnsupportedError } from "@flue/runtime";
 import type { SandboxSpec } from "../core/data_types.js";
 import * as sandbox from "../core/sandbox.js";
-import type { SandboxTransport } from "../core/sandbox.js";
+import type { CredentialBroker, CredentialGrant, SandboxTransport } from "../core/sandbox.js";
 import { bridgeStub, cloudflareFactory, driverFromCloudflareStub, stubTransport } from "../core/sandbox_cloudflare.js";
 import type { CloudflareBridgeStub } from "../core/sandbox_cloudflare.js";
 
@@ -331,7 +331,7 @@ interface FakeBridge {
  * `sandbox.test.ts`'s own `localTransport()` uses — so the git/tar/base64
  * sequences this test drives through it are the real ones.
  */
-async function startFakeBridge(options: { failPreflight?: boolean } = {}): Promise<FakeBridge> {
+async function startFakeBridge(options: { failPreflight?: boolean; failCreate?: boolean } = {}): Promise<FakeBridge> {
   const sandboxes = new Set<string>();
   const execLog: string[] = [];
   let nextSandboxId = 0;
@@ -359,6 +359,14 @@ async function startFakeBridge(options: { failPreflight?: boolean } = {}): Promi
       return;
     }
     if (req.method === "POST" && url.pathname === "/v1/sandbox") {
+      if (options.failCreate) {
+        // Fault injection: the bridge itself is unreachable/erroring — the
+        // window between `broker.issue()` and `ensureSandboxId()` resolving
+        // (design §6.1/§11's PR B revocation guarantee).
+        res.writeHead(503);
+        res.end("bridge create failed: simulated outage");
+        return;
+      }
       nextSandboxId += 1;
       bridgeState.createCount += 1;
       const id = `sb-${nextSandboxId}`;
@@ -600,9 +608,10 @@ test("cloudflareFactory: createSandbox seeds exactly once per lease (preflight -
     assert.ok(lease!.provider_id.length > 0, "the adapter must set provider_id from the bridge's own sandbox id");
     assert.equal(
       lease!.teardown.length,
-      2,
-      "position 1 is the adapter's own destroy step, position 2 stays free for PR B's credentials:revoke, position 3 is this adapter's stub-cache eviction",
+      3,
+      "position 1 is the adapter's own destroy step, position 2 is PR B's credentials:revoke, position 3 is this adapter's stub-cache eviction",
     );
+    assert.equal(lease!.teardown[1]!.name, "credentials:revoke", "credentials:revoke must sit at position 2, between destroy and the stub-cache eviction");
     assert.ok(lease!.seeded, "seedViaTransport's returned fingerprint must be stored on the lease");
     // The seed committed spf-base inside the (real, on-disk) workspace dir.
     const tag = spawnSync("git", ["rev-parse", "--verify", "spf-base"], { cwd: dirs.workspace });
@@ -701,6 +710,100 @@ test("cloudflareFactory: the mandatory git/tar/base64 preflight failing produces
     const factory = cloudflareFactory(spec);
     await assert.rejects(() => factory.createSandbox({ id: "ctx-1" }), /fake-image-missing-binaries/);
     assert.equal(sandbox.getLease(spec.lease_key), undefined, "a failed preflight must leave no lease registered");
+  } finally {
+    delete process.env["SPF_TEST_CF_TOKEN"];
+    await bridge.close();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * SPF #15 PR B (§6.1/§11's PR B revocation guarantee): a fake broker that
+ * records `issue`/`revoke` calls independently — proves `ensureSandboxId()`
+ * throwing AFTER `broker.issue()` (but before a lease/teardown chain exists
+ * to hang the revoke off of) still revokes the grant, and never leaves a
+ * lease with no teardown steps registered behind.
+ */
+function makeFakeBroker(): { broker: CredentialBroker; issueCalls: () => number; revokeCalls: () => number } {
+  let issueCalls = 0;
+  let revokeCalls = 0;
+  const broker: CredentialBroker = {
+    id: "fake-test-broker",
+    async issue(spec) {
+      issueCalls += 1;
+      const grant: CredentialGrant = {
+        env: { ...spec.env },
+        describe: () => "fake broker grant",
+        revoke: async () => {
+          revokeCalls += 1;
+        },
+      };
+      return grant;
+    },
+  };
+  return { broker, issueCalls: () => issueCalls, revokeCalls: () => revokeCalls };
+}
+
+test("cloudflareFactory: a bridge create failure happens during preflight — before broker.issue() ever runs, so no grant exists and none is revoked", async () => {
+  // `ensureSandboxId()` is memoized (bridgeStub, sandbox_cloudflare.ts:201)
+  // and preflight's own `transport.exec` is what forces it to resolve
+  // FIRST — `broker.issue()` runs strictly after preflight succeeds
+  // (sandbox_cloudflare.ts:499-503). So `failCreate` surfaces out of
+  // preflight, not out of the explicit post-issue `ensureSandboxId()` call
+  // at :511 — there is no code path where the bridge create fails AFTER a
+  // grant has already been issued. This is the real, sound guarantee:
+  // credentials for a sandbox that never got created are never minted.
+  process.env["SPF_TEST_CF_TOKEN"] = BEARER_TOKEN;
+  const bridge = await startFakeBridge({ failCreate: true });
+  const dirs = setupHostAndDirs();
+  const spec = makeSpec({
+    host_root: dirs.hostRepo,
+    workspace_dir: dirs.workspace,
+    scratch_dir: dirs.scratchDir,
+    handoff_host: dirs.handoffHost,
+    handoff_sandbox: dirs.handoffSandbox,
+    cloudflare: { bridge_url: bridge.url, api_token_env: "SPF_TEST_CF_TOKEN", sandbox_name: "" },
+  });
+  try {
+    const fb = makeFakeBroker();
+    const factory = cloudflareFactory(spec, fb.broker);
+    await assert.rejects(() => factory.createSandbox({ id: "ctx-1" }), /bridge create failed|bridge POST/);
+    assert.equal(sandbox.getLease(spec.lease_key), undefined, "a failed bridge create must leave no lease registered");
+    assert.equal(fb.issueCalls(), 0, "a bridge create failure surfaces during preflight, strictly before broker.issue() ever runs");
+    assert.equal(fb.revokeCalls(), 0, "nothing was ever issued, so there is nothing to revoke");
+  } finally {
+    delete process.env["SPF_TEST_CF_TOKEN"];
+    await bridge.close();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("cloudflareFactory: the credentials:revoke teardown step still runs when a LATER step (cloudflare:destroy) throws — position 2 is never skipped because position 1 failed", async () => {
+  const bridge = await startFakeBridge();
+  const dirs = setupHostAndDirs();
+  const spec = makeSpec({
+    host_root: dirs.hostRepo,
+    workspace_dir: dirs.workspace,
+    scratch_dir: dirs.scratchDir,
+    handoff_host: dirs.handoffHost,
+    handoff_sandbox: dirs.handoffSandbox,
+    cloudflare: { bridge_url: bridge.url, api_token_env: "SPF_TEST_CF_TOKEN", sandbox_name: "" },
+  });
+  process.env["SPF_TEST_CF_TOKEN"] = BEARER_TOKEN;
+  try {
+    const fb = makeFakeBroker();
+    const factory = cloudflareFactory(spec, fb.broker);
+    await factory.createSandbox({ id: "ctx-1" });
+    const lease = sandbox.getLease(spec.lease_key);
+    assert.ok(lease, "sandbox was created; a lease must be registered");
+    assert.equal(fb.issueCalls(), 1);
+    const destroyStep = lease!.teardown.find((s) => s.name === "cloudflare:destroy");
+    assert.ok(destroyStep, "position 1 (cloudflare:destroy) must exist");
+    destroyStep!.run = async () => {
+      throw new Error("simulated cloudflare:destroy failure");
+    };
+    await sandbox.teardownRun(spec.adw_id).catch(() => {});
+    assert.equal(fb.revokeCalls(), 1, "credentials:revoke (position 2) must still run even when position 1 (cloudflare:destroy) throws");
   } finally {
     delete process.env["SPF_TEST_CF_TOKEN"];
     await bridge.close();

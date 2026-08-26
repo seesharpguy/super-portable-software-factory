@@ -634,3 +634,137 @@ test("openSandboxFactory: a throwing Sandbox.create surfaces a named error, not 
   await assert.rejects(openSandboxFactory(spec, loaderFor(fake)).createSandbox({ id: "c1" }), /boom: control plane unreachable/);
   assert.equal(sandboxCore.getLease(spec.lease_key), undefined);
 });
+
+test("openSandboxFactory: a throwing Sandbox.create still revokes a grant that was already issued — there is no native sandbox yet to hang the revoke off of", async () => {
+  const spec = makeSpec({ adw_id: "os-throwing-create-revoke", lease_key: "os-throwing-create-revoke/builder" });
+  const fake: FakeSdk = {
+    module: {
+      Sandbox: {
+        create: async () => {
+          throw new Error("boom: control plane unreachable");
+        },
+      },
+      SandboxManager: { create: async () => ({ listSandboxInfos: async () => ({ items: [] }), close: async () => {} }) },
+    },
+    createCalls: [],
+    instances: [],
+  };
+  const fb = makeFakeBroker();
+  await assert.rejects(
+    openSandboxFactory(spec, loaderFor(fake), fb.broker).createSandbox({ id: "c1" }),
+    /boom: control plane unreachable/,
+  );
+  assert.equal(sandboxCore.getLease(spec.lease_key), undefined);
+  assert.equal(fb.issueCalls, 1, "the grant was issued before Sandbox.create ran");
+  assert.equal(fb.revokeCalls, 1, "a throwing create() must not strand the grant it was issued for");
+});
+
+// ── credential broker ordering (SPF #15 PR B, design §11's PR B test list) ──
+
+/**
+ * Records every `issue()` call and lets the test control the returned
+ * grant's `env`/`describe`/`revoke` independently — a fake broker is the
+ * only way to prove `issue()` happens INSIDE `createSandbox`'s MISS branch,
+ * exactly once per lease, and never again on a HIT (§6.1).
+ */
+function makeFakeBroker(): {
+  broker: sandboxCore.CredentialBroker;
+  issueCalls: number;
+  revokeCalls: number;
+  lastGrant: sandboxCore.CredentialGrant | null;
+} {
+  const state = { issueCalls: 0, revokeCalls: 0, lastGrant: null as sandboxCore.CredentialGrant | null };
+  const broker: sandboxCore.CredentialBroker = {
+    id: "fake-test-broker",
+    async issue(spec) {
+      state.issueCalls += 1;
+      const grant: sandboxCore.CredentialGrant = {
+        env: { ...spec.env, FAKE_BROKER_KEY: "issued-by-fake-broker" },
+        describe: () => "fake broker grant",
+        revoke: async () => {
+          state.revokeCalls += 1;
+        },
+      };
+      state.lastGrant = grant;
+      return grant;
+    },
+  };
+  return { broker, get issueCalls() { return state.issueCalls; }, get revokeCalls() { return state.revokeCalls; }, get lastGrant() { return state.lastGrant; } };
+}
+
+test("openSandboxFactory: broker.issue(spec) happens INSIDE createSandbox's MISS branch, before Sandbox.create, and its env reaches the create call", async () => {
+  const { root, spec } = makeFixture("os-broker-order");
+  try {
+    const fake = makeFakeSdk();
+    const fb = makeFakeBroker();
+    await openSandboxFactory(spec, loaderFor(fake), fb.broker).createSandbox({ id: "c1" });
+    assert.equal(fb.issueCalls, 1, "issue() must be called exactly once for a fresh lease");
+    assert.equal(fake.createCalls.length, 1);
+    assert.deepEqual(fake.createCalls[0]!.env, { ...spec.env, FAKE_BROKER_KEY: "issued-by-fake-broker" }, "Sandbox.create must receive the GRANT's env, not spec.env directly");
+  } finally {
+    await sandboxCore.teardownRun(spec.adw_id);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openSandboxFactory: repeated createSandbox({id}) calls for the SAME lease issue exactly ONE broker.issue() — the HIT branch never re-issues", async () => {
+  const { root, spec } = makeFixture("os-broker-no-reissue");
+  try {
+    const fake = makeFakeSdk();
+    const fb = makeFakeBroker();
+    const factory = openSandboxFactory(spec, loaderFor(fake), fb.broker);
+    await factory.createSandbox({ id: "conv-1" });
+    await factory.createSandbox({ id: "conv-2" });
+    await factory.createSandbox({ id: "conv-3" });
+    assert.equal(fb.issueCalls, 1, "three createSandbox calls against the same lease_key must issue exactly one grant");
+    assert.equal(fake.createCalls.length, 1);
+  } finally {
+    await sandboxCore.teardownRun(spec.adw_id);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openSandboxFactory: credentials:revoke sits at position 2 and still runs when kill() throws (the real chain, not a fake TeardownStep)", async () => {
+  const { root, spec } = makeFixture("os-broker-revoke-on-kill-throw");
+  try {
+    const fake = makeFakeSdk();
+    const fb = makeFakeBroker();
+    const factory = openSandboxFactory(spec, loaderFor(fake), fb.broker);
+    await factory.createSandbox({ id: "c1" });
+
+    const lease = sandboxCore.getLease(spec.lease_key)!;
+    assert.equal(lease.teardown[0]!.name, "provider:kill");
+    assert.equal(lease.teardown[1]!.name, "credentials:revoke");
+
+    // Make the native sandbox's kill() throw AFTER create — proving revoke
+    // still runs even though the step ahead of it in the chain failed.
+    fake.instances[0]!.instance.kill = async () => {
+      throw new Error("kill failed: provider unreachable");
+    };
+
+    await sandboxCore.teardownRun(spec.adw_id);
+    assert.equal(fb.revokeCalls, 1, "credentials:revoke (position 2) must still run when kill() (position 1) throws");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("openSandboxFactory: a preflight failure after broker.issue() still revokes the grant — no lease and no teardown chain exists yet to fall back on", async () => {
+  const { root, spec } = makeFixture("os-broker-revoke-on-preflight-fail");
+  try {
+    const fake = makeFakeSdk({
+      run: async () => ({ logs: { stdout: [{ text: "" }], stderr: [{ text: "not found" }] }, exitCode: 127, executionTimeMs: 0 }),
+    });
+    const fb = makeFakeBroker();
+    await assert.rejects(
+      openSandboxFactory(spec, loaderFor(fake), fb.broker).createSandbox({ id: "c1" }),
+      /missing git, tar, or base64/,
+    );
+    assert.equal(sandboxCore.getLease(spec.lease_key), undefined, "a failed MISS branch must not leave a lease behind");
+    assert.equal(fb.issueCalls, 1, "the grant was issued before preflight ran");
+    assert.equal(fb.revokeCalls, 1, "a live credential must never be stranded behind a dead sandbox");
+    assert.deepEqual(fake.instances[0]!.events, ["kill", "close"], "the native sandbox must not be leaked either");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

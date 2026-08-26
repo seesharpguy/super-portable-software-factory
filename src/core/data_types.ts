@@ -492,9 +492,17 @@ export const SandboxTransportSchema = v.object({
 });
 export type SandboxTransportConfig = v.InferOutput<typeof SandboxTransportSchema>;
 
-/** "static" is the only broker in this build (PR A ships none at all — see sandbox.ts). */
+/**
+ * A plain string, not a picklist — a future broker (design §6.3, e.g.
+ * `openrouter`) registers itself in code (`sandbox.ts`'s
+ * `KNOWN_CREDENTIAL_BROKER_IDS`), so accepting new ids here must not also
+ * require a schema change in lockstep. "static" is the only broker
+ * REGISTERED in this build (PR A ships none at all — see sandbox.ts); an
+ * unknown name is a `validateSandboxConfig` failure (agents.ts), never a
+ * silent fallback to "static" — see design §6.1.
+ */
 export const SandboxCredentialsSchema = v.object({
-  broker: v.optional(v.picklist(["static"]), "static"),
+  broker: v.optional(v.string(), "static"),
 });
 export type SandboxCredentialsConfig = v.InferOutput<typeof SandboxCredentialsSchema>;
 
