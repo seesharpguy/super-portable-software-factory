@@ -18,11 +18,14 @@ import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
 import { isAuthoringProvider } from "../../core/issues/provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
-import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
-import { findChain, resolveRequiredAgents, runChain as runChainDef } from "../../chains/index.ts";
+import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps, type WatchFanoutDeps } from "../../core/watch.ts";
+import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
+import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
+import type { AttemptDispatch, AttemptMetrics } from "../../core/fanout.ts";
 import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
+import type { DataPaths } from "../../core/paths.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
 import { isInteractive } from "../ask.ts";
@@ -225,6 +228,152 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
   return 0;
 }
 
+/** Shared by `runChain`/`runRefine`/the fan-out lane's dispatch: best-effort enrichment of a generic "didn't succeed" message with the first phase that actually failed, read back from the worktree's own (symlinked) trace db. Top-level (not a `watchCommand` local) so `makeWatchFanoutDispatch` below can share it — see that factory's own doc comment for why. */
+function detailFromFailedPhase(cfg: SFConfig, cwd: string, adwId: string, prefix: string): string {
+  let detail = prefix;
+  let db: SfDb | undefined;
+  try {
+    const wtAnchor = paths.resolveAnchor(cwd);
+    const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
+    db = new SfDb(wtDataPaths.db_path);
+    const failed = db.phases(adwId).find((p) => p.status === "fail");
+    if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
+  } catch {
+    // best-effort — the generic message above still points at where to look
+  } finally {
+    db?.close();
+  }
+  return detail;
+}
+
+/**
+ * Best-effort: the reviewer's latest verdict for this run, read back from
+ * the worktree's own (symlinked) trace db and reduced to a digest — same
+ * DB, same try/catch shape as `detailFromFailedPhase` above, but on the
+ * SUCCESS path. `undefined` on any DB/parse hiccup, or when the chain
+ * never produced a `ReviewOutput` envelope at all — never thrown: a digest
+ * is a nice-to-have, not something that gets to block the PR-open flow
+ * it's decorating. Top-level for the same reason as `detailFromFailedPhase`.
+ */
+function reviewSummaryFor(cfg: SFConfig, cwd: string, adwId: string): string | undefined {
+  let db: SfDb | undefined;
+  try {
+    const wtAnchor = paths.resolveAnchor(cwd);
+    const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
+    db = new SfDb(wtDataPaths.db_path);
+    const envelope = db
+      .envelopes(adwId)
+      .filter((e) => e.output_type === ReviewOutput.name)
+      .at(-1); // the LATEST verdict — a revise loop can produce several
+    if (!envelope?.payload_json) return undefined;
+    const review = v.parse(ReviewOutput.schema, JSON.parse(envelope.payload_json)) as ReviewOutputT;
+    return formatReviewDigest(review);
+  } catch {
+    return undefined; // best-effort — see the doc comment above
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * The fan-out lane's dispatch trio, as a plain function of config + the
+ * resolved chain — mirrors `cli/commands/fanout.ts`'s own `runAttempt`
+ * (`:375-404`) and `readMetrics` (`:355-373`) closures, plus `adwIdsFree`
+ * (the sessions-db half of that command's reuse preflight) and `reviewFor`
+ * (§6.5 — the two expressions `runChain` above already computes, pointed at
+ * a WINNER instead of the sole attempt). Exported as a plain function of its
+ * inputs — not a `watchCommand`-local closure — the same reason
+ * `linkFanoutDataDir` is exported from `cli/commands/fanout.ts`: it can then
+ * be exercised directly against a real repo, real worktrees and a fake
+ * chain, with no tracker, no agent and no control plane
+ * (`src/test/watch_fanout_sandbox_wiring.test.ts`). `watchCommand` itself
+ * calls this SAME factory and spreads the result into `deps.fanout`, so the
+ * tested object and the shipped object are the same object.
+ */
+export function makeWatchFanoutDispatch(
+  cfg: SFConfig,
+  configPaths: string[],
+  dataPaths: DataPaths,
+  chainDef: ChainDefinition,
+): Pick<WatchFanoutDeps, "runAttempt" | "readMetrics" | "adwIdsFree" | "reviewFor"> {
+  const runAttempt = async (dispatch: AttemptDispatch): Promise<number> => {
+    // NO `dispatch.isAborted()` early return, unlike `spf fanout`'s own
+    // runAttempt: that check only ever fires under `firstSuccess`, which
+    // `spf watch` never sets (`decided` is never flipped — see
+    // `core/fanout.ts`). Including a check that can never observe true would
+    // be a lie about the abort model this dispatch actually honors.
+    const ctx: ChainContext = {
+      prompt: dispatch.prompt,
+      config_paths: configPaths,
+      adw_id: dispatch.adwId, // "issue-<id>-<i>" (or the salted/random base's own) — fanout.ts's attemptAdwId
+      cwd: dispatch.cwd, // THIS attempt's own worktree — the Run's repo_root anchor
+      chain_name: chainDef.name,
+      unattended: true, // same as runChain's and spf fanout's own dispatch — nobody is at a TTY for attempt 2 of 3
+      chain_source: chainDef.source,
+    };
+    // `cfg.watch.chain_options` reaches every attempt exactly as it reaches
+    // the single dispatch above — one shared map for all N attempts.
+    return withRunScope(dispatch.adwId, () => runChainDef(chainDef, ctx, cfg.watch.chain_options));
+  };
+
+  /**
+   * Opened and closed PER CALL, unlike `spf fanout`'s lazily-held single
+   * handle: `spf watch` is a long-lived daemon with several issues (and
+   * fan-outs) potentially in flight at once and no single `finally` to close
+   * a shared handle in — the same per-call shape `detailFromFailedPhase`/
+   * `reviewSummaryFor` above already use against the same WAL db.
+   */
+  const readMetrics = (adwId: string): AttemptMetrics => {
+    if (!existsSync(dataPaths.db_path)) return { gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 };
+    let db: SfDb | undefined;
+    try {
+      db = new SfDb(dataPaths.db_path);
+      const gates = db.gates(adwId);
+      const session = db.session(adwId);
+      // `passed` is a SQLite integer boolean that CAN be NULL on a row an
+      // older tracer wrote. Counted explicitly in both directions, never as
+      // `!g.passed`: a NULL is unknown, and letting it read as a failure
+      // would let a garbled row decide which candidate wins.
+      return {
+        gate_passes: gates.filter((g) => g.passed === 1).length,
+        gate_failures: gates.filter((g) => g.passed === 0).length,
+        cost: session?.total_cost ?? 0,
+        tokens: session?.total_tokens ?? 0,
+      };
+    } catch {
+      return { gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 };
+    } finally {
+      db?.close();
+    }
+  };
+
+  /**
+   * The other half of `spf fanout`'s reuse preflight — "does this adw_id
+   * have a session row yet" — one `SfDb.session(id)` point lookup per
+   * candidate id. Safe direction is FALSE (see `WatchFanoutDeps.adwIdsFree`'s
+   * own doc comment): an unreadable db reports "taken" rather than "free".
+   */
+  const adwIdsFree = (adwIds: string[]): boolean => {
+    if (!existsSync(dataPaths.db_path)) return true; // no db yet — nothing to collide with
+    let db: SfDb | undefined;
+    try {
+      db = new SfDb(dataPaths.db_path);
+      return adwIds.every((id) => db!.session(id) === null);
+    } catch {
+      return false;
+    } finally {
+      db?.close();
+    }
+  };
+
+  const reviewFor = (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => ({
+    reviewRequired: resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer"),
+    reviewSummary: reviewSummaryFor(cfg, opts.cwd, opts.adwId),
+  });
+
+  return { runAttempt, readMetrics, adwIdsFree, reviewFor };
+}
+
 export async function watchCommand(argv: string[]): Promise<number> {
   const { options, flags } = parseCli(argv, ["cwd", "config"], ["dry-run", "once"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
@@ -279,6 +428,44 @@ export async function watchCommand(argv: string[]): Promise<number> {
     }
   }
 
+  // watch.fanout.n > 1 startup gates — all guarded so watch.fanout.n: 1 (the
+  // default) reaches none of them, and a bad configuration stops the daemon
+  // before it starts rather than failing silently every tick.
+  if (cfg.watch.fanout.n > 1) {
+    // §5.1 — `spf fanout` refuses a chain with no commit step
+    // (`cli/commands/fanout.ts`); `spf watch`'s single-dispatch lane has no
+    // such requirement (a chain that commits nothing is handled honestly by
+    // `openPrForWinner`'s own `diffFiles` -> blocked path). For `n > 1` the
+    // same gate MUST apply, for a worse reason: `runBestOf` force-removes
+    // every SUCCESSFUL LOSER's worktree after selection
+    // (`git worktree remove --force`, which deletes uncommitted/untracked
+    // files with no confirmation). A chain with no commit step leaves its
+    // entire payload as uncommitted edits, so fan-out would destroy N-1
+    // candidates outright and then block the issue anyway once the winner's
+    // own empty diff is discovered.
+    const watchChain = findChain(cfg.watch.chain)!; // already checked above
+    if (!hasCommitStep(watchChain.phases)) {
+      console.error(
+        `watch.fanout.n is ${cfg.watch.fanout.n} but watch.chain ${JSON.stringify(cfg.watch.chain)} has no commit phase ` +
+          `(${watchChain.phases}) — best-of-N discards every losing attempt's worktree (uncommitted work included), ` +
+          `so a chain that leaves its payload uncommitted would destroy N-1 candidates and then block the issue for ` +
+          `an empty diff. Use a chain that commits (plan-build, plan-build-test, plan-build-test-quality, simple-sdlc, ` +
+          `or a repo-local chain with a commit step), or set watch.fanout.n: 1.`,
+      );
+      return 1;
+    }
+    // §5.2 — `spf fanout` prints this once, interactively, when it's about
+    // to spend --n times over an unbounded ceiling; a daemon would otherwise
+    // repeat that bill every tick with nobody watching, so it's said once,
+    // loudly, at startup instead.
+    if (cfg.defaults.max_run_cost === undefined && cfg.defaults.max_run_tokens === undefined) {
+      console.log(
+        `[spf] watch     no defaults.max_run_cost / defaults.max_run_tokens configured — watch.fanout.n=${cfg.watch.fanout.n} ` +
+          `means every claimed issue runs ${cfg.watch.fanout.n} attempts to completion, unbounded`,
+      );
+    }
+  }
+
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
   const lockPath = path.join(dataPaths.data_dir, "watch.lock");
   try {
@@ -323,56 +510,20 @@ export async function watchCommand(argv: string[]): Promise<number> {
       console.error(`watch: refusing to link ${target} to itself — worktree path resolved to the main repo's own data_dir`);
       return;
     }
-    if (existsSync(target)) return;
-    mkdirSync(path.dirname(target), { recursive: true });
-    symlinkSync(dataPaths.data_dir, target, "dir");
-  }
-
-  /** Shared by `runChain`/`runRefine`: best-effort enrichment of a generic "didn't succeed" message with the first phase that actually failed, read back from the worktree's own (symlinked) trace db. */
-  function detailFromFailedPhase(cwd: string, adwId: string, prefix: string): string {
-    let detail = prefix;
-    let db: SfDb | undefined;
-    try {
-      const wtAnchor = paths.resolveAnchor(cwd);
-      const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-      db = new SfDb(wtDataPaths.db_path);
-      const failed = db.phases(adwId).find((p) => p.status === "fail");
-      if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
-    } catch {
-      // best-effort — the generic message above still points at where to look
-    } finally {
-      db?.close();
+    if (!existsSync(target)) {
+      mkdirSync(path.dirname(target), { recursive: true });
+      symlinkSync(dataPaths.data_dir, target, "dir");
     }
-    return detail;
-  }
-
-  /**
-   * Best-effort: the reviewer's latest verdict for this run, read back from
-   * the worktree's own (symlinked) trace db and reduced to a digest — same
-   * DB, same try/catch shape as `detailFromFailedPhase` above, but on the
-   * SUCCESS path. `undefined` on any DB/parse hiccup, or when the chain
-   * never produced a `ReviewOutput` envelope at all — never thrown: a digest
-   * is a nice-to-have, not something that gets to block the PR-open flow
-   * it's decorating.
-   */
-  function reviewSummaryFor(cwd: string, adwId: string): string | undefined {
-    let db: SfDb | undefined;
-    try {
-      const wtAnchor = paths.resolveAnchor(cwd);
-      const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-      db = new SfDb(wtDataPaths.db_path);
-      const envelope = db
-        .envelopes(adwId)
-        .filter((e) => e.output_type === ReviewOutput.name)
-        .at(-1); // the LATEST verdict — a revise loop can produce several
-      if (!envelope?.payload_json) return undefined;
-      const review = v.parse(ReviewOutput.schema, JSON.parse(envelope.payload_json)) as ReviewOutputT;
-      return formatReviewDigest(review);
-    } catch {
-      return undefined; // best-effort — see the doc comment above
-    } finally {
-      db?.close();
-    }
+    // Keeps the symlink invisible to `git status`/`git add -A` in THIS
+    // worktree — see `core/worktree_data.ts`'s doc comment for the ELOOP
+    // disaster this closes. Called every time, guarded by nothing of its
+    // own: it's idempotent and best-effort (a `git rev-parse` failure is
+    // swallowed), so there's no wrong time to call it, including when
+    // resuming an orphaned worktree whose `.spf/data` symlink already
+    // exists. Previously only `spf fanout`'s own worktrees got this; `spf
+    // watch`'s single-dispatch worktrees carried the same exposure and now
+    // get the identical fix.
+    excludeSpfDataFromGit(worktreePath);
   }
 
   const runChain = async (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }): Promise<ChainRunResult> => {
@@ -414,9 +565,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // is reflected here too, not just each chain's static/YAML default.
     const reviewRequired = resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer");
     if (code === 0) {
-      return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: reviewSummaryFor(opts.cwd, opts.adwId) };
+      return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: reviewSummaryFor(cfg, opts.cwd, opts.adwId) };
     }
     const detail = detailFromFailedPhase(
+      cfg,
       opts.cwd,
       opts.adwId,
       `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
@@ -454,6 +606,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     const code = await withRunScope(opts.adwId, () => runChainDef(chainDef, ctx, opts.chainOptions));
     if (code !== 0) {
       const detail = detailFromFailedPhase(
+        cfg,
         opts.cwd,
         opts.adwId,
         `Refine chain "${cfg.watch.refine.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
@@ -546,6 +699,21 @@ export async function watchCommand(argv: string[]): Promise<number> {
       notifier?.send(event); // unaffected either way — see mountWatchDashboard's own doc comment
       dashboard?.mirrorNotify(event);
     },
+    // `undefined` at the default `watch.fanout.n: 1` — `core/watch.ts`'s
+    // `runIssue` never even looks at `deps.fanout` in that case, so the
+    // object below doesn't exist at runtime at all unless best-of-N is
+    // actually on. `makeWatchFanoutDispatch` is the SAME factory
+    // `src/test/watch_fanout_sandbox_wiring.test.ts` exercises directly —
+    // the tested object and this shipped object are the same object.
+    fanout:
+      cfg.watch.fanout.n > 1
+        ? {
+            n: cfg.watch.fanout.n,
+            concurrency: cfg.watch.fanout.concurrency,
+            repoRoot: anchor.repo_root, // GitHandle has no repo-root accessor — this is the same value `git` above is bound to
+            ...makeWatchFanoutDispatch(cfg, configPaths, dataPaths, findChain(cfg.watch.chain)!), // checked at startup
+          }
+        : undefined,
   };
 
   const state = createWatchState();

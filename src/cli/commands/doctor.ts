@@ -21,7 +21,7 @@ import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
-import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
+import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
 import * as sandbox from "../../core/sandbox.ts";
 import { loadOpenSandboxSdk } from "../../core/sandbox_opensandbox.ts";
 import type { AgentConfig, SFConfig } from "../../core/data_types.ts";
@@ -1116,13 +1116,96 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       // that is entirely built around a review loop, the moment its reviewer
       // is renamed.
       const hasReviewer = watchChain.phases.includes("(revise)");
-      const hasCommitPhase = watchChain.phases.includes("commit");
+      // `hasCommitStep` (structural: the derived phase string shows a real
+      // `git(commit` step), not a substring match on the word "commit" — the
+      // same predicate `watch.fanout commit phase` below uses, so a chain
+      // whose phase LABEL merely contains "commit" without an actual commit
+      // step can't get "includes" here and a hard ✗ on the very next line.
+      const hasCommitPhase = hasCommitStep(watchChain.phases);
       check(
         report,
         "watch.chain review posture",
         true,
         `${hasReviewer ? "includes" : "does not include"} a reviewer; ${hasCommitPhase ? "includes" : "does not include"} a commit phase`,
       );
+    }
+
+    // watch.fanout — the best-of-N multiplier `watch.fanout.n`/
+    // `watch.fanout.concurrency` drive (see `WatchFanoutConfigSchema`'s doc
+    // comment). This line always prints, even at the default n=1: n=1 is a
+    // no-op for the running DAEMON (`core/watch.ts`'s design doc, §7), but
+    // not a total no-op at the CLI surface — an operator should be able to
+    // see the posture either way. b-d below only fire when n > 1.
+    {
+      const n = cfg.watch.fanout.n;
+      const a = cfg.watch.fanout.concurrency;
+      const c = cfg.watch.concurrency;
+      if (n <= 1) {
+        check(report, "watch.fanout", true, "n=1 — single dispatch per claimed issue (best-of-N off)", "info");
+      } else {
+        check(
+          report,
+          "watch.fanout",
+          true,
+          `n=${n}, attempts in flight per issue=${a}; with watch.concurrency=${c} that is up to ` +
+            `${c} x ${a} = ${c * a} chain runs in flight, up to ${c} x ${n} = ${c * n} worktrees on disk at once ` +
+            `(a successful attempt's tree is kept until every sibling settles), and ${n} chain runs per claimed issue`,
+          "info",
+        );
+
+        if (watchChain) {
+          // b — only when SOME dispatched agent of watch.chain resolves
+          // non-local. Reuses check #1's own resolvedBackend +
+          // resolveRequiredAgents computation (recomputed here, scoped to
+          // THIS chain rather than every chain) so the two can never
+          // disagree about what "resolves non-local" means.
+          const resolvedBackendForFanout = (agent: AgentConfig): string => agent.sandbox ?? cfg.sandbox.backend;
+          const required = resolveRequiredAgents(watchChain, cfg.watch.chain_options);
+          const sandboxed = required.filter((name) => {
+            const agent = cfg.agents.find((a2) => a2.name === name);
+            return agent !== undefined && resolvedBackendForFanout(agent) !== "local";
+          });
+          if (sandboxed.length > 0) {
+            const perAttempt = cfg.sandbox.scope === "run" ? 1 : sandboxed.length;
+            check(
+              report,
+              "watch.fanout sandbox cost",
+              true,
+              `${perAttempt} sandbox(es) per attempt under scope: ${cfg.sandbox.scope} (dispatched agents: ${sandboxed.join(", ")}) ` +
+                `-> up to ${c} x ${a} x ${perAttempt} = ${c * a * perAttempt} in flight; ${n} x ${perAttempt} = ${n * perAttempt} sandbox creations per claimed issue`,
+              "info",
+            );
+          }
+
+          // c — hard ✗ when n > 1 and watch.chain has no commit phase.
+          // Mirrors `spf watch`'s own startup refusal, so `spf doctor`
+          // catches this before the daemon is ever started.
+          check(
+            report,
+            "watch.fanout commit phase",
+            hasCommitStep(watchChain.phases),
+            hasCommitStep(watchChain.phases)
+              ? `watch.chain "${cfg.watch.chain}" has a commit phase`
+              : `watch.fanout.n is ${n} but watch.chain "${cfg.watch.chain}" has no commit phase (${watchChain.phases}) — ` +
+                  `best-of-N discards every losing attempt's worktree, uncommitted work included; see \`spf watch\`'s own startup refusal for the full explanation`,
+          );
+        }
+
+        // d — warn, not a hard failure: an unbounded run is the documented
+        // default (every reachability/posture check in this file is
+        // info/warn rather than a hard failure). A daemon repeats this bill
+        // every tick, though, which is what earns the warn over check #1's
+        // plain info line.
+        if (cfg.defaults.max_run_cost === undefined && cfg.defaults.max_run_tokens === undefined) {
+          check(
+            report,
+            "watch.fanout budget ceiling",
+            true,
+            `no defaults.max_run_cost / defaults.max_run_tokens configured — every claimed issue runs ${n} attempts to completion, unbounded`,
+            "warn",
+          );
+        }
+      }
     }
 
     if (cfg.watch.refine.enabled) {

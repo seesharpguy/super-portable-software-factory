@@ -56,14 +56,20 @@
  */
 import path from "node:path";
 import type { GitHandle } from "./git_helper.ts";
+import { attemptAdwId, attemptBranch, attemptWorktreePath, runBestOf, type AttemptDispatch, type AttemptMetrics } from "./fanout.ts";
 import type { CodeHostProvider, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./issues/provider.ts";
 import type { NotifyEvent } from "./notify/channel.ts";
 import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
 import { parseRefineMarker } from "./refine.ts";
+import { newId } from "./utils.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
 /** GitHub's own documented sub-issue nesting cap (see `github_provider.ts`'s `linkChild` doc comment) — `rollUp`'s own recursion bound, so a malformed/cyclic hierarchy can't spin forever. */
 const MAX_ROLLUP_DEPTH = 8;
+/** Twin of `MAX_N` in `cli/commands/fanout.ts` — the fan-out lane's own attempt-count ceiling (`watch.fanout.n`'s schema bound), duplicated as a literal so the pre-sweep (§8.5) can size itself without importing a CLI command module. */
+const MAX_FANOUT_N = 8;
+/** §8.7's salt ceiling — and therefore §8.5's sweep range too. Bounds an otherwise-unbounded probe/sweep against an issue fanned out over and over. */
+const MAX_FANOUT_SALT = 8;
 
 export interface ChainRunResult {
   accepted: boolean;
@@ -117,6 +123,44 @@ export interface RefineRunResult {
   created: RefinedIssueRef[];
   /** What the refiner is asking, read back from its own side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run published a tree instead of escalating; `gates.refinementWellFormed` guarantees `created` and `questions` are never both non-empty. */
   questions: RefinedQuestionRef[];
+}
+
+/**
+ * The fan-out lane's injected trio + the two values `WatchDeps` cannot derive.
+ * Exported as a NAMED type (not an inline object literal) because
+ * `cli/commands/watch.ts`'s `makeWatchFanoutDispatch` factory returns it and
+ * `src/test/watch_fanout_sandbox_wiring.test.ts` names it — an inline literal
+ * would have to be duplicated in three places.
+ */
+export interface WatchFanoutDeps {
+  /** > 1. `cli/commands/watch.ts` passes `undefined` for this whole object when `watch.fanout.n` is 1. */
+  n: number;
+  /** Attempts IN FLIGHT within one issue — NOT `WatchDeps.concurrency`, which counts issues. Does NOT bound worktrees on disk (see the module's fan-out doc). */
+  concurrency: number;
+  /** The MAIN repo root. `GitHandle` has no accessor for it — `cli/commands/watch.ts` passes its anchor's `repo_root`, the same value `deps.git` is bound to. */
+  repoRoot: string;
+  /** One attempt's chain, in that attempt's own worktree — the same ctx `runChain` builds, per attempt. */
+  runAttempt: (dispatch: AttemptDispatch) => Promise<number>;
+  /** Gate/usage rows for one attempt's adw_id, from the SHARED db. Must not throw. */
+  readMetrics: (adwId: string) => AttemptMetrics;
+  /**
+   * True when NOT ONE of these adw_ids has a session row yet — the same db,
+   * the same predicate and the same reasoning as `spf fanout`'s reuse
+   * preflight (`cli/commands/fanout.ts`, `preflight.session(id) !== null`).
+   * This is what advances the fan-out lane's base-adw_id salt on EVERY claim
+   * (see `runIssueFanout`'s salt probe) — the sessions the previous claim's
+   * attempts left behind are the only thing that reliably changes on every
+   * re-claim, unlike `WatchMarker.attempt`, which only advances on the
+   * orphan-retry path.
+   *
+   * Must not throw, and its safe direction is FALSE: a db it cannot read
+   * reports "taken", which burns an id and keeps the selection basis clean,
+   * rather than reporting "free" and letting a previous run's rows decide
+   * this run's winner.
+   */
+  adwIdsFree: (adwIds: string[]) => boolean;
+  /** The winner's review posture, read back post-hoc — the same two fields `runChain` returns, keyed on a WINNER instead of the sole attempt. */
+  reviewFor: (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => { reviewRequired: boolean; reviewSummary?: string };
 }
 
 export interface WatchDeps {
@@ -189,6 +233,17 @@ export interface WatchDeps {
    * just be noise in a channel.
    */
   notify: (event: NotifyEvent) => void;
+  /**
+   * Best-of-N per claimed issue (`watch.fanout`). `undefined` — the default,
+   * and what every existing test constructs — means single dispatch:
+   * `runIssue` takes the path it always has.
+   *
+   * ONE OPTIONAL OBJECT, not several optional fields: everything the fan-out
+   * lane needs is required WHEN THE LANE IS ON and meaningless when it is
+   * off, so the optionality belongs at the lane, not at each field. There is
+   * no "optional but secretly required" member to get wrong.
+   */
+  fanout?: WatchFanoutDeps;
 }
 
 export interface WatchRunState {
@@ -722,8 +777,346 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
   }
 }
 
-/** One issue's full claim -> chain -> PR path, run in the background — `claimNewWork` doesn't await this. */
-async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
+/**
+ * The half of a claimed issue's path that runs once a WINNING tree exists:
+ * empty-diff check, push, PR, marker, transition, notify. Called by
+ * `runIssueSingle` with its sole attempt's tree and by `runIssueFanout` with
+ * `pickBest`'s winner — it never learns which, because nothing about opening
+ * a PR depends on how many candidates were considered.
+ *
+ * `diffBase` is a PARAMETER, not `origin/${deps.baseBranch}` recomputed here:
+ * the fan-out lane pins one base SHA for the whole fan-out (see
+ * `runIssueFanout`) and the winner must be diffed against the SAME commit its
+ * siblings were ranked against, not against wherever `origin/<base>` has
+ * moved to by now. The single lane passes `origin/${deps.baseBranch}` — the
+ * literal expression it used inline before this extraction.
+ *
+ * `extraNotifyFields`, when given, are appended to the `pr_opened` notify's
+ * `fields` — additive, never replacing any of the four fields below. The
+ * fan-out lane uses this for one `["fanout", "<n> attempts, won by <adw_id>"]`
+ * entry; the single lane passes nothing, so its notify is byte-identical to
+ * before this extraction.
+ *
+ * IT CATCHES NOTHING, deliberately. The try/catch that covers this region
+ * lives one level up, in each lane's own caller, and this extraction does not
+ * move it. So EVERY caller must still hold the winner's `{worktreePath,
+ * branch}` in whatever its own catch cleans up, for the whole duration of
+ * this call: the throws in here are ordinary (`push` rejected, `openPr` 5xx,
+ * a tracker write failing), and on any of them the caller's catch is the only
+ * thing that removes the tree and deletes the branch.
+ */
+async function openPrForWinner(
+  deps: WatchDeps,
+  issue: Issue,
+  won: {
+    branch: string;
+    worktreePath: string;
+    adwId: string;
+    diffBase: string;
+    reviewRequired?: boolean;
+    reviewSummary?: string;
+    extraNotifyFields?: Array<[string, string]>;
+  },
+): Promise<void> {
+  const wtGit = deps.worktreeGit(won.worktreePath);
+  if (wtGit.diffFiles(won.diffBase).length === 0) {
+    deps.log(`watch: ${issue.id}: chain succeeded but committed nothing — blocked`);
+    deps.notify({
+      kind: "issue_blocked",
+      level: "notice",
+      title: `issue ${issue.id} blocked`,
+      detail: `Chain "${deps.chain}" (adw_id ${won.adwId}) completed but left no committed changes.`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", won.adwId]],
+    });
+    await deps.provider.transition(issue, "blocked", `Chain "${deps.chain}" (adw_id ${won.adwId}) completed but left no committed changes.`);
+    cleanupWorktree(deps, { worktree: won.worktreePath, branch: won.branch });
+    return;
+  }
+
+  wtGit.push("origin", won.branch);
+  // The human merging this PR sees whatever the reviewer found — or, if
+  // nothing reviewed this change at all, is told that plainly rather than
+  // left to assume a silent approval. `reviewSummary` is already
+  // sanitized/truncated by the caller (see runChain's own doc comment).
+  const reviewLine = won.reviewSummary
+    ? won.reviewSummary
+    : won.reviewRequired
+      ? "Reviewer ran, but no verdict could be read back from the session data."
+      : `Nothing reviewed this change — chain \`${deps.chain}\` has no reviewer step.`;
+  // No cross-linking magic keyword here on purpose (a code host paired
+  // with a different tracker has no "Closes #n" convention to hook into
+  // — see provider.ts) — the issue id in the title/body is plain text
+  // for humans, and, on a Jira+Bitbucket pairing, exactly what Jira's own
+  // Bitbucket integration scans for to link the PR automatically.
+  const pr = await deps.codeHost.openPr({
+    branch: won.branch,
+    title: `${issue.title} (${issue.id})`,
+    body: `Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}.\n\n${reviewLine}`,
+    base: deps.baseBranch,
+  });
+  await deps.provider.writeMarker(issue, { worktree: won.worktreePath, branch: won.branch, pr: pr.number, attempt: 0 });
+  await deps.provider.transition(issue, "review");
+  deps.log(`watch: ${issue.id}: opened PR #${pr.number} — review`);
+  deps.notify({
+    kind: "pr_opened",
+    level: "info",
+    title: `PR #${pr.number} opened`,
+    detail: reviewLine,
+    fields: [
+      ["issue", issue.id],
+      ["title", issue.title],
+      ["chain", deps.chain],
+      ["review", won.reviewSummary ? "reviewed" : won.reviewRequired ? "reviewer ran, no verdict" : "not reviewed"],
+      ...(won.extraNotifyFields ?? []),
+    ],
+    url: pr.url || undefined,
+  });
+}
+
+/**
+ * `issue-<id>` at `r = 0` — matching `runIssueSingle`'s own adw_id scheme, so
+ * the common case (an issue's first fan-out) is the id a human would guess
+ * (`spf phases issue-42-2` works as advertised). `r > 0` salts it — see
+ * `runIssueFanout`'s salt probe for why a PROBED salt, not a counter anyone
+ * maintains, decides `r`.
+ */
+function baseFor(issue: Issue, r: number): string {
+  return r === 0 ? `issue-${issue.id}` : `issue-${issue.id}-r${r}`;
+}
+
+/**
+ * Tear down a whole SET of worktree/branch pairs — EVERY worktree in the
+ * list first, then every branch, never pair by pair. The pairs a fan-out
+ * pre-sweep has to cover are cross-linked (the winner's renamed branch can
+ * live in a *different* entry's fan-out worktree — see the rename step in
+ * `runIssueFanout`), and `git branch -D` refuses to delete a branch that is
+ * checked out in ANY worktree still on disk while `deleteLocalBranch`
+ * swallows that refusal (a bare `spawnSync` whose status is never read —
+ * `git_helper.ts`). A name-by-name (pairwise) sweep can therefore try to
+ * delete a branch that is still checked out in an entry later in the SAME
+ * list, silently fail, and leave the issue permanently wedged the next time
+ * something tries to create that branch. Two full passes over the whole list
+ * remove that ordering dependency entirely — the same rule
+ * `removeRunWorktree` documents for its own single pair (worktree before
+ * branch), applied at the granularity a sweep across many pairs needs.
+ */
+function sweepPairs(deps: WatchDeps, pairs: Array<{ worktree?: string; branch?: string }>): void {
+  for (const p of pairs) {
+    if (!p.worktree) continue;
+    try {
+      deps.git.worktreeRemove(p.worktree);
+    } catch (error) {
+      deps.log(`watch: sweep warning: ${(error as Error).message}`);
+    }
+  }
+  for (const p of pairs) {
+    if (!p.branch) continue;
+    try {
+      deps.git.deleteLocalBranch(p.branch);
+    } catch (error) {
+      deps.log(`watch: sweep warning: ${(error as Error).message}`);
+    }
+  }
+}
+
+/**
+ * `watch.fanout.n > 1`: run `n` sibling attempts of this issue's prompt via
+ * `core/fanout.ts`'s `runBestOf`, let it pick a winner, rename the winner's
+ * branch onto the canonical `spf-watch/<id>-<slug>` name, then hand it to
+ * `openPrForWinner` — the same tail `runIssueSingle` uses.
+ *
+ * `won` is a single mutable local (unlike the single lane's deterministic
+ * `worktreePath`/`branch` locals) because the fan-out lane's cleanup
+ * coordinates change three times over the course of one claim: null while
+ * nothing of watch's own exists yet, the winner's fan-out tree/branch right
+ * after selection, then the winner's tree on the renamed canonical branch
+ * from the rename onward — including all the way through `openPrForWinner`,
+ * which catches nothing itself. `won` is intentionally never nulled before
+ * that call: doing so would disarm this catch for `push`/`openPr` failures,
+ * the single most failure-prone part of the whole flow, and leak a full
+ * checkout plus the canonical branch on every one of them.
+ */
+async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanoutDeps): Promise<void> {
+  const n = fanout.n;
+  let won: { worktree: string; branch: string } | null = null;
+  try {
+    // Read for its PAIR (the pre-sweep needs to know what a previous cycle
+    // recorded), never for `attempt` — see the salt probe below for why that
+    // field cannot be the fan-out lane's re-claim counter.
+    const marker0 = await deps.provider.readMarker(issue);
+
+    // SALT PROBE (§8.7 in the design doc): the smallest r whose n attempt
+    // ids have NO session rows yet. `WatchMarker.attempt` only advances on
+    // reconcileOrphans' retry path — an ordinary blocked -> re-labeled ready
+    // -> re-claim never touches it — so it cannot answer "is this base
+    // still clean," but the sessions a previous claim's attempts actually
+    // wrote can (adwIdsFree's own doc comment has the full argument).
+    let salt = 0;
+    for (; salt <= MAX_FANOUT_SALT; salt++) {
+      const ids = Array.from({ length: n }, (_, i) => attemptAdwId(baseFor(issue, salt), i + 1));
+      if (fanout.adwIdsFree(ids)) break;
+    }
+    const baseAdwId = salt <= MAX_FANOUT_SALT ? baseFor(issue, salt) : `issue-${issue.id}-x${newId(4)}`;
+    if (salt > MAX_FANOUT_SALT) {
+      deps.log(`watch: ${issue.id}: exhausted ${MAX_FANOUT_SALT + 1} deterministic fan-out base id(s) — falling back to a random one (${baseAdwId})`);
+    }
+
+    // PRE-SWEEP: one list, two passes (sweepPairs) — marker0's own recorded
+    // pair (the only way to reach a stale RENAMED winner from a crash after
+    // §8.3's rename), the canonical single-lane pair (the rename target
+    // below must find it free), and every deterministic attempt name under
+    // every base this claim can have used (0..salt inclusive — bases above
+    // salt were never reached, so nothing can be there).
+    const branch = branchNameFor(issue);
+    const worktreePath = worktreePathFor(deps, issue);
+    const pairs: Array<{ worktree?: string; branch?: string }> = [
+      { worktree: marker0?.worktree, branch: marker0?.branch },
+      { worktree: worktreePath, branch },
+    ];
+    for (let r = 0; r <= Math.min(salt, MAX_FANOUT_SALT); r++) {
+      const base = baseFor(issue, r);
+      for (let i = 1; i <= MAX_FANOUT_N; i++) {
+        pairs.push({
+          worktree: attemptWorktreePath(deps.worktreesDir, base, i),
+          branch: attemptBranch(base, i),
+        });
+      }
+    }
+    sweepPairs(deps, pairs);
+
+    // The base is fetched and resolved to a SHA exactly ONCE, loudly, here —
+    // matching the single lane's own unguarded, fatal-on-failure fetch
+    // (`runIssueSingle`) rather than `runBestOf`'s own per-attempt,
+    // failure-swallowing fetch. `pinnedGit` suppresses the N redundant
+    // fetches `runBestOf` would otherwise issue against a base already
+    // fetched here, and pins every attempt (and the eventual `diffFiles`
+    // check in `openPrForWinner`) to the identical commit even if
+    // `origin/<base>` moves mid-fan-out.
+    deps.git.fetch("origin", deps.baseBranch);
+    const baseSha = deps.git.rev(`origin/${deps.baseBranch}`);
+    const pinnedGit: GitHandle = { ...deps.git, fetch: () => {} };
+
+    // CLAIM-TIME MARKER WRITE — mirrors the single lane's own write
+    // (`runIssueSingle`) and, like it, drops `pr`. Without this, a marker
+    // surviving from a PREVIOUS cycle (e.g. a human hand-returning a
+    // `review` issue with an open PR back to `ready`) would carry that
+    // stale `pr` through the sweep and the whole fan-out window untouched —
+    // and if the daemon dies mid-fan-out, `reconcileOrphans` would read that
+    // stale `marker.pr` on restart, find it open or merged, and resume the
+    // issue straight to `review` (its RESUME path, never reached again from
+    // `ready`/`blocked`), leaking this claim's worktrees/branches forever
+    // with nothing left to sweep them on a future claim. `attempt` is
+    // PRESERVED here (not reset to 0) so the orphan-retry counter survives a
+    // claim that has not yet produced a winner; it only becomes the literal
+    // `0` once a real winner marker is written below, matching the single
+    // lane's own reset at that point.
+    await deps.provider.writeMarker(issue, { attempt: marker0?.attempt ?? 0 });
+
+    const result = await runBestOf({
+      chainName: deps.chain,
+      prompt: `${issue.title}\n\n${issue.body}`.trim(),
+      n,
+      concurrency: fanout.concurrency,
+      baseAdwId,
+      baseBranch: baseSha,
+      repoRoot: fanout.repoRoot,
+      worktreesDir: deps.worktreesDir,
+      git: pinnedGit,
+      linkDataDir: deps.linkDataDir,
+      runAttempt: fanout.runAttempt,
+      readMetrics: fanout.readMetrics,
+      log: deps.log,
+    });
+    deps.log(`watch: ${issue.id}: best of ${n} — ${result.basis}`);
+
+    if (!result.winner) {
+      const first = attemptAdwId(baseAdwId, 1);
+      const last = attemptAdwId(baseAdwId, n);
+      const detail =
+        `Chain "${deps.chain}" did not succeed in any of ${n} attempt(s) (adw_ids ${first}..${last}): ${result.basis}. ` +
+        `Run \`spf phases <adw_id>\` on any attempt for detail.`;
+      deps.notify({
+        kind: "issue_blocked",
+        level: "notice",
+        title: `issue ${issue.id} blocked`,
+        detail,
+        fields: [
+          ["issue", issue.id],
+          ["title", issue.title],
+          ["chain", deps.chain],
+          ["adw_id", `${baseAdwId}-1..${n}`],
+          ["attempts", String(n)],
+        ],
+      });
+      await deps.provider.transition(issue, "blocked", detail);
+      // NO cleanupWorktree call: `won` is still null — nothing of watch's
+      // own survived `runBestOf`, which already cleaned every attempt it
+      // owned (losers as it went, and there is no winner to keep here).
+      return;
+    }
+
+    const winner = result.winner;
+    won = { worktree: winner.worktree, branch: winner.branch }; // still spf/fanout/*
+    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
+
+    // RENAME (§8.3): `spf/fanout/*` branches are never pushed by SPF
+    // (`core/fanout.ts`'s own stated contract) — pushing one from watch
+    // would contradict the module this composes. Renaming preserves
+    // everything downstream that reads a branch name (WatchMarker.branch,
+    // the PR head, finishReviews' cleanup, the Jira/Bitbucket branch-name
+    // auto-link). Order matters: `createBranch` (a `git checkout -b` INSIDE
+    // the winner's worktree) must run before `deleteLocalBranch` on the old
+    // name, because git refuses to delete a branch checked out in a
+    // worktree — the winner's own worktree is that checkout until this line
+    // runs. `createBranch` CAN throw (most commonly: the canonical name
+    // already exists) — the pre-sweep above is what keeps that name free by
+    // the time this runs; if it still throws, `won` has not been reassigned
+    // yet, so the catch below cleans the pre-rename pair, correctly.
+    const wtGit = deps.worktreeGit(winner.worktree);
+    wtGit.createBranch(branch);
+    deps.git.deleteLocalBranch(winner.branch);
+    won = { worktree: winner.worktree, branch };
+    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
+
+    const review = fanout.reviewFor({ cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions });
+
+    // `won` stays set from here on — openPrForWinner catches nothing, so
+    // this function's own catch (below) is the only cleanup for a throw
+    // from push/openPr/writeMarker/transition/notify inside it, exactly as
+    // runIssueSingle's catch is for the single lane.
+    await openPrForWinner(deps, issue, {
+      branch: won.branch,
+      worktreePath: won.worktree,
+      adwId: winner.adw_id,
+      diffBase: baseSha,
+      reviewRequired: review.reviewRequired,
+      reviewSummary: review.reviewSummary,
+      extraNotifyFields: [["fanout", `${n} attempts, won by ${winner.adw_id}`]],
+    });
+  } catch (error) {
+    const message = (error as Error).message;
+    deps.log(`watch: ${issue.id}: error: ${message}`);
+    deps.notify({
+      kind: "watch_error",
+      level: "error",
+      title: `issue ${issue.id} errored`,
+      detail: message,
+      fields: [["issue", issue.id], ["title", issue.title]],
+    });
+    await deps.provider.transition(issue, "blocked", `spf watch error: ${message}`).catch(() => undefined);
+    cleanupWorktree(deps, won);
+  }
+}
+
+/**
+ * Today's single-dispatch path — `runIssue`'s entire body before fan-out
+ * existed, moved intact with its post-win tail extracted into
+ * `openPrForWinner` above: same statements, same order, same values. This is
+ * what makes `watch.fanout.n: 1` (the default) a no-op for the running
+ * daemon: same adw_id, same worktree, same fetch semantics, same marker,
+ * same PR, same notifications as before this feature existed.
+ */
+async function runIssueSingle(deps: WatchDeps, issue: Issue): Promise<void> {
   const branch = branchNameFor(issue);
   const worktreePath = worktreePathFor(deps, issue);
   const adwId = `issue-${issue.id}`;
@@ -761,57 +1154,13 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
       return;
     }
 
-    const wtGit = deps.worktreeGit(worktreePath);
-    if (wtGit.diffFiles(`origin/${deps.baseBranch}`).length === 0) {
-      deps.log(`watch: ${issue.id}: chain succeeded but committed nothing — blocked`);
-      deps.notify({
-        kind: "issue_blocked",
-        level: "notice",
-        title: `issue ${issue.id} blocked`,
-        detail: `Chain "${deps.chain}" (adw_id ${adwId}) completed but left no committed changes.`,
-        fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain], ["adw_id", adwId]],
-      });
-      await deps.provider.transition(issue, "blocked", `Chain "${deps.chain}" (adw_id ${adwId}) completed but left no committed changes.`);
-      cleanupWorktree(deps, { worktree: worktreePath, branch });
-      return;
-    }
-
-    wtGit.push("origin", branch);
-    // The human merging this PR sees whatever the reviewer found — or, if
-    // nothing reviewed this change at all, is told that plainly rather than
-    // left to assume a silent approval. `reviewSummary` is already
-    // sanitized/truncated by the caller (see runChain's own doc comment).
-    const reviewLine = result.reviewSummary
-      ? result.reviewSummary
-      : result.reviewRequired
-        ? "Reviewer ran, but no verdict could be read back from the session data."
-        : `Nothing reviewed this change — chain \`${deps.chain}\` has no reviewer step.`;
-    // No cross-linking magic keyword here on purpose (a code host paired
-    // with a different tracker has no "Closes #n" convention to hook into
-    // — see provider.ts) — the issue id in the title/body is plain text
-    // for humans, and, on a Jira+Bitbucket pairing, exactly what Jira's own
-    // Bitbucket integration scans for to link the PR automatically.
-    const pr = await deps.codeHost.openPr({
+    await openPrForWinner(deps, issue, {
       branch,
-      title: `${issue.title} (${issue.id})`,
-      body: `Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${adwId}\`, issue ${issue.id}.\n\n${reviewLine}`,
-      base: deps.baseBranch,
-    });
-    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, pr: pr.number, attempt: 0 });
-    await deps.provider.transition(issue, "review");
-    deps.log(`watch: ${issue.id}: opened PR #${pr.number} — review`);
-    deps.notify({
-      kind: "pr_opened",
-      level: "info",
-      title: `PR #${pr.number} opened`,
-      detail: reviewLine,
-      fields: [
-        ["issue", issue.id],
-        ["title", issue.title],
-        ["chain", deps.chain],
-        ["review", result.reviewSummary ? "reviewed" : result.reviewRequired ? "reviewer ran, no verdict" : "not reviewed"],
-      ],
-      url: pr.url || undefined,
+      worktreePath,
+      adwId,
+      diffBase: `origin/${deps.baseBranch}`,
+      reviewRequired: result.reviewRequired,
+      reviewSummary: result.reviewSummary,
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -826,6 +1175,17 @@ async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
     await deps.provider.transition(issue, "blocked", `spf watch error: ${message}`).catch(() => undefined);
     cleanupWorktree(deps, { worktree: worktreePath, branch });
   }
+}
+
+/**
+ * One issue's full claim -> chain -> PR path, run in the background —
+ * `claimNewWork` doesn't await this. `deps.fanout` unset (or `n <= 1`) takes
+ * the single-dispatch path exactly as it always has; `watch.fanout.n > 1`
+ * fans out via `runBestOf` first.
+ */
+async function runIssue(deps: WatchDeps, issue: Issue): Promise<void> {
+  if (!deps.fanout || deps.fanout.n <= 1) return runIssueSingle(deps, issue);
+  return runIssueFanout(deps, issue, deps.fanout);
 }
 
 /**

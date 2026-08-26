@@ -178,6 +178,23 @@ tiering:
 #     - name: builder
 #       sandbox: opensandbox      # unset -> inherit sandbox.backend; "local" -> force local
 
+# `spf watch` — off unless watch.repo is set. `watch.fanout` (best-of-N per
+# claimed issue) is one sub-key of it, shown here in isolation since it's the
+# one with its own budget math; see README.md's "spf watch" section and
+# config.md's "watch" table for the rest of the block (repo, chain,
+# label_prefix, ...). Not to be confused with `sandbox.fanout` above, a
+# different key entirely (worktree vs sandbox execution for `spf fanout`'s
+# own attempts).
+# watch:
+#   chain: plan-build-test       # must have a commit step once fanout.n > 1 — spf watch refuses to start otherwise
+#   concurrency: 2                # issues claimed and run at once — UNCHANGED by fanout
+#   fanout:
+#     n: 1                        # attempts per claimed issue. 1 (default) = single dispatch, a total no-op for the daemon
+#     concurrency: 2               # attempts of ONE issue's fan-out in flight — NOT watch.concurrency, which counts issues.
+#                                  # The two multiply (spf doctor prints the product); disk peak is concurrency x fanout.n,
+#                                  # not concurrency x fanout.concurrency — a kept attempt's worktree survives until every
+#                                  # sibling in its own fan-out has settled.
+
 agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3

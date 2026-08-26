@@ -18,12 +18,18 @@
  * their compiled `.d.ts`), rebased onto the above and re-measured at
  * 597.1kB packed / 1729.6kB unpacked, 186 files: ≤625 KB packed, ≤1.81 MB
  * unpacked — ~5% headroom, same rationale as every prior raise.
+ *
+ * Raised again for watch --n N (sandboxed best-of-N fan-out per claimed
+ * issue) rebased onto #53's `spf loop` landing independently on main in the
+ * same window: 630.0kB packed / 1828.6kB unpacked, 192 files: ≤660 KB
+ * packed, ≤1.92 MB unpacked — ~5% headroom, same rationale as every prior
+ * raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 625_000;
-const UNPACKED_BUDGET = 1_810_000;
+const PACKED_BUDGET = 660_000;
+const UNPACKED_BUDGET = 1_920_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the

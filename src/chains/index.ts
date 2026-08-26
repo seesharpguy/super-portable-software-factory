@@ -60,6 +60,11 @@ export interface ChainDefinition {
   source?: string;
 }
 
+/** Chains eligible to fan out: their derived phase string must show at least one commit step. */
+export function hasCommitStep(phases: string): boolean {
+  return phases.includes("git(commit");
+}
+
 /**
  * Build a step-based ChainDefinition, deriving phases/requiredAgents/
  * requiredSuites from its steps.

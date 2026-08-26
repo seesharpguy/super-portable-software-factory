@@ -441,6 +441,9 @@ watch:
     concurrency: 1          # this lane's own budget, independent of watch.concurrency
 ```
 
+(A third, independent budget lives at `watch.fanout.concurrency` — best-of-N
+attempts per claimed issue, not specs. See "Best-of-N per issue" below.)
+
 On Jira, every `RefinedIssue.kind` (`epic`/`feature`/`story`/`bug`/`task`) maps
 to a real Jira issue type through `watch.jira.issue_types` — defaults
 `epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`,
@@ -586,6 +589,59 @@ graph, and an expand/migrate/contract sequence for wide mechanical refactors
 container/leaf shape that skill left as prose convention rather than a
 checked rule, now also enforcing that a refinement never publishes issues and
 raises questions in the same round.
+
+### Best-of-N per issue (`watch.fanout`)
+
+`spf fanout` runs N sibling attempts of one prompt and lets code pick the
+winner (`pickBest`: succeeded > fewest gate failures > most gate passes >
+lowest cost > fewest tokens > lowest wall time > adw_id, see the `spf fanout`
+section above). `watch.fanout` is that same mechanism pointed at `spf watch`'s
+per-issue dispatch: a claimed issue runs `n` sibling attempts instead of one,
+and everything downstream of the winner — push, PR, review digest, marker,
+transition, notify — is the same code that already runs for a single attempt.
+
+```yaml
+watch:
+  repo: owner/name
+  chain: plan-build-test    # must have a commit step once n > 1 — see below
+  concurrency: 2             # issues claimed and run at once — UNCHANGED meaning
+  fanout:
+    n: 1                     # attempts per claimed issue. 1 (the default) = today's single dispatch, no-op for the daemon
+    concurrency: 2            # attempts of ONE issue's fan-out in flight — NOT watch.concurrency
+```
+
+Two budgets, two names, on purpose: `watch.concurrency` counts **issues** in
+flight (unchanged); `watch.fanout.concurrency` counts **attempts of one
+issue's fan-out** in flight. They multiply rather than share one number — an
+operator who wants "2 issues at a time, 1 attempt each" (serialize attempts,
+keep issue-level parallelism) can say exactly that by setting
+`fanout.concurrency: 1`, which a single shared knob couldn't express. `spf
+doctor`'s `watch.fanout` line prints the product (`concurrency × fanout.concurrency`
+chain runs in flight) so nobody has to compute it by hand.
+
+**Disk, not just chain runs.** `fanout.concurrency` bounds attempts *in
+flight*; it does **not** bound worktrees *on disk*. A successful attempt's
+worktree is kept until every sibling in its fan-out has settled (it's still a
+selection candidate), so peak disk per wave is `watch.concurrency ×
+watch.fanout.n` full checkouts, not `watch.concurrency × watch.fanout.concurrency`
+— at `concurrency: 4, fanout.n: 8` that's 32 working copies at once under
+`worktreesDir` (`~/.spf/watch/<repo>/worktrees`). Plan disk against `n`, not
+against `fanout.concurrency`.
+
+`n > 1` requires `chain` to have a commit step — `spf watch` refuses to start
+otherwise. The reason is sharper than `spf fanout`'s own version of this
+check: best-of-N force-removes every losing attempt's worktree once a winner
+is picked, `--force` included, and a chain that never commits leaves its
+entire payload as uncommitted edits — fan-out would destroy N-1 candidates
+outright rather than just fail one attempt. `n: 1` has no such requirement (a
+chain that commits nothing is handled the same honest way it always has been:
+blocked, worktree cleaned, nothing discarded).
+
+`n: 1` (the default) changes nothing about a running daemon's observable
+behaviour — same adw_id, same branch, same worktree, same fetch semantics,
+same marker, same PR. `spf doctor` still prints one informational
+`watch.fanout` line either way, so the posture is visible even when best-of-N
+is off.
 
 ### GitHub (`issue_provider: github` and/or `code_host: github`)
 
