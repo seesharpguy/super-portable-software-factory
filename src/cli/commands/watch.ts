@@ -79,12 +79,13 @@ export function formatReviewDigest(review: ReviewOutputT): string {
 }
 
 /**
- * Shared by `watch` and `watch init`: resolve config into an `IssueProvider`
- * — checking only what BOTH need. `watch`'s own extra checks (a real git
- * repo, a registered chain) don't apply to seeding labels. Prints its own
+ * Shared by `watch`, `watch init`, and `loop`'s `--issue` flag: resolve
+ * config into an `IssueProvider` — checking only what every caller needs.
+ * `watch`'s own extra checks (a real git repo, a registered chain) don't
+ * apply to seeding labels or to a one-shot issue fetch. Prints its own
  * error and returns `null` on failure — the caller just needs to `return 1`.
  */
-function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
+export function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
   if (cfg.watch.issue_provider === "github") {
     // `issue_repo` (falling back to `repo`) — NOT `repo` alone — because
     // `repo` always names `code_host`'s own repo (see WatchConfigSchema's

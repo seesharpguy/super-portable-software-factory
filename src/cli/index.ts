@@ -28,6 +28,7 @@ import { abortCommand } from "./commands/abort.ts";
 import { uiCommand } from "./commands/ui.ts";
 import { watchCommand, watchInitCommand } from "./commands/watch.ts";
 import { fanoutCommand } from "./commands/fanout.ts";
+import { loopCommand } from "./commands/loop.ts";
 import { versionCommand } from "./commands/version.ts";
 
 const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
@@ -36,6 +37,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf <chain> "<prompt>" [options]          run a chain (spf run <chain> ... works identically)
   spf fanout <chain> "<prompt>" [--n 3]     best-of-N: N isolated attempts, one deterministic winner branch — YOU merge it, spf never does
   spf fanout --clean <base-adw-id>          remove leftover worktrees/branches from a killed or discarded fanout run
+  spf loop <chain> "<goal>" --until-suite <name> --max N [--issue <id>]   run a chain repeatedly toward a goal until a named quality.suites check passes
   spf estimate <chain> "<prompt>" [--n N]   read-only: planned model routing + a token/cost projection from real trace history — starts nothing, exits 3 if there's no history yet
   spf init [--force] [--yes] [--template <name>] [--no-skills]  interview to seed .spf/spf.config.yaml + .env, and install the Claude Code skill unless --no-skills (--yes/--template skip the interview, not the skill install)
   spf install-skill [--user] [--force]      (re)install the Claude Code skill by hand — spf init already does this
@@ -172,6 +174,9 @@ export async function main(): Promise<void> {
       }
       case "fanout":
         process.exitCode = await fanoutCommand(rest);
+        return;
+      case "loop":
+        process.exitCode = await loopCommand(rest);
         return;
       case "estimate":
         process.exitCode = await estimateCommand(rest);

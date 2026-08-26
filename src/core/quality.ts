@@ -35,7 +35,7 @@ const TAIL_CHARS = 4_000;
 
 export class QualityNotConfigured extends Error {}
 
-interface RunLike {
+export interface RunLike {
   cfg: { quality: QualityConfig };
   phases: Phase[];
   context_handoff_dir: string;
