@@ -136,3 +136,79 @@ test("doctor: a repo-local chain's own owners/suites check is unaffected by the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── SPF #15 PR B — §5.5's sandbox-count table, §6.1's credential grant line ─
+
+test("doctor: sandbox cost for plan-build-test-quality under scope: agent reports 2 (planner + builder), the §5.5 counting rule — not the 3-agent roster, not phase count", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      "sandbox:\n  backend: opensandbox\n  image: debian-git\n  opensandbox:\n    base_url: http://127.0.0.1:8090\n",
+    );
+    const report = await runDoctor(dir);
+    const costCheck = report.checks.find((c) => c.name === 'sandbox cost: chain "plan-build-test-quality"');
+    assert.ok(costCheck, "expected a sandbox-cost check for plan-build-test-quality");
+    assert.match(costCheck!.detail, /^2 sandbox\(es\) per attempt under scope: agent/);
+    assert.match(costCheck!.detail, /dispatched agents: planner, builder\)/, `must name exactly planner+builder, not the whole roster: ${costCheck!.detail}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: sandbox cost for plan-build-test-quality under scope: run collapses to 1 (one container per attempt, not per agent)", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      "sandbox:\n  backend: opensandbox\n  scope: run\n  image: debian-git\n  opensandbox:\n    base_url: http://127.0.0.1:8090\n  env_allowlist: []\n",
+    );
+    const report = await runDoctor(dir);
+    const costCheck = report.checks.find((c) => c.name === 'sandbox cost: chain "plan-build-test-quality"');
+    assert.ok(costCheck);
+    assert.match(costCheck!.detail, /^1 sandbox\(es\) per attempt under scope: run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: the credential grant line prints the static broker's honest describe() — key NAMES only, per non-local agent", async () => {
+  const dir = tmpRepo();
+  try {
+    process.env["SPF_DOCTOR_TEST_TOKEN"] = "leak-me-not";
+    writeSpfConfig(
+      dir,
+      "sandbox:\n  backend: opensandbox\n  image: debian-git\n  opensandbox:\n    base_url: http://127.0.0.1:8090\n" +
+        "  env_allowlist: [SPF_DOCTOR_TEST_TOKEN]\n",
+    );
+    const report = await runDoctor(dir);
+    const grantCheck = report.checks.find((c) => c.name === 'agent "builder" credential grant');
+    assert.ok(grantCheck, "expected a credential-grant line for the builder agent");
+    assert.equal(grantCheck!.ok, true);
+    assert.match(grantCheck!.detail, /static broker/);
+    assert.match(grantCheck!.detail, /SPF_DOCTOR_TEST_TOKEN/);
+    assert.ok(!grantCheck!.detail.includes("leak-me-not"), `credential grant line must never print a value: ${grantCheck!.detail}`);
+  } finally {
+    delete process.env["SPF_DOCTOR_TEST_TOKEN"];
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: an unregistered sandbox.credentials.broker fails the credential grant check, roster-wide, naming the known registry", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      "sandbox:\n  backend: opensandbox\n  image: debian-git\n  opensandbox:\n    base_url: http://127.0.0.1:8090\n" +
+        "  credentials:\n    broker: openrouter\n",
+    );
+    const report = await runDoctor(dir);
+    const grantCheck = report.checks.find((c) => c.name === 'agent "builder" credential grant');
+    assert.ok(grantCheck);
+    assert.equal(grantCheck!.ok, false);
+    assert.match(grantCheck!.detail, /openrouter/);
+    assert.match(grantCheck!.detail, /static/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

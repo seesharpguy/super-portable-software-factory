@@ -35,8 +35,8 @@
 import type { FileStat, SandboxDriver, SandboxFactory } from "@flue/runtime";
 import { SandboxDiedError, sandboxFromDriver } from "@flue/runtime";
 import type { SandboxSpec } from "./data_types.ts";
-import { getLease, preflight, registerLease, renewLease, seedViaTransport } from "./sandbox.ts";
-import type { SandboxTransport } from "./sandbox.ts";
+import { getLease, preflight, registerLease, renewLease, seedViaTransport, staticBroker } from "./sandbox.ts";
+import type { CredentialBroker, CredentialGrant, SandboxTransport } from "./sandbox.ts";
 import type {
   OpenSandboxCommandOptions,
   OpenSandboxConnectionConfig,
@@ -326,11 +326,15 @@ function transportFromDriver(driver: SandboxDriver, spec: SandboxSpec): SandboxT
   };
 }
 
-/** @internal not yet implemented in this build — see this module's header comment. */
-export function openSandboxDriver(spec: SandboxSpec, load: SdkLoader = loadOpenSandboxSdk): SandboxDriver {
+/**
+ * `broker` defaults to `staticBroker` — the only broker this build registers
+ * — so every existing caller (§8.3a's tests included) sees a create `env`
+ * byte-identical to `spec.env`, exactly as PR A shipped it.
+ */
+export function openSandboxDriver(spec: SandboxSpec, load: SdkLoader = loadOpenSandboxSdk, broker: CredentialBroker = staticBroker): SandboxDriver {
   let nativePromise: Promise<OpenSandboxInstance> | null = null;
   const ensureNative = (): Promise<OpenSandboxInstance> => {
-    if (!nativePromise) nativePromise = createNativeSandbox(spec, load);
+    if (!nativePromise) nativePromise = createNativeSandbox(spec, load, broker).then(({ native }) => native);
     return nativePromise;
   };
   return buildDriver(ensureNative, spec);
@@ -364,13 +368,21 @@ function connectionConfigFor(spec: SandboxSpec): OpenSandboxConnectionConfig {
 }
 
 /**
- * PR A creates with `spec.env` VERBATIM — no broker exists in this PR slice
- * (design §4.1's env table; §11's "Deliberately NOT in A"). `sandboxSpecFor`
- * already resolved it as `sandbox.env_allowlist ∩ (agent.env_allowlist ??
- * everything)` for exactly the agent this lease is keyed to.
+ * PR B (design §6.1): the broker's `issue()` is the only thing standing
+ * between `sandboxSpecFor`'s already-resolved `spec.env` (`sandbox.env_allowlist
+ * ∩ (agent.env_allowlist ?? everything)`, for exactly the agent this lease is
+ * keyed to) and the provider's create call. `static` — the only broker this
+ * build registers — returns `spec.env` VERBATIM, so this is observably a
+ * no-op on the env PLANE (§11's "Deliberately NOT in A" is still true of the
+ * VALUES; what's new is the seam, the grant, and its ordered revoke step).
+ * Awaited HERE, inside `createNativeSandbox` — itself only ever called from
+ * an already-async boundary (`createSandbox`'s MISS branch, or
+ * `openSandboxDriver`'s lazily-memoized `nativePromise`) — never inside
+ * `factoryFor`, which stays sync (§9).
  */
-function createEnv(spec: SandboxSpec): Record<string, string> {
-  return { ...spec.env };
+async function createEnv(spec: SandboxSpec, broker: CredentialBroker): Promise<{ env: Record<string, string>; grant: CredentialGrant }> {
+  const grant = await broker.issue(spec);
+  return { env: { ...grant.env }, grant };
 }
 
 /**
@@ -386,25 +398,38 @@ function sanitizeMetadataLabelValue(value: string): string {
   return replaced.replace(/^[^A-Za-z0-9]+/, "").replace(/[^A-Za-z0-9]+$/, "") || "_";
 }
 
-async function createNativeSandbox(spec: SandboxSpec, load: SdkLoader): Promise<OpenSandboxInstance> {
+async function createNativeSandbox(
+  spec: SandboxSpec,
+  load: SdkLoader,
+  broker: CredentialBroker,
+): Promise<{ native: OpenSandboxInstance; grant: CredentialGrant }> {
   const sdk = await load();
+  const { env, grant } = await createEnv(spec, broker);
   const metadataPrefix = spec.opensandbox.metadata_prefix;
-  return sdk.Sandbox.create({
-    connectionConfig: connectionConfigFor(spec),
-    image: spec.image,
-    env: createEnv(spec),
-    timeoutSeconds: spec.lifetime_seconds,
-    metadata: {
-      [`${metadataPrefix}.adw_id`]: sanitizeMetadataLabelValue(spec.adw_id),
-      [`${metadataPrefix}.agent`]: sanitizeMetadataLabelValue(spec.agent),
-      [`${metadataPrefix}.lease_key`]: sanitizeMetadataLabelValue(spec.lease_key),
-    },
-    networkPolicy: {
-      defaultAction: spec.egress.default,
-      egress: spec.egress.allow.map((target) => ({ action: "allow" as const, target })),
-    },
-    readyTimeoutSeconds: readyTimeoutSecondsFor(spec),
-  });
+  try {
+    const native = await sdk.Sandbox.create({
+      connectionConfig: connectionConfigFor(spec),
+      image: spec.image,
+      env,
+      timeoutSeconds: spec.lifetime_seconds,
+      metadata: {
+        [`${metadataPrefix}.adw_id`]: sanitizeMetadataLabelValue(spec.adw_id),
+        [`${metadataPrefix}.agent`]: sanitizeMetadataLabelValue(spec.agent),
+        [`${metadataPrefix}.lease_key`]: sanitizeMetadataLabelValue(spec.lease_key),
+      },
+      networkPolicy: {
+        defaultAction: spec.egress.default,
+        egress: spec.egress.allow.map((target) => ({ action: "allow" as const, target })),
+      },
+      readyTimeoutSeconds: readyTimeoutSecondsFor(spec),
+    });
+    return { native, grant };
+  } catch (error) {
+    // The grant was issued above; a throwing create() must not strand it —
+    // there is no lease/teardown chain to fall back on here (design §6.1/§6.3).
+    await grant.revoke().catch(() => {});
+    throw error;
+  }
 }
 
 // ── find-or-create (design §4.1's lifecycle pseudocode) ────────────────────
@@ -418,8 +443,15 @@ async function createNativeSandbox(spec: SandboxSpec, load: SdkLoader): Promise<
  */
 const NATIVE_BY_LEASE = new Map<string, { native: OpenSandboxInstance; driver: SandboxDriver }>();
 
-/** @internal not yet implemented in this build — see this module's header comment. */
-export function openSandboxFactory(spec: SandboxSpec, load: SdkLoader = loadOpenSandboxSdk): SandboxFactory {
+/**
+ * `broker` defaults to `staticBroker` — the only broker this build
+ * registers; production callers (`factoryFor`, sandbox.ts) never pass one
+ * explicitly, so this stays a pure default. Tests inject a fake broker to
+ * prove the ordering guarantees in design §11's PR B test list (issue()
+ * happens inside the MISS branch, exactly once per lease; the HIT branch
+ * never re-issues; kill() throwing still runs credentials:revoke).
+ */
+export function openSandboxFactory(spec: SandboxSpec, load: SdkLoader = loadOpenSandboxSdk, broker: CredentialBroker = staticBroker): SandboxFactory {
   return {
     async createSandbox({ id }) {
       const key = spec.lease_key;
@@ -448,7 +480,10 @@ export function openSandboxFactory(spec: SandboxSpec, load: SdkLoader = loadOpen
 
       // MISS — create, preflight, seed, register. Never leaves a lease or a
       // journal entry behind on failure; never leaks the native sandbox either.
-      const native = await createNativeSandbox(spec, load);
+      // `broker.issue(spec)` is awaited exactly once here, HERE only — never
+      // re-issued on a later HIT (design §6.1: the cached grant and its
+      // revoke step stay as they are).
+      const { native, grant } = await createNativeSandbox(spec, load, broker);
       const driver = buildDriver(() => Promise.resolve(native), spec);
       const transport = transportFromDriver(driver, spec);
       try {
@@ -463,16 +498,17 @@ export function openSandboxFactory(spec: SandboxSpec, load: SdkLoader = loadOpen
           egress: () => native.getEgressPolicy(),
           renew: (seconds: number) => native.renew(seconds),
         };
-        // Position 1 and (what will be) position 3 — position 2 stays free
-        // for PR B's `credentials:revoke` (design §4.3/§11): a step's own
-        // failure never skips the next one (`teardownLease` in `sandbox.ts`).
-        // `provider:uncache` rides after both, at (what will be) position 4:
-        // otherwise this module's own NATIVE_BY_LEASE cache — and the native
-        // SDK handle (and its keep-alive undici pool) it holds — is retained
-        // for the process lifetime; a long-lived `spf watch` accumulates one
-        // entry per agent per issue forever.
+        // Position 1, 2 (PR B's credentials:revoke — the slot PR A left
+        // free), 3, 4: a step's own failure never skips the next one
+        // (`teardownLease` in `sandbox.ts`) — kill() throwing still runs
+        // revoke(). `provider:uncache` rides last: otherwise this module's
+        // own NATIVE_BY_LEASE cache — and the native SDK handle (and its
+        // keep-alive undici pool) it holds — is retained for the process
+        // lifetime; a long-lived `spf watch` accumulates one entry per agent
+        // per issue forever.
         lease.teardown.push(
           { name: "provider:kill", run: () => native.kill() },
+          { name: "credentials:revoke", run: () => grant.revoke() },
           { name: "provider:close", run: () => native.close() },
           { name: "provider:uncache", run: async () => { NATIVE_BY_LEASE.delete(key); } },
         );
@@ -488,7 +524,12 @@ export function openSandboxFactory(spec: SandboxSpec, load: SdkLoader = loadOpen
             }),
         });
       } catch (error) {
+        // preflight/seed/register failed after the grant was already issued
+        // (design §6.1) — never leave a live credential behind a dead
+        // sandbox. Ordered the same as the real teardown chain: kill, then
+        // revoke, then close.
         await native.kill().catch(() => {});
+        await grant.revoke().catch(() => {});
         await native.close().catch(() => {});
         throw error;
       }

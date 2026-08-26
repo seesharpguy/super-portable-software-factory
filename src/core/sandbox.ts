@@ -89,6 +89,90 @@ export interface SandboxLease {
   teardown: TeardownStep[];
 }
 
+// ── credential lifecycle (SPF #15 PR B, design §6) ──────────────────────────
+
+/**
+ * The live grant behind one lease's create-time `env`. `env` is what
+ * `createEnv(spec)` (each adapter's `createSandbox` MISS branch) hands the
+ * provider's create call — the ONLY place `issue()` is ever awaited
+ * (`factoryFor` itself stays sync, §6.1/§9). `describe()` is the honest
+ * one-liner `spf sandbox list`/`doctor` print: key NAMES only, NEVER a
+ * value — the same never-log discipline this file already applies to patch
+ * bytes and handoff content. `revoke()` is pushed as the `credentials:revoke`
+ * teardown step, at position 2 of the chain both adapters left free for it
+ * (see each adapter's MISS branch for the exact splice) — the ordering
+ * guarantee itself (a position-2 step is never skipped because position 1
+ * threw) is `teardownLease`'s, tested against a fake step; this is the real
+ * step riding that proven chain.
+ */
+export interface CredentialGrant {
+  env: Record<string, string>;
+  describe(): string;
+  revoke(): Promise<void>;
+}
+
+/**
+ * `id` is the value `sandbox.credentials.broker` names in config —
+ * `KNOWN_CREDENTIAL_BROKER_IDS` below is the registry `validateSandboxConfig`
+ * (agents.ts) checks an unknown name against, so a typo is a hard config
+ * error rather than a silent fallback to `static` (§6.1). `issue(spec)`
+ * returns a `Promise` on purpose: a real provisioning broker (§6.3 — not
+ * built here, §10 non-goal 2) needs the network, and shaping the interface
+ * around that up front means a future broker is a pure insertion, never a
+ * signature change to this one.
+ */
+export interface CredentialBroker {
+  id: string;
+  issue(spec: SandboxSpec): Promise<CredentialGrant>;
+}
+
+/**
+ * Factored out of `staticBroker.issue()` so `spf doctor`'s per-agent line
+ * (§7 check #9) can print the IDENTICAL sentence a real grant's `describe()`
+ * would, from key NAMES it already resolved from config alone — doctor has
+ * no live `SandboxSpec` and, deliberately, never reads operator-env VALUES
+ * just to build this string.
+ */
+export function describeStaticCredentials(keyNames: string[]): string {
+  const sorted = [...new Set(keyNames)].sort();
+  if (sorted.length === 0) {
+    return "static broker: no credentials issued (sandbox.env_allowlist resolves to none for this agent)";
+  }
+  return (
+    `static broker: ${sorted.length} key(s) copied from the operator environment at create time (${sorted.join(", ")}) — ` +
+    `revoke() clears SPF's own in-memory copy only; the key itself is never rotated or invalidated ` +
+    `(§6.2 — true revocation needs a provider provisioning API, which this build does not have)`
+  );
+}
+
+/**
+ * The ONLY broker registered in this build (§10 non-goal 2; §11's "Deliberately
+ * NOT in A"). `issue()` is the identity on `spec.env` — B is observably a
+ * no-op on the env PLANE (§6.1); what it adds is this seam, the ordered
+ * revoke step, and the describe() line. `revoke()` clears the grant's own
+ * `env` object IN PLACE — it does not, and cannot, un-inject an
+ * already-created container's process environment; §6.2 is explicit that
+ * "revocable" means nothing for a static key, and this is the honest
+ * implementation of that, not a `revoke()` that pretends otherwise.
+ */
+export const staticBroker: CredentialBroker = {
+  id: "static",
+  async issue(spec) {
+    const env: Record<string, string> = { ...spec.env };
+    const keyNames = Object.keys(env).sort();
+    return {
+      env,
+      describe: () => describeStaticCredentials(keyNames),
+      async revoke() {
+        for (const key of Object.keys(env)) delete env[key];
+      },
+    };
+  },
+};
+
+/** The registry `validateSandboxConfig` checks `sandbox.credentials.broker` against (agents.ts). */
+export const KNOWN_CREDENTIAL_BROKER_IDS: readonly string[] = [staticBroker.id];
+
 // ── the lease registry ──────────────────────────────────────────────────────
 
 const NOOP_LOG: SandboxLog = () => {};

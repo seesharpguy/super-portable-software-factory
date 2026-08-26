@@ -71,8 +71,8 @@ import { SandboxOperationUnsupportedError, sandboxFromDriver } from "@flue/runti
 import type { SandboxDriver, SandboxFactory } from "@flue/runtime";
 import type { CloudflareSandboxStub } from "@flue/runtime/cloudflare";
 import type { SandboxSpec } from "./data_types.ts";
-import { getLease, preflight, registerLease, seedViaTransport } from "./sandbox.ts";
-import type { SandboxTransport } from "./sandbox.ts";
+import { getLease, preflight, registerLease, seedViaTransport, staticBroker } from "./sandbox.ts";
+import type { CredentialBroker, SandboxTransport } from "./sandbox.ts";
 
 // ── shell/path helpers (this module's own copy — sandbox.ts's is private,
 // and flue's own cloudflare/index.mjs likewise keeps its own local copy
@@ -471,7 +471,18 @@ export function driverFromCloudflareStub(stub: CloudflareSandboxStub): SandboxDr
  */
 const STUB_BY_LEASE = new Map<string, CloudflareBridgeStub>();
 
-export function cloudflareFactory(spec: SandboxSpec): SandboxFactory {
+/**
+ * `broker` defaults to `staticBroker` — the only broker this build
+ * registers. NOTE: unlike the OpenSandbox adapter, this bridge does not
+ * currently thread ANY `env` into sandbox creation or `exec` (a pre-existing
+ * gap in this file, not something PR B's credential-broker seam changes —
+ * see this module's own header comment for its other Cloudflare-specific
+ * deviations). `broker.issue(spec)` is still called here, on the same MISS
+ * branch, so the credential lifecycle (grant + ordered revoke) is uniform
+ * across backends even though this backend has nothing to hand the grant's
+ * `env` to yet.
+ */
+export function cloudflareFactory(spec: SandboxSpec, broker: CredentialBroker = staticBroker): SandboxFactory {
   const key = spec.lease_key;
   let stub = STUB_BY_LEASE.get(key);
   if (!stub) {
@@ -487,16 +498,31 @@ export function cloudflareFactory(spec: SandboxSpec): SandboxFactory {
         const transport = stubTransport(liveStub);
         await preflight(spec, transport); // git && tar && base64, §4.1 — same three binaries, same named error
         const seeded = await seedViaTransport(spec, transport);
-        const lease = registerLease(key, spec, transport);
-        lease.seeded = seeded;
-        lease.provider_id = await liveStub.ensureSandboxId();
-        // Position 1 — see sandbox.ts's teardown-chain comment: position 2
-        // stays free for PR B's credentials:revoke, so B adds a step rather
-        // than refactoring this one.
-        lease.teardown.push(
-          { name: "cloudflare:destroy", run: () => liveStub.destroy() },
-          { name: "cloudflare:uncache", run: async () => { STUB_BY_LEASE.delete(key); } },
-        );
+        // Awaited once, on this MISS branch only — never re-issued on a
+        // later HIT (design §6.1).
+        const grant = await broker.issue(spec);
+        try {
+          // `ensureSandboxId()` resolved BEFORE `registerLease` on purpose
+          // (design §6.1) — a throwing bridge create must not leave a lease
+          // registered with no teardown steps to revoke the grant it already
+          // holds; a failed `ensureSandboxId()` never creates anything
+          // bridge-side either (it clears its own memoized promise), so no
+          // `cloudflare:destroy` counterpart is needed here.
+          const providerId = await liveStub.ensureSandboxId();
+          const lease = registerLease(key, spec, transport);
+          lease.seeded = seeded;
+          lease.provider_id = providerId;
+          // Position 1, 2 (PR B's credentials:revoke — the slot PR A left
+          // free), 3.
+          lease.teardown.push(
+            { name: "cloudflare:destroy", run: () => liveStub.destroy() },
+            { name: "credentials:revoke", run: () => grant.revoke() },
+            { name: "cloudflare:uncache", run: async () => { STUB_BY_LEASE.delete(key); } },
+          );
+        } catch (error) {
+          await grant.revoke().catch(() => {});
+          throw error;
+        }
       }
       return sb;
     },

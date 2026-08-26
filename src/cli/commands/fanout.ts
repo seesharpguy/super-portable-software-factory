@@ -486,6 +486,15 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
       `         (selection basis: succeeded > fewest gate failures > most gate passes > lowest cost > ` +
         `fewest tokens > lowest wall time (contended under concurrency, last resort) > adw_id)`,
     );
+    // SPF #15 PR B, design §5.5 — the one line of printed posture sandboxing
+    // adds to this contract. `sandbox.fanout: "sandbox"` rides the ordinary
+    // per-attempt SandboxSpec (each attempt's own worktree/adw_id — see
+    // core/agents.ts's sandboxSpecFor); this line just says so, honestly:
+    // the winner's WORKTREE and BRANCH are still local, no matter where the
+    // attempts' agent calls ran.
+    if (cfg.sandbox.fanout === "sandbox" && cfg.sandbox.backend !== "local") {
+      console.log(`attempts ran in ${cfg.sandbox.backend} sandboxes; branch is local`);
+    }
     console.log(`kept:    ${result.winner.worktree}`);
     console.log(`\nSPF does not merge the winner — you do:`);
     console.log(`  git merge ${result.winner.branch}          # or: git cherry-pick <sha> / git diff ${baseBranch}..${result.winner.branch}`);

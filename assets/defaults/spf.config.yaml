@@ -147,7 +147,9 @@ tiering:
 #                                # actually reaches a container is this list INTERSECTED
 #                                # with that agent's own env_allowlist.
 #   credentials:
-#     broker: static             # static is the only broker in this build
+#     broker: static             # static is the only REGISTERED broker in this build — an
+#                                # unrecognized name is a hard validate() failure, never a
+#                                # silent fallback to static
 #   egress:
 #     default: deny              # deny | allow
 #     allow: []                  # hostnames, e.g. ["registry.npmjs.org", "github.com"]
@@ -156,7 +158,10 @@ tiering:
 #     max_seed_bytes: 134217728    # 128 MiB seed archive ceiling
 #     max_mirror_bytes: 4194304    # 4 MiB per handoff-mirror transfer, each direction
 #     mirror: []                  # extra repo-relative paths to sync out that git can't carry
-#   fanout: worktree             # worktree | sandbox (fan-out through sandboxes — later release)
+#   fanout: worktree             # worktree | sandbox — "sandbox" fans out THROUGH sandboxes
+#                                 # too: each attempt gets its own lease(s), keyed on its own
+#                                 # derived <base>-<i> adw_id. The winning branch/worktree stay
+#                                 # local either way.
 #   opensandbox:
 #     base_url: http://127.0.0.1:8090
 #     api_key_env: OPENSANDBOX_API_KEY   # env KEY NAME, never the key itself

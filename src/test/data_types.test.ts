@@ -567,6 +567,31 @@ test("sandbox merges key-by-key across two layered config files, and nested open
   }
 });
 
+test("sandbox.credentials.broker survives layered merge as a whole-object replace, same as opensandbox/cloudflare's own keys", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-credentials-merge-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "sandbox:\n  backend: opensandbox\n  credentials:\n    broker: static\n");
+    // The override touches a DIFFERENT sandbox key — credentials must survive
+    // untouched (key-by-key at the `sandbox:` level), exactly like the
+    // opensandbox/cloudflare test above.
+    writeFileSync(override, "sandbox:\n  workspace_dir: /custom-workspace\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.sandbox.credentials.broker, "static");
+    assert.equal(cfg.sandbox.workspace_dir, "/custom-workspace");
+
+    // An override that DOES touch credentials: is a whole-object replace,
+    // same rule as opensandbox/cloudflare.
+    const override2 = join(dir, "override2.yaml");
+    writeFileSync(override2, "sandbox:\n  credentials:\n    broker: mystery\n");
+    const cfg2 = loadConfig([base, override2]);
+    assert.equal(cfg2.sandbox.credentials.broker, "mystery", "not restricted to a fixed picklist at the schema layer — validateSandboxConfig is the enforcement point (§6.1)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("agents[].sandbox survives mergeAgentLists and is NOT back-filled from defaults — the back-fill list (agents.ts) stays the fixed literal it always was", () => {
   const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-agent-override-test-"));
   try {

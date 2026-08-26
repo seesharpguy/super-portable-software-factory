@@ -534,11 +534,22 @@ export function validateSandboxConfig(cfg: SFConfig, agent: AgentConfig): string
     }
   }
 
-  // sandbox.fanout: "sandbox" is PR B (fan-out THROUGH sandboxes). Parsed
-  // and schema-valid in this PR; hard-rejected here so the operator is
-  // never told nothing — never a silent degrade back to worktrees.
-  if (sb.fanout === "sandbox") {
-    problems.push('sandbox.fanout: "sandbox" is not supported yet in this release — only "worktree" is honored (fan-out through sandboxes ships in a later PR)');
+  // sandbox.fanout: "sandbox" (fan-out THROUGH sandboxes) is honored as of
+  // PR B — src/cli/commands/fanout.ts's runAttempt already derives each
+  // attempt's own SandboxSpec from that attempt's own worktree/adw_id via
+  // the ordinary sandboxSpecFor() path (src/core/fanout.ts is unmodified;
+  // see its module comment). Nothing to reject here any more.
+
+  // SPF #15 PR B (§6.1) — an unregistered credential broker name is a hard
+  // config error, never a silent fallback to "static": the only broker this
+  // build ever registers. Compared against the REGISTRY (sandbox.ts), not a
+  // hardcoded literal, so a future broker (§6.3) is a code addition there,
+  // not a second place this string has to be kept in sync.
+  if (!sandbox.KNOWN_CREDENTIAL_BROKER_IDS.includes(sb.credentials.broker)) {
+    problems.push(
+      `sandbox.credentials.broker ${JSON.stringify(sb.credentials.broker)} is not a registered credential broker — ` +
+        `known: ${sandbox.KNOWN_CREDENTIAL_BROKER_IDS.join(", ")} (never falls back to "static" silently)`,
+    );
   }
 
   if (sb.max_total_lifetime_seconds < sb.lifetime_seconds) {
