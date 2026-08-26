@@ -11,6 +11,7 @@ import * as agentFlue from "../core/agent_flue.ts";
 import * as notify from "../core/notify/notifier.ts";
 import * as otel from "../core/otel.ts";
 import * as paths from "../core/paths.ts";
+import * as sandbox from "../core/sandbox.ts";
 import { findChain, registerRepoChains, repoChainProblems } from "../chains/index.ts";
 import { loadRepoChains } from "../chains/repo_chains.ts";
 import { dispatchChain, usageFor } from "./commands/run.ts";
@@ -241,6 +242,14 @@ export async function main(): Promise<void> {
     // agent_cc.ts's shutdown() just kills any still-running claude children.
     await agentFlue.shutdown();
     await agentCc.shutdown();
+    // Belt-and-braces alongside the per-run `sandbox.withRunScope` wraps in
+    // dispatchChain/watch/fanout: catches any sandboxed run's lease this
+    // process still holds when the CLI exits (a per-run wrap that itself
+    // throws before reaching its own teardown, a chain invoked through a
+    // path that predates a wrap, etc.) — without this, `backend: opensandbox`
+    // + default `scope: agent` leaks one container per dispatched agent for
+    // the process's entire lifetime. A no-op when no sandbox was ever created.
+    await sandbox.teardownAll();
     // A no-op if notifications are off/unconfigured — awaits any in-flight
     // webhook POST so a fast-exiting command doesn't drop it mid-flight.
     await notify.flushAll();

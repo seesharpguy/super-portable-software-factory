@@ -22,7 +22,9 @@ import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
-import type { SFConfig } from "../../core/data_types.ts";
+import * as sandbox from "../../core/sandbox.ts";
+import { loadOpenSandboxSdk } from "../../core/sandbox_opensandbox.ts";
+import type { AgentConfig, SFConfig } from "../../core/data_types.ts";
 import { isInteractive } from "../ask.ts";
 import { paint as paintPlain } from "../../core/console.ts";
 
@@ -210,6 +212,43 @@ async function probeAnthropicMessages(base: string, model: string): Promise<Prob
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * `GET {base}/health`, parsed for the OpenSandbox control plane's own
+ * positive signal (`{"status":"healthy"}`) — checked in ADDITION to the
+ * HTTP status, because a 200 from something else entirely (the spike's own
+ * "unrelated process on 8090" trap — see check #3/#5 below) is not the same
+ * finding as a genuinely healthy control plane; a 404 specifically is that
+ * trap's own signature. Never throws.
+ */
+async function probeOpenSandboxHealth(
+  baseUrl: string,
+): Promise<{ ok: true; status: number; healthy: boolean } | { ok: false; error: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    let healthy = false;
+    if (res.status === 200) {
+      try {
+        const body = (await res.json()) as { status?: string };
+        healthy = body?.status === "healthy";
+      } catch {
+        healthy = false;
+      }
+    }
+    return { ok: true, status: res.status, healthy };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Loopback host check for #4/#5's "is this control plane reachable from off-box" gate — same shape as the OTel `insecure` check above. */
+function isLoopbackUrl(url: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(url);
 }
 
 export async function doctorCommand(argv: string[]): Promise<number> {
@@ -592,6 +631,349 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     // shows — printed here so the chain's author can eyeball what they
     // actually wrote without a second command.
     check(report, `repo chain "${chain.name}" phases`, true, chain.phases, "info");
+  }
+
+  // ── Sandbox backends (SPF #15) ──────────────────────────────────────────
+  // Gated on the RESOLVED backend, per check — not on "not local" — the same
+  // usesOllamaFlue precedent above (:318-320): a repo running only
+  // backend: cloudflare imports no OpenSandbox SDK at all, so a coarse gate
+  // would fail #2 on a package that backend never loads. #2-6 fire only when
+  // some agent resolves to "opensandbox"; #7-8 only "cloudflare". #1/#9-17
+  // are backend-agnostic and roster-wide (agents.validate() above is
+  // chain-scoped to the roster only because doctor passed the WHOLE roster
+  // as `required` — see the "roster + suites validate" check — but #12-15/
+  // #17 are reported here too, on purpose, so the specific rule that failed
+  // has its own name rather than one line buried in a combined error).
+  {
+    const resolvedBackend = (agent: AgentConfig): string => agent.sandbox ?? cfg.sandbox.backend;
+    const nonLocalAgents = cfg.agents.filter((a) => resolvedBackend(a) !== "local");
+    const openSandboxAgents = nonLocalAgents.filter((a) => resolvedBackend(a) === "opensandbox");
+    const cloudflareAgents = nonLocalAgents.filter((a) => resolvedBackend(a) === "cloudflare");
+
+    // #1 — backend/scope/dirs/image/fanout, plus the resulting sandbox count
+    // PER CHAIN this repo can run: distinct agents the chain DISPATCHES
+    // (kind: "agent" phases only) that resolve non-local, deduplicated by
+    // name, via resolveRequiredAgents — never chain.phases or the whole
+    // roster, both of which over-count (engineer/code phases like
+    // request/quality/commit dispatch no agent, and a fix loop's revise step
+    // reuses its builder's own lease rather than opening a second one).
+    check(
+      report,
+      "sandbox.backend",
+      true,
+      `backend=${cfg.sandbox.backend}, scope=${cfg.sandbox.scope} (default: agent), workspace_dir=${cfg.sandbox.workspace_dir}, ` +
+        `scratch_dir=${cfg.sandbox.scratch_dir}, handoff_dir=${cfg.sandbox.handoff_dir}, image=${cfg.sandbox.image || "(none)"}, ` +
+        `fanout=${cfg.sandbox.fanout}` +
+        (nonLocalAgents.length > 0
+          ? `; per-agent overrides to a non-local backend: ${nonLocalAgents.map((a) => `${a.name}(${resolvedBackend(a)})`).join(", ")}`
+          : "; no agent resolves to a non-local backend"),
+      "info",
+    );
+    if (nonLocalAgents.length > 0) {
+      for (const chain of allChains()) {
+        const required = resolveRequiredAgents(chain, {});
+        const sandboxed = required.filter((name) => {
+          const agent = cfg.agents.find((a) => a.name === name);
+          return agent !== undefined && resolvedBackend(agent) !== "local";
+        });
+        if (sandboxed.length === 0) continue;
+        const perAttempt = cfg.sandbox.scope === "run" ? 1 : sandboxed.length;
+        check(
+          report,
+          `sandbox cost: chain "${chain.name}"`,
+          true,
+          `${perAttempt} sandbox(es) per attempt under scope: ${cfg.sandbox.scope} (dispatched agents: ${sandboxed.join(", ")}) — multiply by --n for a fan-out estimate`,
+          "info",
+        );
+      }
+    }
+
+    // #2 — provider SDK present, opensandbox only, hard ✗. MUST go through
+    // the adapter's own indirected loader (never doctor's own `import()`
+    // with a literal specifier — that fails `tsc` with TS2307 on every
+    // machine, same class of bug as a literal specifier in the adapter
+    // itself). Same static, network-free misconfiguration class as the
+    // "claude CLI" check above (SPF_CLAUDE_CMD on PATH).
+    if (openSandboxAgents.length > 0) {
+      try {
+        await loadOpenSandboxSdk();
+        check(report, "opensandbox SDK present", true, "@alibaba-group/opensandbox loaded");
+      } catch (error) {
+        check(report, "opensandbox SDK present", false, (error as Error).message);
+      }
+    }
+
+    // #3 — opensandbox control plane reachability, info/warn (never a hard
+    // failure — the rule every reachability probe in this file follows). A
+    // 404 specifically is the spike's own trap: something ELSE listening on
+    // that port, not this control plane being down.
+    let openSandboxHealthResult: Awaited<ReturnType<typeof probeOpenSandboxHealth>> | null = null;
+    if (openSandboxAgents.length > 0 && !flags["no-probe"]) {
+      const baseUrl = cfg.sandbox.opensandbox.base_url.replace(/\/+$/, "");
+      openSandboxHealthResult = await probeOpenSandboxHealth(baseUrl);
+      check(
+        report,
+        "opensandbox control plane",
+        true,
+        !openSandboxHealthResult.ok
+          ? `unreachable: GET ${baseUrl}/health -> ${openSandboxHealthResult.error}`
+          : openSandboxHealthResult.healthy
+            ? `reachable: GET ${baseUrl}/health -> HTTP ${openSandboxHealthResult.status} {"status":"healthy"}`
+            : openSandboxHealthResult.status === 404
+              ? `GET ${baseUrl}/health -> HTTP 404 — usually means something ELSE is listening on this port, not this control plane (the spike hit exactly this on 8090 and remapped to 8095 — a troubleshooting note, not a default; see check #5)`
+              : `GET ${baseUrl}/health -> HTTP ${openSandboxHealthResult.status}, not the expected {"status":"healthy"}`,
+        openSandboxHealthResult.ok && openSandboxHealthResult.healthy ? "info" : "warn",
+      );
+    }
+
+    // #4 — API key posture, opensandbox only. Prints the key NAME only,
+    // never the value. warn (not a hard fail) when unset AND the control
+    // plane is on a routable (non-loopback) address — an insecure control
+    // plane reachable off-box.
+    if (openSandboxAgents.length > 0) {
+      const keyEnv = cfg.sandbox.opensandbox.api_key_env;
+      const set = Boolean(process.env[keyEnv]);
+      const baseUrl = cfg.sandbox.opensandbox.base_url;
+      const routable = !isLoopbackUrl(baseUrl);
+      check(
+        report,
+        "opensandbox API key posture",
+        true,
+        set
+          ? `${keyEnv} is set`
+          : routable
+            ? `${keyEnv} is NOT set, and sandbox.opensandbox.base_url (${baseUrl}) is a routable address — an insecure control plane reachable off-box`
+            : `${keyEnv} is not set (fine for a loopback control plane)`,
+        set || !routable ? "info" : "warn",
+      );
+
+      // #5 — [docker].host_ip note. CONDITIONAL, on purpose: this gotcha
+      // applies only to a containerized control plane; the README-canonical
+      // `uvx opensandbox-server` host process needs nothing here, and
+      // warning on plain loopback would be pure noise. Fires only when #3's
+      // probe failed/timed out AND base_url is loopback.
+      const probeFailed = openSandboxHealthResult !== null && (!openSandboxHealthResult.ok || !openSandboxHealthResult.healthy);
+      if (probeFailed && isLoopbackUrl(baseUrl)) {
+        check(
+          report,
+          "[docker].host_ip note",
+          true,
+          "if your control plane runs in a container (the compose route), its readiness probes and this host-side client must resolve [docker].host_ip to the SAME reachable address — the LAN IP (`ipconfig getifaddr en0`) is the only value that works for both; getting it wrong produces a 30s \"Egress sidecar did not become ready\". If you are running `uvx opensandbox-server` on the host, ignore this.",
+          "info",
+        );
+      }
+
+      // #6 — image pre-pull + readiness reminder, info only.
+      check(
+        report,
+        "opensandbox image pre-pull",
+        true,
+        `the first sandbox of each kind pulls execd/egress lazily (30-90s cold, sub-2s warm) — this is a READINESS wait, separate from sandbox.request_timeout_seconds (${cfg.sandbox.request_timeout_seconds}s, the client-side HTTP timeout on control-plane calls); confusing the two is how "Egress sidecar did not become ready" gets misdiagnosed as an HTTP timeout. skipHealthCheck is deliberately not used.`,
+        "info",
+      );
+    }
+
+    // #7 — cloudflare config, hard ✗ if selected and bridge_url/api_token_env
+    // unset. Static, knowable without network. `bridge_url`/`api_token_env`
+    // are sandbox-wide (not per-agent), so this is naturally roster-wide.
+    if (cloudflareAgents.length > 0) {
+      const bridgeUrl = cfg.sandbox.cloudflare.bridge_url.trim();
+      const tokenEnv = cfg.sandbox.cloudflare.api_token_env.trim();
+      check(
+        report,
+        "cloudflare config",
+        Boolean(bridgeUrl) && Boolean(tokenEnv),
+        !bridgeUrl
+          ? "sandbox.cloudflare.bridge_url is empty — required when the resolved backend is \"cloudflare\""
+          : !tokenEnv
+            ? "sandbox.cloudflare.api_token_env is unset — required when the resolved backend is \"cloudflare\""
+            : `bridge_url=${bridgeUrl}, api_token_env=${tokenEnv}${process.env[tokenEnv] ? " (set)" : " (NOT set)"}`,
+      );
+
+      // #8 — cloudflare bridge reachability, info/warn. The bridge's own
+      // unauthenticated `GET /health` (design doc §4.2/O-2).
+      if (bridgeUrl && !flags["no-probe"]) {
+        const result = await probeGet(`${bridgeUrl.replace(/\/+$/, "")}/health`);
+        check(
+          report,
+          "cloudflare bridge reachability",
+          true,
+          result.ok
+            ? `reachable: GET ${bridgeUrl}/health -> HTTP ${result.status}`
+            : `unreachable: GET ${bridgeUrl}/health -> ${result.error}`,
+          result.ok ? "info" : "warn",
+        );
+      }
+    }
+
+    // #9 — env injection posture, one line per NON-LOCAL agent (the resolved
+    // key set is per-agent — §3.1). Never prints values, only key NAMES.
+    // warn for an allowlisted key absent from the operator env, and warn
+    // when env_allowlist is non-empty while egress.default: allow.
+    for (const agent of nonLocalAgents) {
+      const agentAllow = agent.env_allowlist; // undefined/null = no further narrowing
+      const keyNames = [...new Set(agentAllow == null ? cfg.sandbox.env_allowlist : cfg.sandbox.env_allowlist.filter((k) => agentAllow.includes(k)))].sort();
+      const missing = keyNames.filter((k) => process.env[k] === undefined);
+      const broadEgressWithCreds = keyNames.length > 0 && cfg.sandbox.egress.default === "allow";
+      const warn = missing.length > 0 || broadEgressWithCreds;
+      check(
+        report,
+        `agent "${agent.name}" sandbox env injection`,
+        true,
+        keyNames.length === 0
+          ? "no keys injected (sandbox.env_allowlist is empty, or this agent's own env_allowlist narrows it to nothing)"
+          : `injects: ${keyNames.join(", ")}` +
+              (missing.length > 0 ? ` — NOT set in the operator env: ${missing.join(", ")}` : "") +
+              (broadEgressWithCreds ? " — egress.default: allow with live credentials in the sandbox is worth a second look" : ""),
+        warn ? "warn" : "info",
+      );
+    }
+
+    // #10 — egress policy, verbatim, info only.
+    if (nonLocalAgents.length > 0) {
+      check(
+        report,
+        "sandbox egress policy",
+        true,
+        `default=${cfg.sandbox.egress.default}, allow=[${cfg.sandbox.egress.allow.join(", ")}]`,
+        "info",
+      );
+    }
+
+    // #11 — live leases. The lease JOURNAL (<data_dir>/sandboxes.json,
+    // design doc §4.3) is not written by this build's core sandbox module —
+    // only the in-process registry exists, which is always empty inside
+    // `spf doctor`'s own process (doctor never creates a lease itself), so
+    // this cannot yet report an orphan left by a killed run. Reported
+    // honestly rather than fabricating a journal read.
+    if (nonLocalAgents.length > 0) {
+      const live = sandbox.leases();
+      check(
+        report,
+        "sandbox live leases",
+        true,
+        `${live.length} in THIS process (the lease journal at <data_dir>/sandboxes.json is not implemented in this build — cross-process/orphan visibility via \`spf sandbox list\` is not yet available)`,
+        "info",
+      );
+    }
+
+    // #12 — claude_code x remote backend, hard ✗, roster-wide (validate()
+    // above is chain-scoped to whatever `required` it was called with —
+    // doctor happens to pass the whole roster there too, but this is named
+    // separately so the specific rule that failed has its own line).
+    for (const agent of cfg.agents) {
+      const backend = resolvedBackend(agent);
+      if (agent.coding_agent === "claude_code" && backend !== "local") {
+        check(
+          report,
+          `agent "${agent.name}" coding_agent x sandbox`,
+          false,
+          `coding_agent "claude_code" cannot use sandbox backend ${JSON.stringify(backend)} — it always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
+        );
+      }
+    }
+
+    // #13 — image set, and able to run the transport. Hard ✗ only when
+    // empty on a resolved opensandbox backend (the key has no default and
+    // is required for that backend); otherwise a warn on a known-git-less
+    // base image.
+    if (openSandboxAgents.length > 0) {
+      const image = cfg.sandbox.image.trim();
+      if (!image) {
+        check(
+          report,
+          "sandbox.image",
+          false,
+          'sandbox.image is empty — required when the resolved backend is "opensandbox": the image MUST contain git, tar and base64 (the workspace transport shells out to all three)',
+        );
+      } else {
+        const knownGitless = /python:.*-slim|^alpine(:|$)/.test(image) && !cfg.sandbox.setup.some((cmd) => /\bgit\b/.test(cmd));
+        check(
+          report,
+          "sandbox.image",
+          true,
+          knownGitless
+            ? `${image} is a known git-less base — the mandatory create-time preflight (git/tar/base64) will fail unless sandbox.setup installs git`
+            : `${image} (git/tar/base64 verified at create time by the mandatory preflight, not here)`,
+          knownGitless ? "warn" : "info",
+        );
+      }
+    }
+
+    // #14 — handoff/scratch dir placement, hard ✗, roster-wide. Same rule,
+    // same reason as validateSandboxConfig's (agents.ts) — duplicated here
+    // in miniature because that function is not exported, and this is a
+    // static, network-free, config-shape check that doesn't need a per-agent
+    // loop (workspace_dir/handoff_dir/scratch_dir are sandbox-wide, not
+    // per-agent). Reported here as well as in validate() because the
+    // failure it prevents (a PermissionBreach on turn 1 of every sandboxed
+    // run) is expensive and its cause is non-obvious.
+    if (nonLocalAgents.length > 0) {
+      const posixUnderOrEqual = (root: string, child: string): boolean => {
+        const normRoot = path.posix.normalize(root).replace(/\/+$/, "") || "/";
+        const normChild = path.posix.normalize(child);
+        return normChild === normRoot || normChild.startsWith(`${normRoot}/`);
+      };
+      const placementProblems: string[] = [];
+      for (const key of ["handoff_dir", "scratch_dir"] as const) {
+        if (posixUnderOrEqual(cfg.sandbox.workspace_dir, cfg.sandbox[key])) {
+          placementProblems.push(`sandbox.${key} (${cfg.sandbox[key]}) is inside sandbox.workspace_dir (${cfg.sandbox.workspace_dir})`);
+        }
+      }
+      if (path.posix.normalize(cfg.sandbox.handoff_dir) === path.posix.normalize(cfg.sandbox.scratch_dir)) {
+        placementProblems.push(`sandbox.scratch_dir must not equal sandbox.handoff_dir (${cfg.sandbox.handoff_dir})`);
+      }
+      check(
+        report,
+        "sandbox handoff/scratch dir placement",
+        placementProblems.length === 0,
+        placementProblems.length === 0
+          ? `handoff_dir=${cfg.sandbox.handoff_dir}, scratch_dir=${cfg.sandbox.scratch_dir}, both outside workspace_dir=${cfg.sandbox.workspace_dir}`
+          : placementProblems.join("; "),
+      );
+    }
+
+    // #15 — scope: run x divergent env, hard ✗, roster-wide. validate()
+    // above is chain-scoped to whatever `required` it ran with; this calls
+    // the SAME exported function over the WHOLE roster, so a repo with
+    // several chains learns scope: run is unsafe for this roster before
+    // picking the one chain that would trip it.
+    const runScopeProblems = agents.validateSandboxRunScope(cfg, cfg.agents.map((a) => a.name));
+    if (cfg.sandbox.scope === "run") {
+      check(
+        report,
+        "sandbox scope: run env divergence (roster-wide)",
+        runScopeProblems.length === 0,
+        runScopeProblems.length === 0 ? "every non-local agent in the roster resolves to the same backend + env key set" : runScopeProblems.join("; "),
+      );
+    }
+
+    // #16 — submodules present, warn, static, network-free. Deliberately a
+    // warning, not a validate() failure: a submodule-bearing repo must still
+    // be able to run (the superproject alone is seeded/synced/extracted).
+    if (nonLocalAgents.length > 0 && existsSync(path.join(anchor.repo_root, ".gitmodules"))) {
+      check(
+        report,
+        "sandbox + submodules",
+        true,
+        `${anchor.repo_root} has .gitmodules — submodule content is not seeded, synced, or extracted by the sandbox transport (the superproject only is)`,
+        "warn",
+      );
+    }
+
+    // #17 — timeout relation, hard ✗, roster-wide, network-free. The
+    // DEFAULT deadline must fit inside the client timeout; a caller-supplied
+    // timeoutMs still passes through unmodified (no clamp — sandbox.ts).
+    if (nonLocalAgents.length > 0) {
+      check(
+        report,
+        "sandbox timeout relation",
+        cfg.sandbox.request_timeout_seconds >= cfg.sandbox.exec_timeout_seconds,
+        cfg.sandbox.request_timeout_seconds >= cfg.sandbox.exec_timeout_seconds
+          ? `request_timeout_seconds=${cfg.sandbox.request_timeout_seconds} >= exec_timeout_seconds=${cfg.sandbox.exec_timeout_seconds} — a model-requested timeout longer than exec_timeout_seconds is honored, not clamped, exactly as on backend: local`
+          : `sandbox.request_timeout_seconds (${cfg.sandbox.request_timeout_seconds}) must be >= sandbox.exec_timeout_seconds (${cfg.sandbox.exec_timeout_seconds})`,
+      );
+    }
   }
 
   // A protected_files pattern matching nothing anywhere in the trace is

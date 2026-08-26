@@ -449,6 +449,174 @@ export type PromptEngineering = v.InferOutput<typeof PromptEngineeringSchema>;
 export const ThinkingLevelSchema = v.picklist(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type ThinkingLevel = v.InferOutput<typeof ThinkingLevelSchema>;
 
+// ── Sandbox (SPF #15 — remote sandbox backends) ─────────────────────────────
+//
+// Absent `sandbox:` block entirely => backend: "local", byte-identical to
+// SPF before this feature existed — see agents.ts's `mergeRawConfig` (the
+// `sandbox` line) and `SFConfigSchema` below, whose own `v.optional` default
+// makes `cfg.sandbox` always defined even with no config file naming it. See
+// `assets/skill/references/config.md`'s `### sandbox` section for the
+// field-by-field rationale; this schema only encodes shape and defaults.
+
+export const SandboxBackendSchema = v.picklist(["local", "opensandbox", "cloudflare"]);
+export type SandboxBackend = v.InferOutput<typeof SandboxBackendSchema>;
+
+/**
+ * "agent" (the DEFAULT) — one sandbox per (Run, agent), so a container's
+ * process env (fixed at create time) is built from exactly one agent's
+ * allowlist. "run" — one sandbox for the whole Run; admitted only when
+ * every required agent resolves to an IDENTICAL env spec, enforced by
+ * `agents.ts`'s `validateSandboxRunScope`.
+ */
+export const SandboxScopeSchema = v.picklist(["run", "agent"]);
+export type SandboxScope = v.InferOutput<typeof SandboxScopeSchema>;
+
+export const SandboxEgressSchema = v.object({
+  default: v.optional(v.picklist(["deny", "allow"]), "deny"),
+  allow: v.optional(v.array(v.string()), () => []),
+});
+export type SandboxEgressConfig = v.InferOutput<typeof SandboxEgressSchema>;
+
+/**
+ * `max_mirror_bytes` caps the handoff mirror (§5.3 point 2), EACH direction,
+ * per file. `max_patch_bytes`/`max_seed_bytes` cap the code-plane transport
+ * (§5.2). Exceeding any of them FAILS the phase; none of them ever truncate.
+ */
+export const SandboxTransportSchema = v.object({
+  max_patch_bytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 8_388_608),
+  max_seed_bytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 134_217_728),
+  max_mirror_bytes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 4_194_304),
+  // Extra repo-relative paths to sync out of the sandbox that git cannot
+  // carry (gitignored artifacts you want back).
+  mirror: v.optional(v.array(v.string()), () => []),
+});
+export type SandboxTransportConfig = v.InferOutput<typeof SandboxTransportSchema>;
+
+/** "static" is the only broker in this build (PR A ships none at all — see sandbox.ts). */
+export const SandboxCredentialsSchema = v.object({
+  broker: v.optional(v.picklist(["static"]), "static"),
+});
+export type SandboxCredentialsConfig = v.InferOutput<typeof SandboxCredentialsSchema>;
+
+export const SandboxOpenSandboxSchema = v.object({
+  base_url: v.optional(v.string(), "http://127.0.0.1:8090"),
+  // env KEY NAME, never the key itself — matches the GITHUB_TOKEN style.
+  api_key_env: v.optional(v.string(), "OPENSANDBOX_API_KEY"),
+  use_server_proxy: v.optional(v.boolean(), false),
+  metadata_prefix: v.optional(v.string(), "spf"),
+});
+export type SandboxOpenSandboxConfig = v.InferOutput<typeof SandboxOpenSandboxSchema>;
+
+export const SandboxCloudflareSchema = v.object({
+  bridge_url: v.optional(v.string(), ""), // a deployed @cloudflare/sandbox bridge
+  api_token_env: v.optional(v.string(), "CLOUDFLARE_API_TOKEN"),
+  sandbox_name: v.optional(v.string(), ""), // optional stable name; default derives from session id
+});
+export type SandboxCloudflareConfig = v.InferOutput<typeof SandboxCloudflareSchema>;
+
+export const SandboxConfigSchema = v.object({
+  backend: v.optional(SandboxBackendSchema, "local"),
+  scope: v.optional(SandboxScopeSchema, "agent"),
+  workspace_dir: v.optional(v.string(), "/workspace"), // absolute path INSIDE the sandbox
+  // The ROOT of the handoff plane inside the sandbox. The per-run dir the
+  // prompts actually see is DERIVED from it: `<handoff_dir>/sessions/<adw_id>/
+  // context_handoff`, mirroring `handoff_host` (`runner.ts`'s
+  // `context_handoff_dir`) — see `SandboxSpec.handoff_sandbox` below. MUST
+  // NOT be under `workspace_dir` — enforced by `validateSandboxConfig`.
+  handoff_dir: v.optional(v.string(), "/spf/handoff"),
+  // The TRANSPORT'S OWN scratch plane (seed.tar, seed.patch[.b64],
+  // out.patch[.b64]) — same "not under workspace_dir" rule, same reason,
+  // same enforcement as handoff_dir.
+  scratch_dir: v.optional(v.string(), "/spf/tmp"),
+  // opensandbox only. NO DEFAULT: `validateSandboxConfig` rejects an empty
+  // `image` when the resolved backend is "opensandbox" — it MUST contain
+  // git + tar + base64 (the transport shells out to all three).
+  image: v.optional(v.string(), ""),
+  setup: v.optional(v.array(v.string()), () => []), // shell commands run ONCE per sandbox, after seeding
+  // ConnectionConfig.requestTimeoutSeconds — the SDK's CLIENT-SIDE HTTP
+  // timeout, applied to every control-plane call. NOT the bound on a long
+  // agent command (exec is driven with streaming handlers) — see sandbox.ts.
+  request_timeout_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 960),
+  lifetime_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 3_600), // provider-side expiry, renewed while a lease is live
+  max_total_lifetime_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 21_600), // HARD ceiling from creation; renew refuses past it
+  // The DEFAULT per-command deadline, applied only when the caller supplies
+  // none. NOT a ceiling — a caller-supplied timeoutMs passes through
+  // unmodified, exactly as it does on backend: local. See sandbox.ts.
+  exec_timeout_seconds: v.optional(v.pipe(v.number(), v.minValue(1)), 900),
+  // Credentials handed to the sandbox process environment at create time.
+  // DEFAULT IS EMPTY — deliberately NOT the operator env local() gets today.
+  // The set that actually reaches a given container is the intersection of
+  // this list with THAT AGENT's own env_allowlist (unset = no further
+  // narrowing) — see agents.ts's sandboxSpecFor.
+  env_allowlist: v.optional(v.array(v.string()), () => []),
+  credentials: v.optional(SandboxCredentialsSchema, () => v.parse(SandboxCredentialsSchema, {})),
+  egress: v.optional(SandboxEgressSchema, () => v.parse(SandboxEgressSchema, {})),
+  transport: v.optional(SandboxTransportSchema, () => v.parse(SandboxTransportSchema, {})),
+  // worktree (default, honored) | sandbox (fan-out THROUGH sandboxes — PR B).
+  // Parsed and schema-valid here in PR A; agents.ts's validateSandboxConfig
+  // hard-rejects "sandbox" until PR B lands, naming the key — never a silent
+  // degrade back to worktrees.
+  fanout: v.optional(v.picklist(["worktree", "sandbox"]), "worktree"),
+  opensandbox: v.optional(SandboxOpenSandboxSchema, () => v.parse(SandboxOpenSandboxSchema, {})),
+  cloudflare: v.optional(SandboxCloudflareSchema, () => v.parse(SandboxCloudflareSchema, {})),
+});
+export type SandboxConfig = v.InferOutput<typeof SandboxConfigSchema>;
+
+/**
+ * Pure, sync, derived from config + the run — see `agents.ts`'s
+ * `sandboxSpecFor`. Carried on `AgentRequest.sandbox` below. Lives HERE
+ * (not in `core/sandbox.ts`) so this leaf module keeps importing nothing
+ * but valibot, while fourteen-plus other core modules import it — see
+ * `core/sandbox.ts`'s module comment for the full placement rationale
+ * (SPF #15 design doc §4.3's placement table).
+ */
+export interface SandboxSpec {
+  backend: SandboxBackend;
+  /** Identity available at spec-construction time — BEFORE agentSessionId(). */
+  adw_id: string;
+  agent: string;
+  /**
+   * Lease identity. `<adw_id>/<agent>` when scope=agent (the DEFAULT),
+   * `<adw_id>` when scope=run. INVARIANT: the key is at least as
+   * fine-grained as `env` below, because a container's env is fixed at
+   * create time and a cache hit never re-creates.
+   */
+  lease_key: string;
+  scope: SandboxScope;
+  /** Host side: the tree that is the record of truth. run.repo_root. */
+  host_root: string;
+  /** Sandbox side: workspace_dir. Equals host_root when backend === "local" (never constructed then — see sandboxSpecFor). */
+  workspace_dir: string;
+  /**
+   * Host + sandbox paths for the handoff plane. INVARIANT (enforced by
+   * validateSandboxConfig): handoff_sandbox is NOT under workspace_dir.
+   * SHAPE INVARIANT: handoff_sandbox is
+   * `<handoff_dir>/sessions/<adw_id>/context_handoff`, mirroring
+   * handoff_host = `<data_dir>/sessions/<adw_id>/context_handoff`
+   * (`runner.ts`) — two shipped prompts parse `<adw_id>` out of this shape.
+   */
+  handoff_host: string;
+  handoff_sandbox: string;
+  /**
+   * The TRANSPORT'S OWN scratch plane inside the sandbox: seed.tar,
+   * seed.patch[.b64], out.patch[.b64]. SAME INVARIANT, same enforcement,
+   * same reason as handoff_sandbox: NOT under workspace_dir.
+   */
+  scratch_dir: string;
+  /** THIS AGENT's resolved keys: sandbox.env_allowlist ∩ (agent.env_allowlist ?? all). Already filtered; may be {}. */
+  env: Record<string, string>;
+  image: string;
+  setup: string[];
+  egress: SandboxEgressConfig;
+  lifetime_seconds: number;
+  max_total_lifetime_seconds: number;
+  request_timeout_seconds: number;
+  exec_timeout_seconds: number;
+  transport: SandboxTransportConfig;
+  opensandbox: SandboxOpenSandboxConfig;
+  cloudflare: SandboxCloudflareConfig;
+}
+
 export const AgentConfigSchema = v.object({
   name: v.string(),
   coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
@@ -477,6 +645,13 @@ export const AgentConfigSchema = v.object({
   // (PATH/HOME/USER/LANG/TERM/TMPDIR) that agent_flue.ts's local() sandbox
   // would keep anyway.
   env_allowlist: v.optional(v.nullable(v.array(v.string()))),
+  // Per-agent sandbox backend override (SPF #15) — a bare backend name, not
+  // a nested block; everything else (image, egress, transport, credentials
+  // POLICY) stays repo-scoped on `sandbox:` above.
+  //   unset  -> inherit sandbox.backend
+  //   "local" -> force local for this agent
+  //   null    -> same as unset (the writes/env_allowlist spelling)
+  sandbox: v.optional(v.nullable(SandboxBackendSchema)),
 });
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
@@ -847,6 +1022,7 @@ export const SFConfigSchema = v.object({
   notifications: v.optional(NotificationsConfigSchema, () => v.parse(NotificationsConfigSchema, {})),
   review: v.optional(ReviewConfigSchema, () => v.parse(ReviewConfigSchema, {})),
   tiering: v.optional(TieringConfigSchema, () => v.parse(TieringConfigSchema, {})),
+  sandbox: v.optional(SandboxConfigSchema, () => v.parse(SandboxConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
@@ -940,6 +1116,8 @@ export interface AgentRequest {
   // which both agent_cc.ts and agent_flue.ts implement as `request.env ??
   // operatorEnv()`.
   env?: Record<string, string>;
+  /** Absent (the default) => local(), byte-identical to before this field existed. See sandbox.ts. */
+  sandbox?: SandboxSpec;
 }
 
 /**

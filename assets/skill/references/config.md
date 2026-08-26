@@ -12,10 +12,12 @@ always shows the resolved, merged result for the repo you're in.
 1. The packaged built-in default (`assets/defaults/spf.config.yaml` inside
    the installed CLI).
 2. `.spf/spf.config.yaml` in the target repo, if present — merged on top,
-   field by field (`env`/`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`/`tiering`
+   field by field (`env`/`defaults`/`observability`/`quality`/`watch`/`notifications`/`review`/`tiering`/`sandbox`
    merge key-by-key — `notifications.channels` replaces wholesale, same as
-   `quality.checks` and `tiering.tiers`/`tiering.roles`; `agents` merges by
-   `name`: a matching name patches that entry, a new name appends).
+   `quality.checks`, `tiering.tiers`/`tiering.roles`, and `sandbox`'s own
+   nested blocks (`opensandbox`/`cloudflare`/`egress`/`transport`/
+   `credentials`); `agents` merges by `name`: a matching name patches that
+   entry, a new name appends).
 3. An explicit `--config <path>` replaces both — standalone, no built-in
    underneath it.
 
@@ -413,6 +415,92 @@ dispatch:
   one), any degradation note, and — probed the same way `probeServedOllamaTags`
   does, fail-open — which `ollama/*` rungs are and aren't in `ollama list`.
 
+### `sandbox`
+
+Remote sandbox backends (SPF #15) — runs an agent's `bash`/`read`/`write`/
+`edit` tools inside an isolated remote container instead of the real working
+tree. **Absent, or `backend: local` (the default), is byte-identical to SPF
+before this feature existed**: every agent runs against the real working
+tree, exactly as today. Top-level, not nested under `defaults:` — same
+reasoning as `tiering` above (a stray copy onto `loadConfig`'s `defaults`
+back-fill loop would be silently *stripped*, not rejected). Nested blocks
+(`opensandbox`, `cloudflare`, `egress`, `transport`, `credentials`) are a
+**whole-object replace** on override, same rule as `observability.otel` — a
+half-merged `bridge_url`/`api_token_env` pair would authenticate to the
+wrong control plane; `sandbox`'s own scalar keys still merge key-by-key
+around them.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `backend` | `local` \| `opensandbox` \| `cloudflare` | Default `local`. Repo-wide default; an agent's own `sandbox:` field can override it. |
+| `scope` | `agent` \| `run` | Default `agent` — **the default because it is the only scope under which per-agent `env_allowlist` is honored by construction.** One sandbox per `(run, agent)`, created with exactly that agent's resolved env. `run` — one sandbox for the whole run (cheaper: one create, one seed, one `setup`), admitted only when every agent the chain dispatches resolves to the SAME backend and the SAME resolved env key set — `spf validate`/`spf doctor` hard-reject `scope: run` otherwise, naming the agents and keys that differ. |
+| `workspace_dir` | absolute path (in-sandbox) | Default `/workspace` — the agent's cwd inside the sandbox. |
+| `handoff_dir` | absolute path (in-sandbox) | Default `/spf/handoff` — the **root** of the handoff plane (session artifacts, `context_handoff_dir`'s remote counterpart). The per-run directory a rendered prompt actually sees is derived from it as `<handoff_dir>/sessions/<adw_id>/context_handoff`, mirroring the host's own `context_handoff_dir` shape — this is not cosmetic: the shipped `planner`/`documenter` prompts parse `<adw_id>` out of that exact shape to name `specs/<adw_id>_<slug>.md`/`app_docs/<adw_id>_<slug>.md`. **MUST NOT be under `workspace_dir`** — `validate()` rejects it if it is: nested, it would ride the extract's `git add -A` onto the host at a path `spf init`'s `.gitignore` entries don't cover, and `permissions.enforce` kills the run on a `protected_files` breach. |
+| `scratch_dir` | absolute path (in-sandbox) | Default `/spf/tmp` — the transport's OWN scratch plane (the seed archive, the in-flight patches). Same "not under `workspace_dir`" rule, same reason, same enforcement as `handoff_dir`; also must not equal `handoff_dir`. |
+| `image` | string | **`opensandbox` only. No default** — `validate()`/`spf doctor` reject an empty `image` when the resolved backend is `opensandbox`, naming the three required binaries. MUST contain `git`, `tar`, and `base64`: the workspace transport shells out to all three to keep the sandbox's tree byte-identical to the host's. A `git`-less base (`python:*-slim`, bare `alpine`) fails the mandatory create-time preflight unless `setup` installs `git` first. Meaningless (and not required) on `cloudflare`. |
+| `setup` | array of strings | Default `[]`. Shell commands run **once** per sandbox, right after seeding — e.g. `["npm ci --omit=dev"]`. |
+| `request_timeout_seconds` | number | Default `960`. The **client-side** HTTP timeout on control-plane calls (create/renew/kill/file ops) — raised well above the SDK's own default because a first-run image pull can take a while. **Not** the bound on a long agent command: `exec` streams, so a caller-supplied timeout is honored unclamped (see `exec_timeout_seconds`). Must stay `>= exec_timeout_seconds`. |
+| `lifetime_seconds` | number | Default `3600`. Provider-side expiry, renewed while a lease stays live — the teardown backstop that survives a `SIGKILL`ed `spf`. |
+| `max_total_lifetime_seconds` | number | Default `21600`. A hard ceiling from creation; renewal refuses past it rather than letting a long-lived `spf watch` daemon renew one lease forever. |
+| `exec_timeout_seconds` | number | Default `900`. The **default** per-command deadline, used only when the model's own tool call supplies none. **Not a ceiling** — a caller-supplied timeout (the model's own `timeout` argument to `bash`) passes through unmodified, exactly as `backend: local` behaves today; there is no clamp. |
+| `env_allowlist` | array of strings | Default `[]` — **deliberately empty**, unlike `backend: local`, which passes the whole operator environment through today. A secret going into a remote container is a change of kind, not degree. The set that actually reaches a given agent's container is this list **intersected with that agent's own `env_allowlist`** (unset = no further narrowing) — per-agent, which is exactly why `scope: agent` is the default. `spf doctor` prints the resulting key **names**, never values, one line per agent. |
+| `credentials.broker` | `static` | Default (and only) value in this release — plain env injection at create time, nothing revocable yet. |
+| `egress.default` / `egress.allow` | `deny`\|`allow` / array of hostnames | Default `deny` / `[]`. Repo-wide network egress policy for a remote sandbox. |
+| `transport.max_patch_bytes` / `.max_seed_bytes` / `.max_mirror_bytes` | number | Defaults `8388608` (8 MiB) / `134217728` (128 MiB) / `4194304` (4 MiB, **each direction**, per file). Exceeding any of them **fails the phase**; none of them ever silently truncate. |
+| `transport.mirror` | array of repo-relative paths | Default `[]`. Extra paths to sync out of the sandbox that git cannot carry (gitignored build artifacts you still want back on the host). |
+| `fanout` | `worktree` \| `sandbox` | Default `worktree` (the only one honored in this release — `sandbox` is schema-valid but hard-rejected by `validate()`, naming the key, never a silent downgrade). Fan-out **through** sandboxes ships in a later release. |
+| `opensandbox.base_url` | string | Default `http://127.0.0.1:8090`. |
+| `opensandbox.api_key_env` | string | Default `OPENSANDBOX_API_KEY` — an env **key name**, never the key itself, same spelling as `GITHUB_TOKEN`. |
+| `opensandbox.use_server_proxy` | bool | Default `false`. |
+| `opensandbox.metadata_prefix` | string | Default `spf`. Best-effort create-time labelling only — the teardown sweep relies on SPF's own host-side lease record, not on reading this back. |
+| `cloudflare.bridge_url` | string | Default `""`. The base URL of a deployed `@cloudflare/sandbox` bridge — **required** when the resolved backend is `cloudflare` (`validate()`/`spf doctor` reject an empty value). SPF is a Node CLI, not a Worker, so it talks to the bridge's HTTP API rather than a `getSandbox()` binding. |
+| `cloudflare.api_token_env` | string | Default `CLOUDFLARE_API_TOKEN` — an env **key name**, never the key itself. |
+| `cloudflare.sandbox_name` | string | Default `""` (derives a stable name from the lease key instead). Optional stable name for the bridge-side sandbox. |
+
+```yaml
+sandbox:
+  backend: opensandbox
+  image: ghcr.io/you/spf-sandbox:debian-git   # must contain git + tar + base64
+  env_allowlist: ["GH_TOKEN"]
+  egress:
+    default: deny
+    allow: ["github.com", "registry.npmjs.org"]
+  opensandbox:
+    base_url: http://127.0.0.1:8090
+
+agents:
+  - name: builder
+    env_allowlist: ["GH_TOKEN"]   # this agent's own narrowing — see the table above
+  - name: reviewer
+    sandbox: local                # force this one agent back to the real working tree
+```
+
+**Env posture, stated plainly.** `backend: local` today hands an agent's
+subprocess the *entire* operator environment. A remote backend does the
+opposite by design: nothing crosses unless it is named in **both**
+`sandbox.env_allowlist` and (if set) that agent's own `env_allowlist`. This
+is why `scope: agent` is the default rather than `scope: run` — a
+container's process environment is fixed once, at creation, and there is no
+verb to change it afterward, so two agents with different allowlists cannot
+safely share one container.
+
+**`spf doctor`**, gated on the **resolved backend, per check** — not a
+coarse "not local": checks that only make sense for `opensandbox` (SDK
+presence, control-plane reachability, the `[docker].host_ip` gotcha, image
+pre-pull timing) fire only when some agent resolves to `opensandbox`;
+`cloudflare`'s config/bridge-reachability checks fire only when some agent
+resolves to `cloudflare` — a repo running only `cloudflare` never fails
+doctor over a missing OpenSandbox SDK it will never load. Backend-agnostic
+checks (the resolved sandbox count per chain, per-agent env injection
+posture, egress policy, live in-process leases, the `claude_code` x remote
+rejection, `image`/handoff-scratch-placement/`scope: run`/timeout-relation
+roster-wide static checks, a `.gitmodules` warning) run whenever any agent
+resolves to a non-local backend, regardless of which one.
+
+**Submodules are out of scope for this release** — the transport seeds,
+syncs, and extracts the superproject only; `spf doctor` warns (never fails)
+when `.gitmodules` is present.
+
 ### `agents[]`
 
 | Field | Required | Meaning |
@@ -424,6 +512,7 @@ dispatch:
 | `tools` | no | Allowlist. Omitting it means all tools usable. A capability list, not a boundary — see `writes`. |
 | `writes` | no | What this agent may modify **in the repo**, enforced after every call. `undefined`/`null` = unrestricted (still barred from `protected_files`); `[]` = no repo writes; a list = only those paths (trailing `/` = directory prefix, `*` = one path segment, `**` = crosses segments, anything else = exact path). |
 | `env_allowlist` | no | Opt-in filter on the environment handed to this agent's subprocess/sandbox. `undefined` (default) = the full operator environment, unchanged. A list = only those keys, plus the baseline (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`) either backend keeps regardless. |
+| `sandbox` | no | Per-agent backend override — see `sandbox` below. `undefined`/`null` = inherit `sandbox.backend`; `"local"` = force local for this agent regardless of the repo-wide setting; a backend name = use that backend for this agent only. A bare name, never a nested block — everything else (`image`, `egress`, `transport`, credentials *policy*) stays repo-wide. |
 
 Output types are deliberately absent from config: an entry defines who an
 agent *is*; the call site defines how it's *used*.

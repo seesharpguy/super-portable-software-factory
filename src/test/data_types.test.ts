@@ -29,6 +29,7 @@ import {
   ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
+  SFConfigSchema,
   TierSchema,
   TieringConfigSchema,
   VerifyOutput,
@@ -506,6 +507,94 @@ test("tiering.roles is a whole-object replace on override — a half-merged role
     writeFileSync(override, "tiering:\n  roles:\n    reviewer: deep\n");
     const cfg = loadConfig([base, override]);
     assert.deepEqual(cfg.tiering.roles, { reviewer: "deep" }, "the override's roles map replaces the base's entirely, not a merge of both");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── sandbox backends (SPF #15) — merge survival ─────────────────────────────
+//
+// The same silent-drop trap `review`/`notifications`/`tiering` already
+// guard against: `mergeRawConfig` (core/agents.ts) is a FIXED-SHAPE object
+// literal, so a top-level `sandbox:` key not named on both sides of it is
+// dropped before `SFConfigSchema` ever sees it.
+
+test("SandboxConfigSchema: with no config file naming sandbox:, cfg.sandbox is nevertheless DEFINED with backend: local and scope: agent", () => {
+  const cfg = v.parse(SFConfigSchema, {});
+  assert.equal(cfg.sandbox.backend, "local", "the total predicate agent.sandbox ?? cfg.sandbox.backend and every doctor gate rely on this");
+  assert.equal(cfg.sandbox.scope, "agent", "the default scope, asserted positively so a later schema edit cannot silently flip it back to run");
+  assert.equal(cfg.sandbox.workspace_dir, "/workspace");
+  assert.equal(cfg.sandbox.handoff_dir, "/spf/handoff");
+  assert.equal(cfg.sandbox.scratch_dir, "/spf/tmp");
+  assert.ok(!cfg.sandbox.scratch_dir.startsWith(`${cfg.sandbox.workspace_dir}/`), "the shipped defaults must satisfy validateSandboxConfig's own placement check");
+});
+
+test("sandbox: survives loadConfig's merge — the silent-drop trap mergeRawConfig's fixed-shape literal sets, for a single config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-merge-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, "sandbox:\n  backend: opensandbox\n  scope: run\n  scratch_dir: /spf/tmp2\n  max_total_lifetime_seconds: 99999\n  request_timeout_seconds: 1200\n  exec_timeout_seconds: 1000\n  transport:\n    max_mirror_bytes: 1048576\n");
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.sandbox.backend, "opensandbox", "a sandbox: value from a real config file must reach SFConfig, not be dropped by mergeRawConfig");
+    assert.equal(cfg.sandbox.scope, "run");
+    assert.equal(cfg.sandbox.scratch_dir, "/spf/tmp2");
+    assert.equal(cfg.sandbox.max_total_lifetime_seconds, 99999);
+    assert.equal(cfg.sandbox.request_timeout_seconds, 1200);
+    assert.equal(cfg.sandbox.exec_timeout_seconds, 1000);
+    assert.equal(cfg.sandbox.transport.max_mirror_bytes, 1048576);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sandbox merges key-by-key across two layered config files, and nested opensandbox/cloudflare/egress/transport/credentials are WHOLE-OBJECT replaces", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-merge-layered-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(
+      base,
+      "sandbox:\n  backend: opensandbox\n  workspace_dir: /workspace\n  opensandbox:\n    base_url: http://base:8090\n    api_key_env: BASE_KEY\n",
+    );
+    writeFileSync(override, "sandbox:\n  workspace_dir: /custom-workspace\n  opensandbox:\n    base_url: http://override:8090\n");
+    const cfg = loadConfig([base, override]);
+    assert.equal(cfg.sandbox.backend, "opensandbox", "unset in the override -> the base's value survives, key-by-key, not a whole-block replace");
+    assert.equal(cfg.sandbox.workspace_dir, "/custom-workspace", "override wins for the key it names");
+    assert.equal(cfg.sandbox.opensandbox.base_url, "http://override:8090");
+    assert.equal(cfg.sandbox.opensandbox.api_key_env, "OPENSANDBOX_API_KEY", "whole-object replace: the base's api_key_env does NOT survive alongside the override's base_url — the schema default applies instead");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("agents[].sandbox survives mergeAgentLists and is NOT back-filled from defaults — the back-fill list (agents.ts) stays the fixed literal it always was", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-agent-override-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(
+      configPath,
+      "sandbox:\n  backend: opensandbox\nagents:\n  - name: builder\n    sandbox: local\n    prompt_engineering: {system: s.md, user: u.md}\n  - name: reviewer\n    prompt_engineering: {system: s.md, user: u.md}\n",
+    );
+    const cfg = loadConfig([configPath]);
+    assert.equal(cfg.agents.find((a) => a.name === "builder")?.sandbox, "local");
+    assert.equal(cfg.agents.find((a) => a.name === "reviewer")?.sandbox, undefined, "an agent that doesn't set sandbox: must NOT inherit sandbox.backend via back-fill — resolution is agent.sandbox ?? cfg.sandbox.backend, a runtime expression, not a config-load-time copy");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the back-fill list at agents.ts's loadConfig did not grow — sandbox is a top-level key, not a defaults key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-sandbox-backfill-list-test-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(
+      configPath,
+      "defaults:\n  model: base-model\nsandbox:\n  backend: opensandbox\nagents:\n  - name: builder\n    prompt_engineering: {system: s.md, user: u.md}\n",
+    );
+    const cfg = loadConfig([configPath]);
+    const agent = cfg.agents.find((a) => a.name === "builder")!;
+    assert.ok(!("sandbox" in agent) || agent.sandbox === undefined, "sandbox.backend must never be copied down onto an agent as a per-agent 'sandbox' back-fill");
+    assert.equal(agent.model, "base-model", "the real back-fill keys (model, etc.) still work — this is not a regression in the existing list");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
