@@ -1,0 +1,18 @@
+{
+  "_comment": "SPF #15 design doc §8.3b calls for this fixture to be a LIVE-CAPTURED POST /v1/sandboxes body, recorded once against a real local OpenSandbox control plane during implementation. This repo has neither the real @alibaba-group/opensandbox SDK installed nor a running control plane in this environment, so a live capture was not possible this session — this is a BEST-EFFORT RECONSTRUCTION from the spike's documented Sandbox.create(options) shape (sandbox-spike.json's api_surface field), not a verified wire capture. Treat every field name below as a plausible guess, not a pinned contract, until someone with a real local control plane (`uvx opensandbox-server`, per the spike's own recommended quick-start) replaces this file with an actual captured body. The wire-lane test in sandbox_control_plane.test.ts asserts against this fixture only loosely (structural keys, not byte-exact deep-equal) for exactly this reason. `spf.lease_key` is shown SANITIZED (`run1_builder`, not `run1/builder`) — the control plane validates every metadata value as a Kubernetes label (`[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?`, no `/`) at create time, confirmed by a live e2e 400 SANDBOX::INVALID_METADATA_LABEL against the raw lease_key; sandbox_opensandbox.ts's createNativeSandbox sanitizes it before this body is sent.",
+  "image": "ghcr.io/example/debian-git:latest",
+  "env": {
+    "EXAMPLE_KEY": "example-value"
+  },
+  "timeout_seconds": 3600,
+  "metadata": {
+    "spf.adw_id": "run1",
+    "spf.agent": "builder",
+    "spf.lease_key": "run1_builder"
+  },
+  "network_policy": {
+    "default_action": "deny",
+    "egress": []
+  },
+  "ready_timeout_seconds": 120
+}

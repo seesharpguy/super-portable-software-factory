@@ -120,6 +120,59 @@ tiering:
     refiner:    builder
     reviewer:   deep
 
+# Remote sandbox backends (SPF #15) — everything below is optional; omitting
+# the whole block means backend: local, i.e. byte-identical to SPF before
+# this feature existed (every agent's tools run against the real working
+# tree, exactly as today). See config.md's "sandbox" section for the full
+# field-by-field rationale — this is the commented-out shape only.
+# sandbox:
+#   backend: local              # local | opensandbox | cloudflare   (default: local)
+#   scope: agent                # agent (DEFAULT) | run — see config.md: "run" is only safe
+#                                # when every dispatched agent resolves to the SAME env key set.
+#   workspace_dir: /workspace   # absolute path INSIDE the sandbox; the agent's cwd
+#   handoff_dir: /spf/handoff   # absolute path INSIDE the sandbox — MUST NOT be under
+#                                # workspace_dir (validate() rejects it if it is)
+#   scratch_dir: /spf/tmp       # the transport's own scratch plane — same rule as handoff_dir
+#   image: ""                   # opensandbox only. NO DEFAULT — required (must contain
+#                                # git + tar + base64) when the resolved backend is opensandbox
+#   setup: []                   # shell commands run ONCE per sandbox, after seeding
+#                                #   e.g. ["npm ci --omit=dev"]
+#   request_timeout_seconds: 960   # the SDK's client-side HTTP timeout on control-plane calls
+#   lifetime_seconds: 3600         # provider-side expiry, renewed while a lease is live
+#   max_total_lifetime_seconds: 21600  # hard ceiling from creation; renew refuses past it
+#   exec_timeout_seconds: 900      # the DEFAULT per-command deadline (not a ceiling — a
+#                                  # caller-supplied timeout is honored, never clamped)
+#   env_allowlist: []           # e.g. ["GH_TOKEN"] — DEFAULT IS EMPTY, deliberately NOT the
+#                                # operator env backend: local gets today. The set that
+#                                # actually reaches a container is this list INTERSECTED
+#                                # with that agent's own env_allowlist.
+#   credentials:
+#     broker: static             # static is the only broker in this build
+#   egress:
+#     default: deny              # deny | allow
+#     allow: []                  # hostnames, e.g. ["registry.npmjs.org", "github.com"]
+#   transport:
+#     max_patch_bytes: 8388608     # 8 MiB — exceeding it FAILS the phase, never truncates
+#     max_seed_bytes: 134217728    # 128 MiB seed archive ceiling
+#     max_mirror_bytes: 4194304    # 4 MiB per handoff-mirror transfer, each direction
+#     mirror: []                  # extra repo-relative paths to sync out that git can't carry
+#   fanout: worktree             # worktree | sandbox (fan-out through sandboxes — later release)
+#   opensandbox:
+#     base_url: http://127.0.0.1:8090
+#     api_key_env: OPENSANDBOX_API_KEY   # env KEY NAME, never the key itself
+#     use_server_proxy: false
+#     metadata_prefix: spf
+#   cloudflare:
+#     bridge_url: ""                     # a deployed @cloudflare/sandbox bridge
+#     api_token_env: CLOUDFLARE_API_TOKEN
+#     sandbox_name: ""                   # optional stable name; default derives from the lease key
+#
+# Per-agent backend override, added to an `agents[]` entry alongside `writes`/
+# `env_allowlist` above — a bare backend name, never a nested block:
+#   agents:
+#     - name: builder
+#       sandbox: opensandbox      # unset -> inherit sandbox.backend; "local" -> force local
+
 agents:
   - name: planner
     model: fireworks/accounts/fireworks/models/kimi-k3

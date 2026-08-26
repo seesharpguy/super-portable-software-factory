@@ -17,6 +17,7 @@ import * as agentFlue from "./agent_flue.ts";
 import * as paths from "./paths.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
+import * as sandbox from "./sandbox.ts";
 import { effectiveAgent, type TierResolution } from "./tiering.ts";
 import {
   GateReport,
@@ -29,6 +30,8 @@ import {
   type AgentRequest,
   type Phase,
   type SFConfig,
+  type SandboxConfig,
+  type SandboxSpec,
 } from "./data_types.ts";
 import { newId, operatorEnv } from "./utils.ts";
 
@@ -207,6 +210,14 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     // half-merged role map would route some agents by the base's ladder and
     // some by the override's. Pinned by src/test/data_types.test.ts.
     tiering: { ...(base.tiering || {}), ...(override.tiering || {}) },
+    // sandbox.backend / .workspace_dir / .scope / ... — see data_types.ts's
+    // SandboxConfigSchema. Nested opensandbox/cloudflare/egress/transport/
+    // credentials are WHOLE-OBJECT replaces on override, same rule as
+    // observability.otel (a half-merged base_url/api_key_env pair would
+    // authenticate to the wrong control plane); sandbox's own scalar keys
+    // still merge key-by-key around them. Pinned by a merge-survival test
+    // in src/test/data_types.test.ts.
+    sandbox: { ...(base.sandbox || {}), ...(override.sandbox || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }
@@ -361,7 +372,17 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
         problems.push(`agent ${JSON.stringify(name)}: unknown tool ${JSON.stringify(toolName)} — known: read, write, edit, bash, grep, glob, find (alias for glob), ls (dropped, covered by bash/glob)`);
       }
     }
+    // SPF #15 — sandbox backends. Chain-scoped, like every check above in
+    // this loop: it fires before anything spawns, for the agents this run
+    // will actually use. spf doctor's roster-wide equivalents (checks
+    // #7/#12/#13/#14/#15/#17) are a deliberately different, wider scope —
+    // see validateSandboxConfig's own doc comment.
+    problems.push(...validateSandboxConfig(cfg, agent));
   }
+  // SPF #15 — sandbox.scope: "run" is admitted only when the run's agents
+  // are provably interchangeable. Once, after the per-agent loop, over the
+  // SAME required list — see validateSandboxRunScope's own doc comment.
+  problems.push(...validateSandboxRunScope(cfg, required));
   // Tiering (SPF #14) — every check below lives inside this ONE guard. A
   // disabled ladder is not a config error, it is a config that is off: none
   // of this fires for `enabled: false`, no matter what `tiers`/`roles` say —
@@ -426,6 +447,196 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
   }
 }
 
+// ── sandbox config validation (SPF #15) ─────────────────────────────────────
+
+/** Repo-relative POSIX form of `child` under `root`, or null when `child` is not under `root` — both already-absolute POSIX paths. */
+function posixUnderOrEqual(root: string, child: string): boolean {
+  const normRoot = path.posix.normalize(root).replace(/\/+$/, "") || "/";
+  const normChild = path.posix.normalize(child);
+  return normChild === normRoot || normChild.startsWith(`${normRoot}/`);
+}
+
+/**
+ * THIS AGENT's resolved keys: sandbox.env_allowlist ∩ (agent.env_allowlist
+ * ?? everything), through the SAME discipline `agentEnv` uses (same source,
+ * `operatorEnv()`; same never-log rule) — but deliberately WITHOUT
+ * `ENV_BASELINE_KEYS`: PATH/HOME/TMPDIR from this (macOS/Linux) host would
+ * be actively wrong inside a Linux container and would break the mandatory
+ * `git`/`tar`/`base64` preflight itself. See sandboxSpecFor's own comment.
+ */
+function sandboxEnvFor(sb: SandboxConfig, agent: AgentConfig): Record<string, string> {
+  const operator = operatorEnv();
+  const agentAllow = agent.env_allowlist; // undefined/null = no further narrowing
+  const env: Record<string, string> = {};
+  for (const key of sb.env_allowlist) {
+    if (agentAllow != null && !agentAllow.includes(key)) continue;
+    if (operator[key] !== undefined) env[key] = operator[key];
+  }
+  return env;
+}
+
+/**
+ * The sorted key NAMES `sandboxEnvFor` would resolve for this agent — no
+ * operator env read at all, so this is safe in CI where an allowlisted key
+ * legitimately may not exist. Used by `validateSandboxRunScope` to compare
+ * agents' resolved env shape without ever touching a value.
+ */
+function sandboxEnvKeyNames(sb: SandboxConfig, agent: AgentConfig): string[] {
+  const agentAllow = agent.env_allowlist;
+  const names = agentAllow == null ? sb.env_allowlist : sb.env_allowlist.filter((k) => agentAllow.includes(k));
+  return [...new Set(names)].sort();
+}
+
+function sameStringArray(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+/**
+ * Config-only, per-agent — no `Run`, no session id, no network, no fs
+ * beyond the config already in hand. Called from `validate()`'s existing
+ * per-agent loop, chain-scoped (only agents the resolved chain requires).
+ * `spf doctor`'s equivalents (checks #7/#12/#13/#14/#17) walk the WHOLE
+ * roster instead — a deliberately wider, separate scope; see `validate()`'s
+ * own comment for why the two are not the same check.
+ */
+export function validateSandboxConfig(cfg: SFConfig, agent: AgentConfig): string[] {
+  const problems: string[] = [];
+  const sb = cfg.sandbox;
+  const backend = agent.sandbox ?? sb.backend;
+
+  // claude_code spawns a host process (agent_cc.ts's spawn()) with no
+  // sandbox seam at all — sandboxing it would mean running the `claude` CLI
+  // INSIDE the container, a different feature, not this config flag.
+  if (agent.coding_agent === "claude_code" && backend !== "local") {
+    problems.push(
+      `agent ${JSON.stringify(agent.name)}: coding_agent "claude_code" cannot use sandbox backend ${JSON.stringify(backend)} — ` +
+        `claude_code always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
+    );
+  }
+
+  if (backend === "opensandbox") {
+    if (!sb.opensandbox.base_url.trim()) {
+      problems.push('sandbox.opensandbox.base_url is empty — required when the resolved backend is "opensandbox"');
+    }
+    if (!sb.image.trim()) {
+      problems.push(
+        'sandbox.image is empty — required when the resolved backend is "opensandbox": the image MUST contain git, tar and base64 ' +
+          "(the workspace transport shells out to all three) — see sandbox.setup if your base image needs one of them added",
+      );
+    }
+  }
+  if (backend === "cloudflare") {
+    if (!sb.cloudflare.bridge_url.trim()) {
+      problems.push('sandbox.cloudflare.bridge_url is empty — required when the resolved backend is "cloudflare"');
+    }
+    if (!sb.cloudflare.api_token_env.trim()) {
+      problems.push('sandbox.cloudflare.api_token_env is unset — required when the resolved backend is "cloudflare"');
+    }
+  }
+
+  // sandbox.fanout: "sandbox" is PR B (fan-out THROUGH sandboxes). Parsed
+  // and schema-valid in this PR; hard-rejected here so the operator is
+  // never told nothing — never a silent degrade back to worktrees.
+  if (sb.fanout === "sandbox") {
+    problems.push('sandbox.fanout: "sandbox" is not supported yet in this release — only "worktree" is honored (fan-out through sandboxes ships in a later PR)');
+  }
+
+  if (sb.max_total_lifetime_seconds < sb.lifetime_seconds) {
+    problems.push(
+      `sandbox.max_total_lifetime_seconds (${sb.max_total_lifetime_seconds}) must be >= sandbox.lifetime_seconds (${sb.lifetime_seconds})`,
+    );
+  }
+  // The DEFAULT exec deadline has to fit inside the client-side control-plane
+  // timeout; a caller-supplied timeoutMs still passes through unmodified
+  // (no clamp — see sandbox.ts), so this relation covers only the default.
+  if (sb.request_timeout_seconds < sb.exec_timeout_seconds) {
+    problems.push(
+      `sandbox.request_timeout_seconds (${sb.request_timeout_seconds}) must be >= sandbox.exec_timeout_seconds (${sb.exec_timeout_seconds})`,
+    );
+  }
+
+  for (const [key, value] of [
+    ["workspace_dir", sb.workspace_dir],
+    ["handoff_dir", sb.handoff_dir],
+    ["scratch_dir", sb.scratch_dir],
+  ] as const) {
+    if (!path.posix.isAbsolute(value)) problems.push(`sandbox.${key} must be an absolute path (got ${JSON.stringify(value)})`);
+  }
+  // The blocker: nested handoff/scratch dirs ride the extract's `git add -A`
+  // onto the host at `<repo>/.spf/...`, which spf init's GITIGNORE_ENTRIES
+  // does not cover, so permissions.enforce kills the phase. One shared rule
+  // applied to BOTH planes — not two similar checks that can drift apart.
+  if (path.posix.isAbsolute(sb.workspace_dir)) {
+    for (const key of ["handoff_dir", "scratch_dir"] as const) {
+      const value = sb[key];
+      if (path.posix.isAbsolute(value) && posixUnderOrEqual(sb.workspace_dir, value)) {
+        problems.push(
+          `sandbox.${key} (${value}) must not be inside sandbox.workspace_dir (${sb.workspace_dir}) — ` +
+            `it would be swept into the extract's "git add -A" onto the host and rejected by permissions.enforce`,
+        );
+      }
+    }
+  }
+  if (
+    path.posix.isAbsolute(sb.handoff_dir) &&
+    path.posix.isAbsolute(sb.scratch_dir) &&
+    path.posix.normalize(sb.handoff_dir) === path.posix.normalize(sb.scratch_dir)
+  ) {
+    problems.push(
+      `sandbox.scratch_dir must not equal sandbox.handoff_dir (${sb.handoff_dir}) — the seed's housekeeping would delete handoff payloads`,
+    );
+  }
+
+  return problems;
+}
+
+/**
+ * `scope: "run"` is safe only when every required agent's create-time spec
+ * is provably identical — compared as backend + resolved env KEY NAMES
+ * (never values) + the create-time-reachable rest of the spec (image,
+ * setup, egress, workspace_dir, handoff_dir). A no-op for `scope: "agent"`
+ * (the default) and for a chain whose required agents all resolve to
+ * `local` — the common path pays nothing.
+ */
+export function validateSandboxRunScope(cfg: SFConfig, required: string[]): string[] {
+  const problems: string[] = [];
+  if (cfg.sandbox.scope !== "run") return problems;
+
+  type Tuple = { agent: string; backend: string; envKeys: string[] };
+  const tuples: Tuple[] = [];
+  for (const name of required) {
+    const agent = cfg.agents.find((a) => a.name === name);
+    if (!agent) continue; // reported by validate()'s own per-agent loop
+    const backend = agent.sandbox ?? cfg.sandbox.backend;
+    if (backend === "local") continue;
+    tuples.push({ agent: name, backend, envKeys: sandboxEnvKeyNames(cfg.sandbox, agent) });
+  }
+  if (tuples.length < 2) return problems;
+
+  const first = tuples[0]!;
+  for (const other of tuples.slice(1)) {
+    if (other.backend !== first.backend) {
+      problems.push(
+        `sandbox.scope: "run" requires every required agent to resolve to the same sandbox backend, but ` +
+          `${JSON.stringify(first.agent)} resolves to ${JSON.stringify(first.backend)} while ${JSON.stringify(other.agent)} resolves to ` +
+          `${JSON.stringify(other.backend)} — use scope: agent (the default) or align the agents' backends`,
+      );
+      continue;
+    }
+    if (!sameStringArray(first.envKeys, other.envKeys)) {
+      const onlyFirst = first.envKeys.filter((k) => !other.envKeys.includes(k));
+      const onlyOther = other.envKeys.filter((k) => !first.envKeys.includes(k));
+      problems.push(
+        `sandbox.scope: "run" requires every required agent to resolve to the SAME env key set, but ` +
+          `${JSON.stringify(first.agent)} and ${JSON.stringify(other.agent)} differ ` +
+          `(only in ${JSON.stringify(first.agent)}: ${JSON.stringify(onlyFirst)}; only in ${JSON.stringify(other.agent)}: ${JSON.stringify(onlyOther)}) — ` +
+          `use scope: agent (the default) or align sandbox.env_allowlist / the agents' own env_allowlist`,
+      );
+    }
+  }
+  return problems;
+}
+
 // ── execution ────────────────────────────────────────────────────────────────
 
 interface RunForAgents {
@@ -466,6 +677,147 @@ interface RunForAgents {
   saveAgentMap: (agent: string, entry: { session_id: string; model: string; coding_agent: string }) => void;
 }
 
+/**
+ * PURE, SYNC — no network, no filesystem, no session id (session ids exist
+ * only after `agentSessionId()`, which runs after this — SPF #15's design
+ * doc §4.4 walks through exactly why the ordering forces that). `run.cfg` +
+ * `run.adw_id` + `run.repo_root` + `run.context_handoff_dir` + the agent in,
+ * `SandboxSpec | undefined` out. `undefined` (the resolved backend is
+ * "local") means `AgentRequest.sandbox` stays unset — byte-identical to
+ * before this feature existed.
+ *
+ * `handoff_sandbox` PRESERVES `handoff_host`'s shape —
+ * `<handoff_dir>/sessions/<adw_id>/context_handoff`, mirroring
+ * `run.context_handoff_dir` — because two shipped prompts
+ * (planner/user.md, documenter/user.md) parse `<adw_id>` out of that exact
+ * shape to name `specs/<adw_id>_<slug>.md`/`app_docs/<adw_id>_<slug>.md`. A
+ * bare `handoff_dir` would silently cost those filenames their provenance,
+ * with `gates.artifactsExist` still green (it only checks the CLAIMED path).
+ */
+export function sandboxSpecFor(run: RunForAgents, agent: AgentConfig): SandboxSpec | undefined {
+  const sb = run.cfg.sandbox;
+  const backend = agent.sandbox ?? sb.backend;
+  if (backend === "local") return undefined;
+
+  const scope = sb.scope;
+  const lease_key = scope === "run" ? run.adw_id : `${run.adw_id}/${agent.name}`;
+  const handoff_sandbox = path.posix.join(sb.handoff_dir, "sessions", run.adw_id, "context_handoff");
+
+  return {
+    backend,
+    adw_id: run.adw_id,
+    agent: agent.name,
+    lease_key,
+    scope,
+    host_root: run.repo_root,
+    workspace_dir: sb.workspace_dir,
+    handoff_host: run.context_handoff_dir,
+    handoff_sandbox,
+    scratch_dir: sb.scratch_dir,
+    env: sandboxEnvFor(sb, agent),
+    image: sb.image,
+    setup: sb.setup,
+    egress: sb.egress,
+    lifetime_seconds: sb.lifetime_seconds,
+    max_total_lifetime_seconds: sb.max_total_lifetime_seconds,
+    request_timeout_seconds: sb.request_timeout_seconds,
+    exec_timeout_seconds: sb.exec_timeout_seconds,
+    transport: sb.transport,
+    opensandbox: sb.opensandbox,
+    cloudflare: sb.cloudflare,
+  };
+}
+
+/**
+ * Rewrite one path field's string entries by prefix, first rule to match
+ * wins, everything else (including an unrelated absolute path) passes
+ * through untouched.
+ */
+function translatePath(value: string, rules: ReadonlyArray<readonly [string, string]>): string {
+  for (const [from, to] of rules) {
+    if (value === from) return to;
+    const prefix = from.endsWith("/") ? from : `${from}/`;
+    if (value.startsWith(prefix)) return `${to}/${value.slice(prefix.length)}`;
+  }
+  return value;
+}
+
+/**
+ * Envelope fields (besides `artifacts`/`changed_files`) that ALSO carry a
+ * single absolute path, so both translate functions below must rewrite
+ * them too. `diff_path` (`ChangesOutput`, `data_types.ts`) is the known
+ * case: `changes.asEnvelope` sets it as an absolute host path alongside
+ * (and duplicating) `artifacts[0]`, and the documenter is hard-instructed
+ * to read it directly (`prompts.ts`, the documenter's own system/user
+ * prompts) — a sandboxed documenter otherwise gets a host path it cannot
+ * open. Add a new field here, not a new one-off `if`, the next time an
+ * envelope schema grows a path-bearing scalar.
+ */
+const SINGLE_PATH_FIELDS = ["diff_path"] as const;
+
+function translateSinglePathFields(
+  envelope: EnvelopeBase,
+  rules: ReadonlyArray<readonly [string, string]>,
+): Partial<Record<(typeof SINGLE_PATH_FIELDS)[number], string>> {
+  const out: Partial<Record<(typeof SINGLE_PATH_FIELDS)[number], string>> = {};
+  const withFields = envelope as EnvelopeBase & Record<string, unknown>;
+  for (const field of SINGLE_PATH_FIELDS) {
+    const value = withFields[field];
+    if (typeof value === "string" && value) out[field] = translatePath(value, rules);
+  }
+  return out;
+}
+
+/**
+ * OUTBOUND (sandbox -> host), mutates the freshly parsed envelope in place.
+ * Rewrites `artifacts` and, when present, `changed_files` — the handoff
+ * rule is checked FIRST (disjoint from workspace_dir by validation, so
+ * order is not load-bearing here, but the implementation still checks it
+ * first so it stays correct if that invariant is ever relaxed). Applied
+ * immediately after every parse (the first prompt AND every JSON-repair/
+ * gate-correction re-parse), so it is total over every dispatch.
+ */
+export function translateEnvelopePaths(envelope: EnvelopeBase, spec: SandboxSpec): void {
+  const rules = [
+    [spec.handoff_sandbox, spec.handoff_host],
+    [spec.workspace_dir, spec.host_root],
+  ] as const;
+  envelope.artifacts = envelope.artifacts.map((p) => translatePath(p, rules));
+  const withChangedFiles = envelope as EnvelopeBase & { changed_files?: string[] };
+  if (Array.isArray(withChangedFiles.changed_files)) {
+    withChangedFiles.changed_files = withChangedFiles.changed_files.map((p) => translatePath(p, rules));
+  }
+  Object.assign(envelope, translateSinglePathFields(envelope, rules));
+}
+
+/**
+ * INBOUND (host -> sandbox), the exact inverse — applied to `call.previous`
+ * at the `variables` build site ONLY, before `JSON.stringify`. Returns a
+ * COPY: the persisted envelope and the caller's own object must keep host
+ * paths, so this one does not mutate where `translateEnvelopePaths` does.
+ *
+ * Rule order IS load-bearing here, unlike the outbound direction:
+ * `handoff_host` is `<data_dir>/sessions/<adw_id>/context_handoff` and
+ * `data_dir` resolves against `repo_root` by default, so `handoff_host` is
+ * normally UNDER `host_root`. Checking `host_root` first would rewrite a
+ * handoff-plane path to somewhere under `workspace_dir` the mirror never
+ * populates — so `handoff_host` is checked FIRST, always.
+ */
+export function translateEnvelopeToSandbox(envelope: EnvelopeBase, spec: SandboxSpec): EnvelopeBase {
+  const rules = [
+    [spec.handoff_host, spec.handoff_sandbox],
+    [spec.host_root, spec.workspace_dir],
+  ] as const;
+  const copy: EnvelopeBase & { changed_files?: string[] } = { ...envelope };
+  copy.artifacts = (envelope.artifacts ?? []).map((p) => translatePath(p, rules));
+  const withChangedFiles = envelope as EnvelopeBase & { changed_files?: string[] };
+  if (Array.isArray(withChangedFiles.changed_files)) {
+    copy.changed_files = withChangedFiles.changed_files.map((p) => translatePath(p, rules));
+  }
+  Object.assign(copy, translateSinglePathFields(envelope, rules));
+  return copy;
+}
+
 /** One agent call: render prompts -> pi run -> typed parse -> gates -> envelope. */
 export async function execute(run: RunForAgents, phase: Phase, call: AgentCall): Promise<EnvelopeBase> {
   // The single dispatch-site change tiering makes: one effective AgentConfig,
@@ -479,10 +831,36 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   const agentDir = path.join(run.session_dir, agent.name);
   mkdirSync(agentDir, { recursive: true });
 
+  // SPF #15 — built here, before `variables`/`prompts.render`, and NOT keyed
+  // on the session id (unavailable this early — see sandboxSpecFor's own
+  // comment). Both `context_handoff_dir` below and the inbound envelope
+  // translation need the spec baked into the rendered prompt text.
+  const spec = sandboxSpecFor(run, agent);
+  if (spec) {
+    sandbox.registerRunLog(spec.adw_id, (e) =>
+      run.tracer.event(
+        makeEventRecord({
+          adw_id: run.adw_id,
+          phase_id: phase.phase_id,
+          type: "log",
+          name: "sandbox",
+          payload: { level: e.level, msg: e.msg, ...(e.data ? { data: e.data } : {}) },
+        }),
+      ),
+    );
+  }
+
   const variables = {
     prompt: call.prompt,
-    previous_envelope: call.previous ? JSON.stringify(call.previous, null, 2) : "(none)",
-    context_handoff_dir: run.context_handoff_dir,
+    // Inverse translation (§5.3a): `call.previous` is the previous phase's
+    // ALREADY-TRANSLATED host-path envelope; handing it to a sandboxed agent
+    // verbatim gives it absolute host paths that do not exist in the
+    // container. `changes.asEnvelope`'s `diff_path`/`artifacts` are the
+    // sharp case — code-generated, so no prompt instruction can fix them.
+    previous_envelope: call.previous
+      ? JSON.stringify(spec ? translateEnvelopeToSandbox(call.previous, spec) : call.previous, null, 2)
+      : "(none)",
+    context_handoff_dir: spec ? spec.handoff_sandbox : run.context_handoff_dir,
   };
   const systemText = prompts.render(paths.resolvePromptRef(run, agent.prompt_engineering.system), variables);
   const userText = prompts.render(paths.resolvePromptRef(run, agent.prompt_engineering.user), variables);
@@ -533,20 +911,25 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       tools: agent.tools ?? undefined,
       output_schema: call.output_type.schema,
       output_type_name: call.output_type.name,
-      cwd: run.repo_root,
+      cwd: spec ? spec.workspace_dir : run.repo_root,
       flue_db_path: path.join(run.data_dir, "flue.db"),
       env: agentEnv(agent),
+      sandbox: spec,
     };
     const forward = eventForwarder(run, phase, agent.name, agent.coding_agent);
     const onSpawn = (pid: number) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`);
     const onExit = (pid: number) => run.tracer.processEnd(run.adw_id, pid);
+    if (spec) await sandbox.reconcileWorkspace(spec);
     const result =
       agent.coding_agent === "claude_code"
         ? await agentCc.run(request, forward, onSpawn, onExit)
         : await agentFlue.run(request, forward, onSpawn, onExit);
+    // SPEND IS RECORDED BEFORE THE EXTRACT CAN THROW: a failed extract must
+    // not also lose this call's tokens/cost off the Run's ledger.
     run.addUsage(result.tokens, result.cost);
     spent.merge(result.usage);
     latest = result;
+    if (spec) await sandbox.extractWorkspace(spec);
     return result;
   }
 
@@ -556,7 +939,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   const treeBefore = permissions.snapshot(run);
 
   let result = await send(userText);
-  let parsed = await parseWithRetries(run, phase, call, result, send);
+  let parsed = await parseWithRetries(run, phase, call, result, send, spec);
   let envelope = parsed.envelope;
 
   // claim gates — violations flow back into the SAME session as corrections
@@ -589,7 +972,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       violations.join("\n- ") +
       "\n\nFix these problems, then re-emit ONLY your Report JSON.";
     result = await send(correction);
-    parsed = await parseWithRetries(run, phase, call, result, send);
+    parsed = await parseWithRetries(run, phase, call, result, send, spec);
     envelope = parsed.envelope;
   }
 
@@ -749,6 +1132,7 @@ async function parseWithRetries(
   call: AgentCall,
   result: FlueResultLike,
   send: (text: string) => Promise<FlueResultLike>,
+  spec?: SandboxSpec,
 ): Promise<{ envelope: EnvelopeBase; attempt: number }> {
   let current = result;
   for (let attempt = 1; attempt <= JSON_FIX_ATTEMPTS + 1; attempt++) {
@@ -757,6 +1141,10 @@ async function parseWithRetries(
       // back to extracting JSON from the text in that case, same as before.
       const payload = current.report ?? extractJson(current.text);
       const envelope = v.parse(call.output_type.schema, payload) as EnvelopeBase;
+      // Outbound translation (§5.3a) — total over every parse: the first
+      // prompt AND every JSON-repair/gate-correction re-parse, both call
+      // sites of this function.
+      if (spec) translateEnvelopePaths(envelope, spec);
       return { envelope, attempt };
     } catch (error) {
       const message = describeParseError(error);

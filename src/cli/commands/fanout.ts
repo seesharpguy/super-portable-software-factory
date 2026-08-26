@@ -38,6 +38,7 @@ import {
 } from "../../core/fanout.ts";
 import { findChain, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
+import { withRunScope } from "../../core/sandbox.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { newId, parseCli, resolvePrompt } from "../../core/utils.ts";
 import { isInteractive } from "../ask.ts";
@@ -399,7 +400,7 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
       unattended: true,
       chain_source: chain.source,
     };
-    return runChainDef(chain, ctx);
+    return withRunScope(dispatch.adwId, () => runChainDef(chain, ctx));
   };
 
   // Best-effort operator guidance on an abnormal exit — NOT a real

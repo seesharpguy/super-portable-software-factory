@@ -1,7 +1,8 @@
 /** Shared by both `spf <chain> "..."` and `spf run <chain> "..."` — same dispatch. */
 import * as paths from "../../core/paths.ts";
 import * as agents from "../../core/agents.ts";
-import { parseCli, resolvePrompt } from "../../core/utils.ts";
+import { newId, parseCli, resolvePrompt } from "../../core/utils.ts";
+import { withRunScope } from "../../core/sandbox.ts";
 import { runChain, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { isInteractive } from "../ask.ts";
@@ -29,10 +30,15 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
   }
 
   const anchor = paths.resolveAnchor(options["cwd"]);
+  // Minted here, not left null-and-minted-later inside session.ensure — a
+  // sandbox lease is keyed on `<adw_id>/<agent>` (design §4.3) and
+  // `withRunScope` below needs the SAME id up front to know which leases
+  // this run's `finally` must tear down.
+  const adwId = options["adw-id"] ?? newId(8);
   const ctx: ChainContext = {
     prompt: resolvePrompt(positionals[0]),
     config_paths: paths.resolveConfigPaths(anchor, options["config"]).paths,
-    adw_id: options["adw-id"] ?? null,
+    adw_id: adwId,
     cwd: anchor.cwd,
     chain_name: chain.name,
     // Only `refine` reads this (a "## Parent: #<id>" back-reference on
@@ -77,11 +83,15 @@ export async function dispatchChain(chain: ChainDefinition, argv: string[]): Pro
     const dashboard = mountRunDashboard({ maxCost: cfg.defaults.max_run_cost, maxTokens: cfg.defaults.max_run_tokens });
     ctx.render_hooks = { sink: dashboard.sink, observer: dashboard.observer, pause: dashboard.pause, resume: dashboard.resume };
     try {
-      return await runChain(chain, ctx, chainOptions);
+      // Same withRunScope as the unattended path below — an interactive
+      // dispatch is just as capable of opening a sandbox lease (design
+      // §4.3), and skipping this here would leak it silently since nothing
+      // else in this branch calls teardownRun.
+      return await withRunScope(adwId, () => runChain(chain, ctx, chainOptions));
     } finally {
       await dashboard.close();
     }
   }
 
-  return runChain(chain, ctx, chainOptions);
+  return withRunScope(adwId, () => runChain(chain, ctx, chainOptions));
 }

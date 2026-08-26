@@ -46,9 +46,10 @@ import {
   type SandboxFactory,
 } from "@flue/runtime";
 import { local, sqlite, start, type Flue } from "@flue/runtime/node";
-import type { AgentRequest, AgentResult, ThinkingLevel } from "./data_types.ts";
+import type { AgentRequest, AgentResult, SandboxSpec, ThinkingLevel } from "./data_types.ts";
 import { UsageBreakdown, makeAgentResult } from "./data_types.ts";
 import { registerOllamaModel } from "./ollama_provider.ts";
+import * as sandbox from "./sandbox.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
 
 const RESULT_SNIPPET_CHARS = 20_000; // tool output rides along whole; clip only guards pathological cases
@@ -197,11 +198,18 @@ function resolveBuiltinTools(names: string[]): Array<(env: Sandbox) => unknown> 
  * USER/LANG/TERM/TMPDIR) — `env` is `request.env ?? operatorEnv()` from the
  * caller, restoring today's actual behavior unless the agent's own
  * `env_allowlist` narrowed it (see agents.ts).
+ *
+ * `spec.sandbox` (SPF #15) is absent for every agent today — byte-identical
+ * to before this field existed. Set, it routes to `sandbox.factoryFor()`
+ * instead of `local()`; note NO `cwd` reaches `useSandbox` for a remote
+ * backend either way (a `cwd` override on `useSandbox` drops adapter-added
+ * properties — see the sandbox design doc §2). The workspace dir travels on
+ * the spec itself (`spec.sandbox.workspace_dir`), read by the adapter.
  */
-function sandboxFor(toolNames: string[] | null | undefined, cwd: string, env: Record<string, string>): SandboxFactory {
-  const base = local({ cwd, env });
-  if (!toolNames) return base;
-  const factories = resolveBuiltinTools(toolNames);
+function sandboxFor(spec: RenderSpec): SandboxFactory {
+  const base = spec.sandbox ? sandbox.factoryFor(spec.sandbox) : local({ cwd: spec.cwd, env: spec.env });
+  if (!spec.toolNames) return base;
+  const factories = resolveBuiltinTools(spec.toolNames);
   return { ...base, tools: (env) => factories.map((f) => f(env)) as any };
 }
 
@@ -235,6 +243,8 @@ interface RenderSpec {
   outputSchema: AgentRequest["output_schema"];
   outputTypeName: string;
   env: Record<string, string>;
+  /** SPF #15 — absent (the default) means local(), byte-identical to before this field existed. */
+  sandbox?: SandboxSpec;
 }
 
 const REGISTRY = new Map<string, RenderSpec>();
@@ -244,7 +254,7 @@ function sfAgentRender({ id }: AgentProps): string {
   if (!spec) throw new Error(`agent_flue: no render spec registered for conversation ${id} — run() must set it before dispatching`);
 
   useModel(spec.model, { thinkingLevel: spec.thinking });
-  useSandbox(sandboxFor(spec.toolNames, spec.cwd, spec.env));
+  useSandbox(sandboxFor(spec));
 
   const writeReport = useDataWriter("sf_report");
   useTool({
@@ -367,6 +377,7 @@ export async function run(
     outputSchema: request.output_schema,
     outputTypeName: request.output_type_name,
     env: request.env ?? operatorEnv(),
+    sandbox: request.sandbox,
   });
 
   const pid = process.pid ?? -1;

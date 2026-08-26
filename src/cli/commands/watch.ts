@@ -21,6 +21,7 @@ import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps } from "../../core/watch.ts";
 import { findChain, resolveRequiredAgents, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
+import { withRunScope } from "../../core/sandbox.ts";
 import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { parseCli } from "../../core/utils.ts";
@@ -407,7 +408,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // LIMITATION from PR #20: an unattended watch dispatch used to call
     // `runChainDef` with no options at all, so nothing --suite-shaped could
     // ever reach it.
-    const code = await runChainDef(chainDef, ctx, opts.chainOptions);
+    const code = await withRunScope(opts.adwId, () => runChainDef(chainDef, ctx, opts.chainOptions));
     // Resolved with the SAME options `runChainDef` just ran the chain with,
     // so a `chain_options` override that swaps a "reviewer" step in or out
     // is reflected here too, not just each chain's static/YAML default.
@@ -450,7 +451,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     };
     // Same `watch.chain_options` threading as runChain above — see its
     // comment for the KNOWN LIMITATION this fixes.
-    const code = await runChainDef(chainDef, ctx, opts.chainOptions);
+    const code = await withRunScope(opts.adwId, () => runChainDef(chainDef, ctx, opts.chainOptions));
     if (code !== 0) {
       const detail = detailFromFailedPhase(
         opts.cwd,

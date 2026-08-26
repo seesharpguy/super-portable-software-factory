@@ -5,21 +5,25 @@
  * re-verified against this package's build after the doctor.ts
  * built-in-chain validation fix plus the declarative `env:` config block /
  * `{model}` per-agent-under-Ollama fix (README/config.md/roster.md doc
- * growth + new tests) (541.4kB packed / 1536.3kB unpacked): ≤570 KB packed,
- * ≤1.62 MB unpacked — ~5% headroom so a modest PR doesn't trip CI, without
- * silently regressing back toward shipping compiled test files. Previously
+ * growth + new tests) (541.4kB packed / 1536.3kB unpacked). Previously
  * 514.1kB/1455.7kB (after Jira issue-authoring + priority/frontier/roll-up +
  * spec-completion), and 478.5kB/1342.6kB before that (after tiering #14) —
  * raise these again, the same way, whenever a real feature deliberately
  * grows the package; this gate exists to catch unintentional bloat (an
  * accidentally-included file, a runaway dependency), not to cap the
  * project's size forever.
+ *
+ * Raised again for SPF #15 (sandbox backends: `sandbox.ts`/
+ * `sandbox_opensandbox.ts`/`sandbox_cloudflare.ts`/`sandbox_sdk_types.ts` +
+ * their compiled `.d.ts`), rebased onto the above and re-measured at
+ * 597.1kB packed / 1729.6kB unpacked, 186 files: ≤625 KB packed, ≤1.81 MB
+ * unpacked — ~5% headroom, same rationale as every prior raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 570_000;
-const UNPACKED_BUDGET = 1_620_000;
+const PACKED_BUDGET = 625_000;
+const UNPACKED_BUDGET = 1_810_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
