@@ -843,6 +843,16 @@ async function openPrForWinner(
     : won.reviewRequired
       ? "Reviewer ran, but no verdict could be read back from the session data."
       : `Nothing reviewed this change — chain \`${deps.chain}\` has no reviewer step.`;
+  // The reviewer's biggest complaint about a bare "automated by spf watch"
+  // body: it never says what was actually asked for, only chain plumbing.
+  // The issue body IS that ask (it's the same text `runIssue`/`runChain`
+  // built the prompt from) and is already sitting on `issue` — no new DB
+  // read needed to surface it. Capped defensively: a Jira description can
+  // be arbitrarily long, and this is a PR body, not the source of record.
+  const MAX_ISSUE_BODY_CHARS = 4000;
+  const issueBody = issue.body.trim();
+  const askSection =
+    issueBody.length > MAX_ISSUE_BODY_CHARS ? `${issueBody.slice(0, MAX_ISSUE_BODY_CHARS)}\n\n_(truncated)_` : issueBody || "_(no description on the issue)_";
   // No cross-linking magic keyword here on purpose (a code host paired
   // with a different tracker has no "Closes #n" convention to hook into
   // — see provider.ts) — the issue id in the title/body is plain text
@@ -851,7 +861,7 @@ async function openPrForWinner(
   const pr = await deps.codeHost.openPr({
     branch: won.branch,
     title: `${issue.title} (${issue.id})`,
-    body: `Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}.\n\n${reviewLine}`,
+    body: `${askSection}\n\n---\n\n**Review:** ${reviewLine}\n\n_Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}._`,
     base: deps.baseBranch,
   });
   await deps.provider.writeMarker(issue, { worktree: won.worktreePath, branch: won.branch, pr: pr.number, attempt: 0 });
@@ -859,7 +869,11 @@ async function openPrForWinner(
   deps.log(`watch: ${issue.id}: opened PR #${pr.number} — review`);
   deps.notify({
     kind: "pr_opened",
-    level: "info",
+    // Unlike `issue_claimed`/`issue_done` (routine milestones), an opened PR
+    // is a standing ask for a human reviewer — the same "needs a human, not
+    // a failure" bucket as `issue_blocked`, so it ships to an
+    // `attention`-scoped channel, not just `all`.
+    level: "notice",
     title: `PR #${pr.number} opened`,
     detail: reviewLine,
     fields: [

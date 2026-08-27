@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isKnownToolName, CcToolCallTracker, resolveClaudeCmdSpec } from "../core/agent_cc.js";
+import { isKnownToolName, CcToolCallTracker, resolveClaudeCmdSpec, isOllamaLaunchCmd } from "../core/agent_cc.js";
 
 /** Saves/restores SPF_CLAUDE_CMD around a test — process.env is real global state. */
 function withClaudeCmd(value: string | undefined, fn: () => void): void {
@@ -44,6 +44,24 @@ test("resolveClaudeCmdSpec: SPF_CLAUDE_CMD unset -> plain claude, byte-identical
   withClaudeCmd(undefined, () => {
     assert.equal(resolveClaudeCmdSpec("sonnet"), "claude");
   });
+});
+
+// Regression for a real production bug: the dashboard showed $27.63 for a
+// session run entirely through `ollama launch claude --model
+// kimi-k2.7-code:cloud`. That number came straight from `claude`'s own
+// total_cost_usd, which prices whatever model actually served the request
+// using CC's internal Anthropic pricing table — meaningless for a model
+// Ollama bills by flat subscription/local compute, not per token. `run()`
+// zeroes cost whenever this returns true; see its call site in agent_cc.ts.
+test("isOllamaLaunchCmd: true for the ollama launch wrapper shape, with or without a --model tag", () => {
+  assert.equal(isOllamaLaunchCmd("ollama launch claude --model kimi-k2.7-code:cloud"), true);
+  assert.equal(isOllamaLaunchCmd("ollama launch claude"), true);
+});
+
+test("isOllamaLaunchCmd: false for plain claude and for other wrappers/subcommands", () => {
+  assert.equal(isOllamaLaunchCmd("claude"), false);
+  assert.equal(isOllamaLaunchCmd("ollama run claude"), false);
+  assert.equal(isOllamaLaunchCmd("some-proxy claude"), false);
 });
 
 test("isKnownToolName: SPF's lowercase vocabulary maps onto Claude Code's own tool names, ls is known-but-dropped, typos are unknown", () => {

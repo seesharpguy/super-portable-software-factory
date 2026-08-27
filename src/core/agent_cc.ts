@@ -270,6 +270,21 @@ export function resolveClaudeCmdSpec(model: string): string {
   return (process.env.SPF_CLAUDE_CMD || "claude").replaceAll("{model}", model);
 }
 
+/**
+ * Whether a resolved `cmdSpec` launches `claude` through `ollama launch` —
+ * the one wrapper shape that needs its own `--` separator (see the module
+ * doc comment) AND the one whose reported `total_cost_usd` isn't a real
+ * Anthropic-billed dollar figure (see the cost note at this module's `run()`
+ * call site): Ollama bills these sessions by flat subscription or local
+ * compute, never per token, so whatever price `claude`'s own internal
+ * (Anthropic) pricing table assigns to the actual serving model is fiction.
+ * Exported as its own pure function, same reasoning as `resolveClaudeCmdSpec`.
+ */
+export function isOllamaLaunchCmd(cmdSpec: string): boolean {
+  const [first, second] = cmdSpec.split(/\s+/).filter(Boolean);
+  return first === "ollama" && second === "launch";
+}
+
 // ── process lifecycle ────────────────────────────────────────────────────────
 
 const inFlight = new Set<ChildProcessWithoutNullStreams>();
@@ -340,7 +355,8 @@ export async function run(
   // ever reached. Any cmdSpec that already contains a literal `--` token is
   // left completely alone — `args` is appended after it exactly as written,
   // never a second separator.
-  const needsOllamaLaunchSeparator = cmdTokens[0] === "ollama" && cmdTokens[1] === "launch" && !cmdArgs.includes("--");
+  const isOllamaLaunch = isOllamaLaunchCmd(cmdSpec);
+  const needsOllamaLaunchSeparator = isOllamaLaunch && !cmdArgs.includes("--");
   const fullArgs = needsOllamaLaunchSeparator ? [...cmdArgs, "--", ...args] : [...cmdArgs, ...args];
   const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: request.env ?? operatorEnv() });
   // The prompt travels as a positional argv element, not stdin — closing it
@@ -408,7 +424,15 @@ export async function run(
       reasoning: u.output_tokens_details?.thinking_tokens ?? 0,
       // CC gives one total cost, not a per-component breakdown like Flue/pi-ai
       // do — folded honestly under `total`, not split up to fabricate one.
-      cost: { total: final.total_cost_usd ?? 0 },
+      // Under `ollama launch`, though, `total_cost_usd` isn't honest at all:
+      // it's `claude`'s own internal (Anthropic) per-token price table applied
+      // to whatever model actually served the request, and Ollama bills
+      // these sessions by flat subscription/local compute, not per token — so
+      // the number has no relationship to what the operator is actually
+      // charged. Zeroed here, matching the same-situation call already made
+      // for the Flue backend's own Ollama models (see `ollama_provider.ts`'s
+      // `modelFor()`).
+      cost: { total: isOllamaLaunch ? 0 : (final.total_cost_usd ?? 0) },
     },
     totalTokens,
   );

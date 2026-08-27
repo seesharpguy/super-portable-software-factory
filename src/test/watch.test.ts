@@ -688,7 +688,7 @@ test("finishReviews: a still-open PR leaves the issue in review", async () => {
 
 // ── notifications ────────────────────────────────────────────────────────────
 
-test("claim -> PR opened -> merged fires issue_claimed, pr_opened, then issue_done (all info-level)", async () => {
+test("claim -> PR opened -> merged fires issue_claimed (info), pr_opened (notice), then issue_done (info)", async () => {
   const provider = new FakeProvider();
   provider.addIssue("50", "Add a /health endpoint");
   const codeHost = new FakeCodeHost();
@@ -699,7 +699,12 @@ test("claim -> PR opened -> merged fires issue_claimed, pr_opened, then issue_do
   await claimNewWork(deps, state);
   await waitUntil(() => state.inflight.size === 0);
   assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "pr_opened"]);
-  assert.ok(events.every((e) => e.level === "info"));
+  // pr_opened is a standing ask for a human reviewer — same "needs a human"
+  // bucket as issue_blocked's "notice", not a routine "info" milestone.
+  assert.deepEqual(
+    events.map((e) => e.level),
+    ["info", "notice"],
+  );
 
   codeHost.prs.set(1000, { merged: true, state: "closed", ciStatus: "success" });
   await finishReviews(deps);
