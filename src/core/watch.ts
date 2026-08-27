@@ -742,7 +742,10 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
       deps.log(`watch: ${issue.id}'s PR #${marker.pr} merged — done`);
       deps.notify({
         kind: "issue_done",
-        level: "info",
+        // Same reasoning as pr_opened above: a merge landing is a milestone
+        // worth a human's attention (it's what closes the loop on the PR
+        // that alerted them in the first place), not a routine "info" tick.
+        level: "notice",
         title: `issue ${issue.id} done`,
         detail: `PR #${marker.pr} merged.`,
         fields: [["issue", issue.id], ["title", issue.title], ["pr", `#${marker.pr}`]],

@@ -688,7 +688,7 @@ test("finishReviews: a still-open PR leaves the issue in review", async () => {
 
 // ── notifications ────────────────────────────────────────────────────────────
 
-test("claim -> PR opened -> merged fires issue_claimed (info), pr_opened (notice), then issue_done (info)", async () => {
+test("claim -> PR opened -> merged fires issue_claimed (info), pr_opened (notice), then issue_done (notice)", async () => {
   const provider = new FakeProvider();
   provider.addIssue("50", "Add a /health endpoint");
   const codeHost = new FakeCodeHost();
@@ -709,7 +709,7 @@ test("claim -> PR opened -> merged fires issue_claimed (info), pr_opened (notice
   codeHost.prs.set(1000, { merged: true, state: "closed", ciStatus: "success" });
   await finishReviews(deps);
   assert.deepEqual(events.map((e) => e.kind), ["issue_claimed", "pr_opened", "issue_done"]);
-  assert.equal(events.at(-1)!.level, "info");
+  assert.equal(events.at(-1)!.level, "notice");
 });
 
 test("a rejected chain run fires issue_blocked at notice level", async () => {
