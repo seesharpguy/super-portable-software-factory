@@ -56,6 +56,7 @@ Emit a **flat list**, not nested JSON: each node names its `parent` by another n
 - A completed slice is demoable or verifiable on its own.
 - Size each slice to fit in a single fresh context window for the builder that will implement it — when in doubt, split.
 - Any prefactoring the spec implies should be its own slice, sequenced first via `blocked_by`, not folded into the first "real" slice.
+- Never emit a leaf whose job is only to add or update tests. Tests are part of the layer they cover, not a layer of their own: the slice that changes a behavior writes or updates the tests for that behavior itself, as one of its acceptance criteria — a trailing "update tests" story is a horizontal slice wearing a leaf's shape, and a gap this rule exists to close.
 
 ## Dependencies: a DAG, not a tree
 
