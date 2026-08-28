@@ -186,6 +186,7 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       [
         { value: "login", label: "already logged in via `claude login`", hint: "writes nothing" },
         { value: "key", label: "ANTHROPIC_API_KEY" },
+        { value: "aig", label: "Cloudflare AI Gateway (Anthropic endpoint)" },
         { value: "endpoint", label: "custom endpoint (Ollama / Ollama Cloud / a proxy)" },
       ],
       "login",
@@ -204,6 +205,31 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       asker.note(
         "spf doctor now probes ANTHROPIC_BASE_URL with a minimal POST /v1/messages (informational only, never a hard failure) and flags a base URL that already ends in \"/v1\" as a likely double-path mistake — the default above (without a trailing /v1) is exactly what that check is guarding against. It still cannot validate ANTHROPIC_AUTH_TOKEN itself.",
       );
+    } else if (auth === "aig") {
+      // Cloudflare AI Gateway's Anthropic endpoint — routes Claude Code's
+      // traffic through a gateway that holds the real Anthropic credentials
+      // (Unified Billing or BYOK), so the operator authenticates to the
+      // GATEWAY, not to Anthropic. The exact env shape comes straight from
+      // developers.cloudflare.com/ai-gateway/integrations/coding-agents/claude-code:
+      //   ANTHROPIC_BASE_URL = https://gateway.ai.cloudflare.com/v1/<ACCOUNT_ID>/<GATEWAY_ID>/anthropic
+      //   ANTHROPIC_API_KEY  = <CF_AIG_TOKEN>   (any value — Claude Code requires it set; the gateway ignores it)
+      //   ANTHROPIC_CUSTOM_HEADERS = cf-aig-authorization: Bearer <CF_AIG_TOKEN>
+      // The gateway token must have Run permission on the gateway.
+      asker.note("Create the gateway in the Cloudflare dashboard (AI Gateway), then use its token with Run permission. The gateway holds the Anthropic credentials (Unified Billing / BYOK); this token authenticates YOU to the gateway.");
+      const baseUrl = await asker.text("ANTHROPIC_BASE_URL", {
+        default: "https://gateway.ai.cloudflare.com/v1/<ACCOUNT_ID>/<GATEWAY_ID>/anthropic",
+        validate: (v) => (v.trim() && !v.includes("<") && v.endsWith("/anthropic") ? null : "must be the gateway's /anthropic endpoint — https://gateway.ai.cloudflare.com/v1/<ACCOUNT_ID>/<GATEWAY_ID>/anthropic"),
+      });
+      env["ANTHROPIC_BASE_URL"] = baseUrl;
+      const token = await asker.secret("CF_AIG_TOKEN (gateway token)", { current: ctx.existingEnv.get("ANTHROPIC_API_KEY") });
+      const tok = token || "replace-me";
+      // Claude Code requires ANTHROPIC_API_KEY to be set even when the
+      // gateway ignores it — the CF doc reuses the gateway token as the
+      // placeholder. The real auth rides on the custom header below.
+      env["ANTHROPIC_API_KEY"] = tok;
+      env["ANTHROPIC_CUSTOM_HEADERS"] = `cf-aig-authorization: Bearer ${tok}`;
+      envExampleKeys.push("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS");
+      asker.note("spf doctor probes this gateway's /v1/messages with the cf-aig-authorization header (informational, never a hard failure).");
     }
 
     // The packaged roster pins planner/reviewer/documenter to their own
@@ -274,6 +300,49 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
           "planner/reviewer/documenter pin their own model in the packaged roster and always win over defaults.model — overriding all three to the ollama model chosen above, or spf doctor would report missing FIREWORKS_API_KEY/GEMINI_API_KEY/OPENAI_API_KEY for providers this flow never asked about.",
         );
       }
+    }
+
+    // Cloudflare Workers AI — a keyed provider, so the API token was
+    // collected by the envKeys block above. It ALSO needs an endpoint
+    // address (like ollama needs OLLAMA_BASE_URL): an account id to derive
+    // the standard https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1
+    // URL, or an explicit CLOUDFLARE_AI_BASE_URL override (a custom domain,
+    // or a Cloudflare AI Gateway endpoint). See cloudflare_provider.ts's
+    // cloudflareAiBaseUrl() for the resolution order doctor and dispatch
+    // both share — asking here keeps the interview's answers and the
+    // runtime's resolution from drifting apart.
+    if (provider === "cloudflare") {
+      asker.note("Workers AI model ids start with @cf/ — e.g. @cf/zai-org/glm-5.3-flash. See developers.cloudflare.com/ai/models for the catalog.");
+      const useExplicit = await asker.confirm("Use an explicit base URL instead of an account id (custom domain / AI Gateway)?", false);
+      if (useExplicit) {
+        const baseUrl = await asker.text("CLOUDFLARE_AI_BASE_URL", {
+          default: "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1",
+          validate: (v) => (v.trim() && !v.includes("<") ? null : "set the full OpenAI-compatible base URL (no placeholders)"),
+        });
+        env["CLOUDFLARE_AI_BASE_URL"] = baseUrl;
+        envExampleKeys.push("CLOUDFLARE_AI_BASE_URL");
+      } else {
+        const accountId = await asker.text("CLOUDFLARE_ACCOUNT_ID", {
+          validate: (v) => (v.trim() ? null : "required — find it in the Cloudflare dashboard (right sidebar)"),
+        });
+        env["CLOUDFLARE_ACCOUNT_ID"] = accountId;
+        envExampleKeys.push("CLOUDFLARE_ACCOUNT_ID");
+      }
+      asker.note("spf doctor probes the resolved Workers AI endpoint (informational, never a hard failure).");
+
+      // Same pinned-roster fix as the ollama branch above: cloudflare is a
+      // single self-served endpoint, not a multi-model aggregator like
+      // openrouter — the packaged roster's planner (fireworks/...),
+      // reviewer, and documenter (openai/...) are NOT reachable through a
+      // Workers AI account, so leaving them pinned would route three agents
+      // at providers whose keys this interview never asked for. Overriding
+      // all three to the chosen cloudflare model is the exact same fix.
+      for (const name of ["planner", "reviewer", "documenter"]) {
+        agentOverrides.push({ name, model: defaults.model });
+      }
+      notes.push(
+        "planner/reviewer/documenter pin their own model in the packaged roster and always win over defaults.model — overriding all three to the cloudflare model chosen above, or spf doctor would report missing FIREWORKS_API_KEY/OPENAI_API_KEY for providers a Workers AI account can't serve.",
+      );
     }
   }
 

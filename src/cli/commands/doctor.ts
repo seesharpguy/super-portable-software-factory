@@ -17,6 +17,7 @@ import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
+import { cloudflareAiBaseUrl } from "../../core/cloudflare_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
@@ -117,11 +118,11 @@ type ProbeResult = { ok: true; status: number } | { ok: false; error: string };
 const PROBE_TIMEOUT_MS = 3_000;
 
 /** A GET that never throws — a down/unreachable server is a finding to report, never a crash of `spf doctor` itself. */
-async function probeGet(url: string): Promise<ProbeResult> {
+async function probeGet(url: string, headers?: Record<string, string>): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, headers });
     return { ok: true, status: res.status };
   } catch (error) {
     return { ok: false, error: (error as Error).message };
@@ -187,12 +188,25 @@ async function probeAnthropicMessages(base: string, model: string): Promise<Prob
     // though the probe itself never authenticated. Harmless for Ollama,
     // which ignores the header entirely (see the module doc above).
     const apiKey = process.env["ANTHROPIC_AUTH_TOKEN"] || process.env["ANTHROPIC_API_KEY"];
+    // ANTHROPIC_CUSTOM_HEADERS (Claude Code's own escape hatch) carries the
+    // Cloudflare AI Gateway's `cf-aig-authorization: Bearer <token>` — without
+    // it, a gateway probe 401s even though the gateway is up. Parsed the
+    // same loose way Claude Code parses it: one `Name: value` per line, so a
+    // single header (the common case) needs no newline. Empty/comment-only
+    // lines are skipped, never crash the probe.
+    const customHeaders: Record<string, string> = {};
+    for (const line of (process.env["ANTHROPIC_CUSTOM_HEADERS"] ?? "").split(/\r?\n/)) {
+      const colon = line.indexOf(":");
+      if (colon <= 0) continue;
+      customHeaders[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+    }
     const res = await fetch(`${base}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
         ...(apiKey ? { "x-api-key": apiKey } : {}),
+        ...customHeaders,
       },
       body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ping" }] }),
       signal: controller.signal,
@@ -442,6 +456,50 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       result.ok ? `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}` : `unreachable: GET ${ollamaBase}/models -> ${result.error}`,
       result.ok ? "info" : "warn",
     );
+  }
+
+  // Cloudflare Workers AI — the same reachability check the Ollama block
+  // above runs, for the same reason: a keyed provider whose endpoint
+  // (derived from CLOUDFLARE_ACCOUNT_ID, or overridden by
+  // CLOUDFLARE_AI_BASE_URL) might simply be misconfigured. Unlike Ollama,
+  // Workers AI needs the Bearer token to answer at all (a 401 without it),
+  // so the probe sends `Authorization: Bearer $CLOUDFLARE_API_TOKEN` when
+  // set. `/models` is the OpenAI-compatible list endpoint (same shape the
+  // Ollama probe hits); a 404 here still means "host up, path differs",
+  // which is the useful signal, and the check is informational only — same
+  // never-a-hard-failure contract as the Ollama and ANTHROPIC_BASE_URL
+  // probes. Gated on tiering.enabled for ladder rungs, identically to
+  // usesOllamaFlue above.
+  const usesCloudflareFlue =
+    cfg.agents.some((a) => a.coding_agent !== "claude_code" && a.model.startsWith("cloudflare/")) ||
+    (cfg.tiering.enabled && cfg.tiering.tiers.some((t) => t.coding_agent !== "claude_code" && t.model.startsWith("cloudflare/")));
+  if (usesCloudflareFlue && !flags["no-probe"]) {
+    const cfBase = cloudflareAiBaseUrl();
+    if (!cfBase) {
+      check(
+        report,
+        "Cloudflare Workers AI endpoint",
+        true,
+        "CLOUDFLARE_ACCOUNT_ID (or CLOUDFLARE_AI_BASE_URL) is not set — Workers AI base URL can't be resolved",
+        "warn",
+      );
+    } else {
+      const cfBaseTrimmed = cfBase.replace(/\/+$/, "");
+      const token = process.env["CLOUDFLARE_API_TOKEN"];
+      const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+      const result = await withProbeStatus("Cloudflare Workers AI reachability", () =>
+        probeGet(`${cfBaseTrimmed}/models`, headers),
+      );
+      check(
+        report,
+        "Cloudflare Workers AI reachability",
+        true, // informational/warning only — same contract as the Ollama check above
+        result.ok
+          ? `reachable: GET ${cfBaseTrimmed}/models -> HTTP ${result.status}${token ? "" : " (no CLOUDFLARE_API_TOKEN — sent unauthenticated)"}`
+          : `unreachable: GET ${cfBaseTrimmed}/models -> ${result.error}`,
+        result.ok ? "info" : "warn",
+      );
+    }
   }
 
   for (const agent of cfg.agents) {

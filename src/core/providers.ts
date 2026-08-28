@@ -25,4 +25,14 @@ export const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   // prompt for. An empty array here means "known provider, needs no key",
   // never "unknown provider" (that's a missing table entry, not `[]`).
   ollama: [],
+  // Cloudflare Workers AI — a real Bearer token (NOT keyless like ollama;
+  // Cloudflare's API 401s on an empty Authorization header). The base URL
+  // is derived from CLOUDFLARE_ACCOUNT_ID (or overridden by
+  // CLOUDFLARE_AI_BASE_URL) — that's collected separately in the `spf init`
+  // interview's cloudflare branch, the same way the ollama branch collects
+  // OLLAMA_BASE_URL, since PROVIDER_ENV_KEYS only carries the KEY a provider
+  // needs, not a base address. Same env var name spf's Cloudflare *sandbox*
+  // backend already uses (data_types.ts's SandboxCloudflareSchema), so one
+  // token serves both.
+  cloudflare: ["CLOUDFLARE_API_TOKEN"],
 };

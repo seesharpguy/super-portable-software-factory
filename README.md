@@ -194,6 +194,38 @@ That's the whole config change. `ollama` is a keyless provider — `spf doctor` 
 
 Two things worth knowing before pointing a full roster at local models: tool-calling — the injected `sf_report` contract every agent's structured output rides on — worked reliably in testing down to a 3B-parameter model, which isn't a "only frontier models get tools" situation. And context-window occupancy reporting is disabled for `ollama/*` models specifically, which turns off threshold-based compaction rather than reporting a number Ollama's OpenAI-compatible API doesn't actually provide per model.
 
+### flue + Cloudflare Workers AI
+
+Point the default `flue` backend at a [Cloudflare Workers AI](https://developers.cloudflare.com/ai/) model the same way you'd pick any other Flue provider — the model string's own prefix, `cloudflare/<model-id>`, where `<model-id>` is the full `@cf/...` catalog id (the slash inside the id is fine; spf splits on the first slash only):
+
+```yaml
+defaults:
+  coding_agent: flue
+  model: cloudflare/@cf/zai-org/glm-5.3-flash
+```
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID=your-account-id        # derives https://api.cloudflare.com/client/v4/accounts/$ID/ai/v1
+export CLOUDFLARE_API_TOKEN=your-token               # Workers AI > Read permission
+spf build "your prompt"
+```
+
+That's the whole config change. `cloudflare` is a keyed provider (a real Bearer token, unlike keyless `ollama` — Cloudflare's API 401s on an empty Authorization header). `spf init` asks for the token plus either `CLOUDFLARE_ACCOUNT_ID` (the standard endpoint) or an explicit `CLOUDFLARE_AI_BASE_URL` (a custom domain or an AI Gateway endpoint), and overrides the three packaged-roster agents that a Workers AI account can't serve. `spf doctor` probes the resolved endpoint (informational, never a hard failure). A ready-to-run starting point ships at [`assets/templates/ts-flue-cloudflare.spf.config.yaml`](assets/templates/ts-flue-cloudflare.spf.config.yaml) (`spf init --template ts-flue-cloudflare`).
+
+Two things worth knowing, both inherited from the `ollama/*` convention for self-served OpenAI-compatible endpoints: context-window occupancy reporting is disabled for `cloudflare/*` models (`contextWindow: 0`, turning off threshold-based compaction rather than fabricating a number Workers AI's API doesn't provide per model), and `reasoning: false` — the model's own `reasoning_effort` parameter is not wired through, so an agent's `thinking:` level is moot for `cloudflare/*` models today.
+
+### claude_code + Cloudflare AI Gateway
+
+To route the `claude_code` backend through a [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) (so the gateway holds the Anthropic credentials via Unified Billing or BYOK, and you authenticate to the gateway), pick **Cloudflare AI Gateway** at the `Authentication` step in `spf init`. spf writes the three env vars the gateway needs:
+
+```bash
+ANTHROPIC_BASE_URL=https://gateway.ai.cloudflare.com/v1/<ACCOUNT_ID>/<GATEWAY_ID>/anthropic
+ANTHROPIC_API_KEY=<CF_AIG_TOKEN>                                   # any value — the gateway ignores it; Claude Code requires it set
+ANTHROPIC_CUSTOM_HEADERS=cf-aig-authorization: Bearer <CF_AIG_TOKEN>
+```
+
+`spf doctor` probes the gateway's `/v1/messages` with the `cf-aig-authorization` header (informational, never a hard failure). This is the `claude_code` backend — it speaks the Anthropic API, so it's independent of the Workers AI `flue` provider above; you can run some agents on Workers AI (`flue`) and others through the gateway (`claude_code`) in the same roster.
+
 ---
 
 ## Isolation: post-hoc, not a sandbox

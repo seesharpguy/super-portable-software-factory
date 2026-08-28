@@ -258,6 +258,115 @@ test("flue + ollama: a custom OLLAMA_BASE_URL answer is written verbatim", async
   assert.equal(result!.env.OLLAMA_BASE_URL, "http://gpu-box.local:11434/v1");
 });
 
+test("flue + cloudflare: collects token + account id, overrides the pinned roster, validates cleanly", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "flue", Provider: "cloudflare" },
+    text: { "Model id": "@cf/zai-org/glm-5.3-flash", CLOUDFLARE_ACCOUNT_ID: "abcd1234" },
+    confirm: {
+      "explicit base URL": false, // derive from account id, not a custom URL
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { CLOUDFLARE_API_TOKEN: "cf-test-token" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.defaults.coding_agent, "flue");
+  // Slashed model id survives the provider/model-id assembly verbatim.
+  assert.equal(config.defaults.model, "cloudflare/@cf/zai-org/glm-5.3-flash");
+  assert.deepEqual(result!.env, {
+    CLOUDFLARE_API_TOKEN: "cf-test-token",
+    CLOUDFLARE_ACCOUNT_ID: "abcd1234",
+  });
+  assert.deepEqual(result!.envExampleKeys, ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]);
+  // Same pinned-roster fix as ollama: a Workers AI account can't serve the
+  // fireworks/openai models planner/reviewer/documenter are pinned to.
+  assert.deepEqual(
+    config.agents,
+    [
+      { name: "planner", model: "cloudflare/@cf/zai-org/glm-5.3-flash" },
+      { name: "reviewer", model: "cloudflare/@cf/zai-org/glm-5.3-flash" },
+      { name: "documenter", model: "cloudflare/@cf/zai-org/glm-5.3-flash" },
+    ],
+  );
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.equal(cfg.agents.find((a) => a.name === "planner")!.model, "cloudflare/@cf/zai-org/glm-5.3-flash");
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
+});
+
+test("flue + cloudflare: an explicit CLOUDFLARE_AI_BASE_URL is written instead of an account id", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "flue", Provider: "cloudflare" },
+    text: { "Model id": "@cf/meta/llama-3.1-8b-instruct", CLOUDFLARE_AI_BASE_URL: "https://gateway.example.com/ai/v1" },
+    confirm: {
+      "explicit base URL": true,
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { CLOUDFLARE_API_TOKEN: "cf-test-token" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  assert.equal(result!.env.CLOUDFLARE_AI_BASE_URL, "https://gateway.example.com/ai/v1");
+  assert.ok(!("CLOUDFLARE_ACCOUNT_ID" in result!.env), "account id is not collected when an explicit base URL is given");
+});
+
+test("claude_code + Cloudflare AI Gateway: writes base URL, api key placeholder, and the cf-aig-authorization custom header", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "claude_code", "Model (Claude": "sonnet", Authentication: "aig" },
+    text: { ANTHROPIC_BASE_URL: "https://gateway.ai.cloudflare.com/v1/acme/gw1/anthropic" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { "CF_AIG_TOKEN": "cf-aig-test-token" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  assert.equal(result!.env.ANTHROPIC_BASE_URL, "https://gateway.ai.cloudflare.com/v1/acme/gw1/anthropic");
+  // Claude Code requires ANTHROPIC_API_KEY set; the gateway ignores it, so
+  // the interview reuses the gateway token as the placeholder (per the CF doc).
+  assert.equal(result!.env.ANTHROPIC_API_KEY, "cf-aig-test-token");
+  assert.equal(result!.env.ANTHROPIC_CUSTOM_HEADERS, "cf-aig-authorization: Bearer cf-aig-test-token");
+  for (const k of ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS"]) {
+    assert.ok(result!.envExampleKeys.includes(k), `${k} recorded in .env.example keys`);
+  }
+
+  // Validates cleanly once merged with the packaged roster — the same
+  // pipeline `spf doctor` runs (claude_code agents need no provider key).
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(result!.config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
+});
+
 test("watch(jira/bitbucket): collects exactly JIRA_* + BITBUCKET_*, never GITHUB_TOKEN", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({

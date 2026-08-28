@@ -49,6 +49,7 @@ import { local, sqlite, start, type Flue } from "@flue/runtime/node";
 import type { AgentRequest, AgentResult, SandboxSpec, ThinkingLevel } from "./data_types.ts";
 import { UsageBreakdown, makeAgentResult } from "./data_types.ts";
 import { registerOllamaModel } from "./ollama_provider.ts";
+import { registerCloudflareModel } from "./cloudflare_provider.ts";
 import * as sandbox from "./sandbox.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
 
@@ -365,6 +366,12 @@ export async function run(
   // without ever dispatching an ollama call.
   const [provider, modelId] = resolveModel(request.model);
   if (provider === "ollama") await registerOllamaModel(modelId);
+  // Cloudflare Workers AI is the same self-registration shape as Ollama
+  // (no pi-ai/Flue built-in "cloudflare" provider on Node) — see
+  // cloudflare_provider.ts's header comment for the Workers AI OpenAI-
+  // compatible endpoint, the slashed `@cf/...` model-id handling, and the
+  // real-Bearer-token (not dummy-key) auth.
+  if (provider === "cloudflare") await registerCloudflareModel(modelId);
 
   await ensureRuntime(request.flue_db_path);
 
