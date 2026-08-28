@@ -5,7 +5,7 @@
  * actual state machine; this file is just the wiring: config, the GitHub
  * provider, the chain-dispatch callback, the lockfile, and the CLI loop.
  */
-import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import * as v from "valibot";
@@ -27,7 +27,7 @@ import type { AttemptDispatch, AttemptMetrics } from "../../core/fanout.ts";
 import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
 import type { DataPaths } from "../../core/paths.ts";
 import { SfDb } from "../../ui/server/db.ts";
-import { parseCli } from "../../core/utils.ts";
+import { acquirePidLock, parseCli, releasePidLock } from "../../core/utils.ts";
 import { isInteractive } from "../ask.ts";
 import type { WatchDashboard } from "../ui/watch_dashboard.tsx";
 
@@ -160,34 +160,15 @@ function resolveCodeHostProvider(cfg: SFConfig): CodeHostProvider | null {
   return null;
 }
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Stale-steal, like the reference implementation's daemon lock: a dead pid never blocks a restart. */
+/** Stale-steal, like the reference implementation's daemon lock: a dead pid never blocks a restart. Atomic — see `utils.acquirePidLock`. */
 function acquireLock(lockPath: string): void {
-  if (existsSync(lockPath)) {
-    const pid = Number.parseInt(readFileSync(lockPath, "utf-8").trim(), 10);
-    if (Number.isInteger(pid) && isPidAlive(pid)) {
-      throw new Error(`another \`spf watch\` is already running (pid ${pid}) — lock at ${lockPath}`);
-    }
+  const result = acquirePidLock(lockPath);
+  if (!result.ok) {
+    throw new Error(`another \`spf watch\` is already running (pid ${result.holderPid}) — lock at ${lockPath}`);
   }
-  mkdirSync(path.dirname(lockPath), { recursive: true });
-  writeFileSync(lockPath, String(process.pid));
 }
 
-function releaseLock(lockPath: string): void {
-  try {
-    unlinkSync(lockPath);
-  } catch {
-    // already gone — fine
-  }
-}
+const releaseLock = releasePidLock;
 
 /**
  * `spf watch init` — idempotently seed the `<prefix>:*` labels the state
@@ -781,8 +762,18 @@ export async function watchCommand(argv: string[]): Promise<number> {
       await interruptibleSleep(cfg.watch.poll_ms);
       if (stopping) break;
     }
-    while (state.inflight.size > 0) {
-      deps.log(`[spf] watch     draining ${state.inflight.size} in-flight issue(s)...`); // deps.log already routes to the dashboard when one is mounted, console.log otherwise
+    // BOTH lanes, not just `inflight` — `state.refining`'s specs are exactly
+    // as in-flight (a fire-and-forget `runSpec(...).finally(...)`, same
+    // shape as `runIssue`'s), and a graceful stop that only waits on
+    // `inflight` would print "stopping after the current tick" and then
+    // exit while a refine chain is still writing into its worktree — the
+    // next `spf watch` start-up would find `claimSpecs`'s per-issue lock
+    // still held by this (still-alive, still-running) process's own pid and
+    // correctly back off, but ONLY because that lock exists; before it did,
+    // this exact gap is what let a resumed spec race a still-running prior
+    // attempt for the same issue.
+    while (state.inflight.size > 0 || state.refining.size > 0) {
+      deps.log(`[spf] watch     draining ${state.inflight.size} in-flight issue(s), ${state.refining.size} refining spec(s)...`); // deps.log already routes to the dashboard when one is mounted, console.log otherwise
       await interruptibleSleep(1000);
       if (stopping && sigints >= 2) break; // stop() itself already exits on the 2nd signal; this is belt-and-suspenders
     }

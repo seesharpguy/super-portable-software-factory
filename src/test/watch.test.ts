@@ -9,6 +9,7 @@ import {
   createWatchState,
   finishReviews,
   finishTrackedSpecs,
+  issueLockPath,
   orderEligible,
   reconcileOrphans,
   reconcileRefining,
@@ -16,6 +17,7 @@ import {
   tick,
 } from "../core/watch.js";
 import { parseRefineMarker } from "../core/refine.js";
+import { acquirePidLock, releasePidLock } from "../core/utils.js";
 import type { GitHandle } from "../core/git_helper.js";
 import type { ChainRunResult, RefineRunResult, WatchDeps } from "../core/watch.js";
 import type { NotifyEvent } from "../core/notify/channel.js";
@@ -384,6 +386,31 @@ test("claimNewWork: dry-run claims nothing and calls neither claim() nor runChai
   assert.equal(provider.claimCalls.length, 0);
   assert.equal(runChainCalled, false);
   assert.equal(provider.entries.get("20")!.state, "ready");
+});
+
+test("claimNewWork: an issue already locked by a live process is skipped before ever calling provider.claim()", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("21", "already being worked elsewhere");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost);
+  const lockPath = issueLockPath(deps, "issue-21");
+  // Simulates a second `spf watch` process racing this one: something else
+  // (this same test process's own pid always reads as alive) already holds
+  // the per-issue lock claimNewWork must check before ever touching the
+  // tracker — see core/watch.ts's issueLockPath doc comment.
+  assert.equal(acquirePidLock(lockPath).ok, true);
+  try {
+    await claimNewWork(deps, state);
+    assert.equal(provider.claimCalls.length, 0, "provider.claim() must never be reached while the lock is held");
+    assert.equal(provider.entries.get("21")!.state, "ready");
+  } finally {
+    releasePidLock(lockPath);
+  }
+
+  // Once released, an ordinary tick claims it exactly like any other issue.
+  await claimNewWork(deps, state);
+  assert.deepEqual(provider.claimCalls, ["21"]);
 });
 
 // ── orderEligible: priority, sibling affinity, created-asc ──────────────
@@ -964,6 +991,32 @@ test("claimSpecs: dry-run claims no spec and never calls runRefine", async () =>
   assert.equal(provider.claimCalls.length, 0);
   assert.equal(called, false);
   assert.equal(provider.entries.get("120")!.state, "spec-ready");
+});
+
+test("claimSpecs: a spec already locked by a live process is skipped before ever calling provider.claim() — the restart-overlap race", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("121", "a prior attempt is still running", "spec-ready");
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, { refineEnabled: true });
+  const lockPath = issueLockPath(deps, "spec-121");
+  // Simulates exactly what caused BT-1789's "declared artifact does not
+  // exist" failure: `spf watch` restarted while an OLD process's runSpec for
+  // this SAME spec (same deterministic worktree/context_handoff_dir — see
+  // chains/steps.ts's clearStaleRefineOutputFiles doc comment) was still in
+  // flight. Without this lock, both processes' claim() calls would succeed
+  // and both would write into the same directory.
+  assert.equal(acquirePidLock(lockPath).ok, true);
+  try {
+    await claimSpecs(deps, state);
+    assert.equal(provider.claimCalls.length, 0, "provider.claim() must never be reached while the lock is held");
+    assert.equal(provider.entries.get("121")!.state, "spec-ready");
+  } finally {
+    releasePidLock(lockPath);
+  }
+
+  await claimSpecs(deps, state);
+  assert.deepEqual(provider.claimCalls, ["121"]);
 });
 
 test("claimSpecs: a rejected refine chain blocks the spec with the failure detail, without publishing anything", async () => {

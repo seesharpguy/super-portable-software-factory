@@ -151,7 +151,13 @@ export const CHAINS: ChainDefinition[] = [
     // {{previous_envelope}}. This makes `scout` a required agent for this
     // chain: a roster that pruned it fails agents.validate() by name at
     // `spf watch` startup, same as any other missing required agent.
-    steps.scout({ description: "Map the subsystems this spec touches — change nothing" }),
+    // retries: 2 (3 attempts total) — `gates.artifactsExist` failing here has
+    // historically been transient (a declared artifact briefly missing,
+    // since fixed at the source by giving `claim()` real per-issue
+    // exclusivity — see `core/watch.ts`'s `issueLockPath`), so a same-session
+    // correction retry or two is worth it before this blocks the whole spec
+    // and pages a human.
+    steps.scout({ description: "Map the subsystems this spec touches — change nothing", retries: 2 }),
     steps.refine(),
     steps.publishIssues(),
   ]),

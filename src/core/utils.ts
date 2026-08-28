@@ -9,7 +9,7 @@
 
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -55,6 +55,60 @@ export async function fetchRetryTransient(input: string, init?: RequestInit): Pr
     const code = (error as Error & { cause?: { code?: string } }).cause?.code;
     if (!code || !TRANSIENT_FETCH_CODES.has(code)) throw error;
     return await fetch(input, init);
+  }
+}
+
+/** `process.kill(pid, 0)` sends no signal — it throws iff `pid` isn't running (or isn't ours to signal), the standard Node liveness probe. */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type PidLockResult = { ok: true } | { ok: false; holderPid: number };
+
+/**
+ * Atomic PID lockfile at `lockPath`: `{ flag: "wx" }` makes "does anyone
+ * hold this" and "claim it" ONE filesystem operation, closing the race a
+ * separate `existsSync` check followed by a later `writeFileSync` leaves
+ * open — two callers can both pass that existence check before either
+ * writes, and both walk away believing they hold the lock. A dead pid never
+ * blocks a caller: on `EEXIST`, `isPidAlive` decides whether this is a live
+ * holder (returns `ok: false`) or a stale lock from a process that never
+ * cleaned up (crash, SIGKILL, a restart that didn't wait for it to exit) —
+ * stolen via unlink-then-retry. Another caller can win that same steal
+ * race; if so, ITS write is what the retry's `wx` finds, and this caller
+ * correctly backs off against a live pid on the next pass instead of
+ * clobbering a real holder.
+ */
+export function acquirePidLock(lockPath: string): PidLockResult {
+  mkdirSync(path.dirname(lockPath), { recursive: true });
+  for (;;) {
+    try {
+      writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+      return { ok: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const pid = Number.parseInt(readFileSync(lockPath, "utf-8").trim(), 10);
+      if (Number.isInteger(pid) && isPidAlive(pid)) return { ok: false, holderPid: pid };
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone (another caller's steal beat us to it) — loop back
+        // and let the `wx` above settle who actually gets it
+      }
+    }
+  }
+}
+
+export function releasePidLock(lockPath: string): void {
+  try {
+    unlinkSync(lockPath);
+  } catch {
+    // already gone — fine
   }
 }
 

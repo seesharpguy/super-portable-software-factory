@@ -62,7 +62,7 @@ import type { NotifyEvent } from "./notify/channel.ts";
 import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
 import { redact } from "./otel.ts";
 import { parseRefineMarker } from "./refine.ts";
-import { newId } from "./utils.ts";
+import { acquirePidLock, newId, releasePidLock } from "./utils.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
 /** GitHub's own documented sub-issue nesting cap (see `github_provider.ts`'s `linkChild` doc comment) — `rollUp`'s own recursion bound, so a malformed/cyclic hierarchy can't spin forever. */
@@ -310,6 +310,26 @@ function worktreePathFor(deps: WatchDeps, issue: Issue): string {
 
 function specWorktreePathFor(deps: WatchDeps, issue: Issue): string {
   return path.join(deps.worktreesDir, `spec-${issue.id}`);
+}
+
+/**
+ * A local, atomic, PID-checked lock per `adwId` (`issue-<id>`/`spec-<id>`) —
+ * sibling to `worktreesDir`, so it lives at the same per-repo root
+ * (`~/.spf/watch/<repo>/locks/`). `provider.claim()`'s own read-modify-write
+ * (see `IssueProvider.claim`'s doc comment) only verifies the END STATE
+ * looks claimed, not that no one else raced it — the real exclusivity has
+ * to live here, gating `claim()` itself, because a resumed/orphaned spec
+ * dispatches straight into the SAME deterministic worktree and
+ * `context_handoff_dir` a still-running prior attempt already owns (see
+ * `chains/steps.ts`'s `clearStaleRefineOutputFiles` doc comment). A dead
+ * holder (the daemon that owned it got killed, not stopped) never blocks a
+ * fresh claim — `acquirePidLock`'s stale-steal — but a genuinely live
+ * holder (this daemon restarted while the OLD process's chain run, spawned
+ * fire-and-forget from `claimNewWork`/`claimSpecs`, was still in flight)
+ * does, until that run's own `.finally()` releases it.
+ */
+export function issueLockPath(deps: WatchDeps, adwId: string): string {
+  return path.join(path.dirname(deps.worktreesDir), "locks", `${adwId}.lock`);
 }
 
 function cleanupWorktree(deps: WatchDeps, marker: WatchMarker | null): void {
@@ -1437,9 +1457,21 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
       deps.log(`watch: [dry-run] would claim ${issue.id} (${issue.title}) and run chain "${deps.chain}"`);
       continue;
     }
+    // Gate the tracker-side claim itself behind local exclusivity — see
+    // `issueLockPath`'s doc comment. A held lock means a live process (this
+    // machine, this tick or an earlier one) already owns this issue's
+    // worktree, so skip identically to a lost tracker-side claim race
+    // rather than ever writing the tracker label.
+    const lockPath = issueLockPath(deps, `issue-${issue.id}`);
+    const lock = acquirePidLock(lockPath);
+    if (!lock.ok) {
+      deps.log(`watch: ${issue.id} is locked by another live \`spf watch\` process (pid ${lock.holderPid}) — skipping`);
+      continue;
+    }
     const claimed = await deps.provider.claim(issue);
     if (!claimed) {
       deps.log(`watch: ${issue.id} lost the claim race this tick — skipping`);
+      releasePidLock(lockPath);
       continue;
     }
     deps.log(`watch: claimed ${issue.id}: ${issue.title}`);
@@ -1454,6 +1486,7 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
     runIssue(deps, issue).finally(() => {
       state.inflight.delete(issue.id);
       state.inflightParents.delete(issue.id);
+      releasePidLock(lockPath);
     });
   }
 }
@@ -1489,9 +1522,20 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: Wa
       deps.log(`watch: [dry-run] would claim spec ${issue.id} (${issue.title}) and run refine chain "${deps.refineChain}"`);
       continue;
     }
+    // See claimNewWork's identical guard and issueLockPath's doc comment —
+    // same local-exclusivity gate, keyed to match runSpec's own adwId
+    // (`spec-<id>`) so it covers the SAME deterministic worktree a resumed
+    // (`continue-refinement`) claim reruns into.
+    const lockPath = issueLockPath(deps, `spec-${issue.id}`);
+    const lock = acquirePidLock(lockPath);
+    if (!lock.ok) {
+      deps.log(`watch: spec ${issue.id} is locked by another live \`spf watch\` process (pid ${lock.holderPid}) — skipping`);
+      continue;
+    }
     const claimed = await deps.provider.claim(issue, { from, to: "refining" });
     if (!claimed) {
       deps.log(`watch: spec ${issue.id} lost the claim race this tick — skipping`);
+      releasePidLock(lockPath);
       continue;
     }
     deps.log(`watch: claimed spec ${issue.id}: ${issue.title}`);
@@ -1502,7 +1546,10 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: Wa
       fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.refineChain]],
     });
     state.refining.add(issue.id);
-    runSpec(deps, issue).finally(() => state.refining.delete(issue.id));
+    runSpec(deps, issue).finally(() => {
+      state.refining.delete(issue.id);
+      releasePidLock(lockPath);
+    });
   }
 }
 
