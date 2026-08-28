@@ -16,6 +16,7 @@
  * the same config field GitHub uses for `"owner/name"` — the shape just
  * means something different per `code_host`.
  */
+import { fetchRetryTransient } from "../utils.ts";
 import type { CodeHostProvider, PrRef, PrStatus } from "./provider.ts";
 
 const API = "https://api.bitbucket.org/2.0";
@@ -47,7 +48,7 @@ export class BitbucketProvider implements CodeHostProvider {
   }
 
   private async bb<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${API}${path}`, {
+    const response = await fetchRetryTransient(`${API}${path}`, {
       ...init,
       headers: {
         Authorization: `Basic ${Buffer.from(`${this.email}:${this.apiToken}`).toString("base64")}`,

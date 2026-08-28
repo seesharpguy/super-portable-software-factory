@@ -34,6 +34,30 @@ export function newId(length: number = 8): string {
   return randomBytes(Math.floor(length / 2)).toString("hex");
 }
 
+/** Transport-level blips worth one silent retry — see `fetchRetryTransient` below. */
+const TRANSIENT_FETCH_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EPIPE", "ECONNREFUSED", "EAI_AGAIN"]);
+
+/**
+ * `fetch`, but a transport-level blip on the FIRST attempt gets one silent
+ * retry before it's allowed to throw. Node's global `fetch` (undici) pools
+ * keep-alive connections across calls; Atlassian's Cloud APIs (Jira,
+ * Bitbucket) close idle ones from their end, which surfaces here as
+ * `ECONNRESET` the next time a long-lived poller (`spf watch`) reuses one —
+ * a stale-socket race, not a real problem with the request. Only retries
+ * error codes that mean "the transport failed," never an HTTP error status
+ * (a 4xx/5xx response is not a thrown error here, and must keep surfacing
+ * on the first attempt so callers see it immediately).
+ */
+export async function fetchRetryTransient(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    const code = (error as Error & { cause?: { code?: string } }).cause?.code;
+    if (!code || !TRANSIENT_FETCH_CODES.has(code)) throw error;
+    return await fetch(input, init);
+  }
+}
+
 /** Matches Python's `datetime.now(timezone.utc).isoformat(timespec="milliseconds")`. */
 export function nowIso(): string {
   const iso = new Date().toISOString(); // e.g. 2024-01-01T12:00:00.123Z

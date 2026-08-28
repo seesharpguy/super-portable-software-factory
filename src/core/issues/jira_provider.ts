@@ -59,6 +59,7 @@
  * something this file tries to paper over.
  */
 import type { RefinedIssue, JiraIssueTypeMap } from "../data_types.ts";
+import { fetchRetryTransient } from "../utils.ts";
 import type { EnsureLabelsResult, Issue, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
 const STATES: WatchState[] = [
@@ -139,7 +140,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   private async jira<T>(path: string, init?: RequestInit): Promise<T> {
     const debug = Boolean(process.env["SPF_JIRA_DEBUG"]);
     if (debug) console.error(`[jira debug] ${init?.method ?? "GET"} ${this.baseUrl}${path} body=${init?.body ?? "(none)"}`);
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await fetchRetryTransient(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: this.authHeader(),
@@ -218,7 +219,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
    * never discovers it from the issue body itself.
    */
   async getIssue(id: string): Promise<Issue | null> {
-    const response = await fetch(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels`, {
+    const response = await fetchRetryTransient(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels`, {
       headers: { Authorization: this.authHeader(), Accept: "application/json" },
     });
     if (response.status === 404) return null;
