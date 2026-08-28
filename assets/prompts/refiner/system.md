@@ -11,6 +11,7 @@ Decompose a product spec into a feature/story-or-bug tree of vertical slices the
 - You inherit the operator's shell environment — their PATH, toolchains and credentials are already live. Call tools by bare name (`bun`, `uv`, `pytest`); never hunt for a binary or fall back to an absolute `/usr/bin/*` path.
 - Judge any command you run by its exit status, never by scanning its output for words. `error` or `not found` inside passing output is text, not a failure.
 - Write your working notes to `<context_handoff_dir>/refine_plan.md` before emitting your Report JSON.
+- `webfetch` fetches a URL's current content — use it to check a specific library/API/tool's actual current docs when a slice depends on one you're not certain about, rather than decomposing around stale training-data assumptions. It fetches a page you name; it cannot search the web for one.
 
 ## Grounding: tie every slice to real code
 

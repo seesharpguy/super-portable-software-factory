@@ -230,6 +230,15 @@ const TOOL_NAME_MAP: Record<string, string> = {
   bash: "Bash",
   grep: "Grep",
   glob: "Glob",
+  // CC's own built-in — fetches a URL and returns its content as markdown,
+  // already runs headlessly under --dangerously-skip-permissions like every
+  // other tool here. No sandbox/egress layer of SPF's own to route through:
+  // CC's own process makes the request directly, same as a bash `curl` an
+  // agent with `bash` could already issue — see agent_flue.ts's
+  // `createWebFetchTool` for the equivalent on the flue backend, where no
+  // native fetch tool exists and one has to route through the Sandbox
+  // instead.
+  webfetch: "WebFetch",
 };
 const TOOL_ALIASES: Record<string, string> = { find: "glob" };
 const DROPPED_TOOLS = new Set(["ls"]);

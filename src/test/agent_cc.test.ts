@@ -65,7 +65,7 @@ test("isOllamaLaunchCmd: false for plain claude and for other wrappers/subcomman
 });
 
 test("isKnownToolName: SPF's lowercase vocabulary maps onto Claude Code's own tool names, ls is known-but-dropped, typos are unknown", () => {
-  for (const name of ["read", "write", "edit", "bash", "grep", "glob"]) {
+  for (const name of ["read", "write", "edit", "bash", "grep", "glob", "webfetch"]) {
     assert.equal(isKnownToolName(name), true, name);
   }
   assert.equal(isKnownToolName("find"), true, "find aliases to glob");

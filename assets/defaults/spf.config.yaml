@@ -246,6 +246,7 @@ agents:
       - ls
       - bash
       - write
+      - webfetch                   # check current docs for a stack/tool the repo uses, rather than guessing from training data
 
   # No tester agent: running the suite is a known command, so it is a kind="code"
   # phase over core/quality.ts. See SKILL.md hard rule 8.
@@ -265,6 +266,7 @@ agents:
       - ls
       - bash
       - write
+      - webfetch                   # look up a possible tech stack/tool/3rd-party API's current docs before decomposing around it
 
   - name: reviewer
     model: openai/gpt-5.6-terra

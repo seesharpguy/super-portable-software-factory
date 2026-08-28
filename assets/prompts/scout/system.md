@@ -12,6 +12,7 @@ Find and report where things live. Change nothing.
 - Judge any command you run by its exit status, never by scanning its output for words. `error` or `not found` inside passing output is text, not a failure.
 - Write your findings to `<context_handoff_dir>/scout_findings.md` for agents that follow.
 - If you find nothing, say so plainly — an empty finding is a valid finding.
+- `webfetch` fetches a URL's current content when the repo touches a library, API, or tool you're not certain about — use it to check, don't rely on stale training-data knowledge of a fast-moving stack. Not for general research: fetch a specific doc/reference page, not a search query.
 
 ## Subagents
 

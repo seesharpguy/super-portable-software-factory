@@ -564,11 +564,17 @@ session** — a joined run starts that agent fresh instead of resuming.
 | `grep` | search file contents |
 | `glob` (alias: `find`) | find files by pattern |
 | `ls` | recognized name, **no built-in on either backend** — harmless to list, never mounts |
+| `webfetch` | fetch a URL over HTTP(S), return its content as plain text — e.g. a library/API's current docs |
 
 These names are canonical across backends — a roster entry never says
 which; each backend module (`agent_flue.ts`, `agent_cc.ts`) maps them to
 its own tool vocabulary (Flue's lowercase functions, Claude Code's
-capitalized `Read`/`Bash`/...).
+capitalized `Read`/`Bash`/...). `webfetch` maps to Claude Code's own native
+`WebFetch` on that backend; Flue has no such built-in, so on `flue` it's a
+custom tool that runs `curl`/`wget` through the agent's own `Sandbox.exec()`
+— which means a remote sandbox's `egress` policy (see `sandbox` below)
+governs it exactly like any other `bash`-issued network call, with no
+separate rule to configure.
 
 **Resolution order:** an agent's own `tools` wins → else `defaults.tools` →
 else unset (all tools usable). An empty list is a tool-less agent, and it

@@ -23,6 +23,7 @@
  * agents.ts's `send()` closure changes only its imports and field names.
  */
 
+import * as v from "valibot";
 import {
   AgentRunError,
   createBashTool,
@@ -31,6 +32,7 @@ import {
   createGrepTool,
   createReadTool,
   createWriteTool,
+  defineTool,
   init,
   observe,
   useDataWriter,
@@ -162,6 +164,109 @@ export class ToolCallTracker {
   }
 }
 
+// ── webfetch: Flue's stand-in for Claude Code's native WebFetch ─────────────
+
+const WEBFETCH_MAX_BYTES = 200_000; // a bounded chunk of a page, not the whole thing — matches RESULT_SNIPPET_CHARS's spirit
+const WEBFETCH_TIMEOUT_MS = 20_000;
+
+const WebFetchParams = v.object({ url: v.pipe(v.string(), v.nonEmpty("url is required")) });
+
+/** POSIX-safe single-quoting for a shell argument: closes and reopens the quote around any embedded `'`. */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Strip `<script>`/`<style>` blocks and tags, decode the handful of entities
+ * a real docs page actually uses, and collapse whitespace. NOT a real
+ * HTML-to-markdown renderer — Claude Code's native `WebFetch` (the
+ * claude_code backend) does that; Flue has nothing equivalent built in, and
+ * a full renderer is more than this needs. A JSON/plain-text response
+ * passes through essentially unchanged, since none of these patterns match
+ * it — same "minimal, not a full parser" trade `jira_provider.ts`'s
+ * `adfToText` makes for ADF.
+ */
+export function stripHtml(text: string): string {
+  const cleaned = text
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, " ");
+  // Line-by-line trim BEFORE collapsing blank runs: a tag->" " substitution
+  // (above) routinely leaves a stray leading/trailing space on the line that
+  // used to hold a block-level tag's boundary — collapsing blank lines first
+  // would miss those, since they're not yet blank.
+  return cleaned
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * The flue backend's stand-in for Claude Code's native `WebFetch` tool —
+ * `@flue/runtime` ships no such built-in (its only tool factories are
+ * read/write/edit/bash/grep/glob), so this is a custom `defineTool()`.
+ *
+ * Runs the actual request THROUGH `env.exec()` rather than calling Node's
+ * own `fetch()` directly — deliberately: `exec()` is the one universal
+ * primitive every `Sandbox` implements (`local`, and the remote
+ * `opensandbox`/`cloudflare` backends via `core/sandbox.ts`), so a command
+ * run through it executes INSIDE whichever sandbox the agent is actually
+ * using. A remote sandbox's own `egress` policy (`sandbox_opensandbox.ts`'s
+ * `networkPolicy`) then governs this exactly as it already governs every
+ * `bash` call — no separate egress rule needed for this tool. Calling
+ * `fetch()` here instead would silently bypass that policy by making the
+ * request from SPF's own orchestrator process rather than the sandbox.
+ *
+ * `curl`, with a `wget` fallback in the SAME command for portability across
+ * whatever base image a remote sandbox happens to ship — both are close to
+ * universal, but neither is guaranteed; a sandbox image with neither
+ * surfaces that plainly as a failed tool call (exit code + stderr handed
+ * back to the model), not a hang. Only `http`/`https` are accepted — this is
+ * also what stops a `file://` URL from turning "fetch a page" into "read an
+ * arbitrary local file" on the `local` sandbox, where `exec()` runs with the
+ * operator's own full filesystem access.
+ */
+export function createWebFetchTool(env: Sandbox) {
+  return defineTool({
+    name: "webfetch",
+    description:
+      "Fetch a URL over HTTP(S) and return its content as plain text (HTML tags stripped). " +
+      "Use it to check current documentation for a library, API, or tool before relying on prior " +
+      "knowledge that may be stale or version-specific. GET only, no custom headers/auth, response " +
+      "truncated to a safe size.",
+    input: WebFetchParams,
+    run: async ({ data }) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(data.url);
+      } catch {
+        return `webfetch: ${JSON.stringify(data.url)} is not a valid URL`;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return `webfetch: unsupported scheme ${JSON.stringify(parsed.protocol)} — only http/https are allowed`;
+      }
+      const url = shQuote(parsed.toString());
+      const command =
+        `(curl -sS -L --max-time 20 --max-redirs 5 -A "spf-webfetch/1.0" ${url} ` +
+        `|| wget -qO- --timeout=20 ${url}) | head -c ${WEBFETCH_MAX_BYTES}`;
+      const result = await env.exec(command, { timeoutMs: WEBFETCH_TIMEOUT_MS });
+      if (result.exitCode !== 0 || !result.stdout.trim()) {
+        return `webfetch: fetching ${parsed.toString()} failed (exit ${result.exitCode}): ${(result.stderr || "no output").trim().slice(0, 2000)}`;
+      }
+      return stripHtml(result.stdout);
+    },
+  });
+}
+
 // ── tool-name resolution ─────────────────────────────────────────────────────
 
 const BUILTIN_TOOLS: Record<string, (env: Sandbox) => unknown> = {
@@ -171,6 +276,7 @@ const BUILTIN_TOOLS: Record<string, (env: Sandbox) => unknown> = {
   bash: createBashTool,
   grep: createGrepTool,
   glob: createGlobTool,
+  webfetch: createWebFetchTool,
 };
 // pi's vocabulary -> Flue's. "ls" has no Flue built-in (bash/glob cover it);
 // it is a KNOWN name that resolves to nothing, not an unknown one.
