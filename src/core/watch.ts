@@ -60,6 +60,7 @@ import { attemptAdwId, attemptBranch, attemptWorktreePath, runBestOf, type Attem
 import type { CodeHostProvider, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./issues/provider.ts";
 import type { NotifyEvent } from "./notify/channel.ts";
 import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
+import { redact } from "./otel.ts";
 import { parseRefineMarker } from "./refine.ts";
 import { newId } from "./utils.ts";
 
@@ -1507,7 +1508,18 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: Wa
 
 function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => void {
   return (error: unknown) => {
-    const message = (error as Error).message;
+    // undici (and the tracker/code-host clients built on `fetch`) collapse
+    // every connection-level failure to the bare string "fetch failed" and
+    // put the actual reason (DNS, ECONNREFUSED, a TLS error — each with a
+    // different fix) on `error.cause` — same fold-in `doctor.ts`'s
+    // `probeOtel` already does, otherwise this alert has no diagnostic value.
+    const err = error as Error & { cause?: { message?: string; code?: string } };
+    const cause = err.cause;
+    const detail = cause ? ` (${cause.code ?? cause.message ?? String(cause)})` : "";
+    // redact(): a fetch failure routinely embeds the URL it attempted, which
+    // may carry credentials (e.g. a tracker API token) — never let that reach
+    // a log line or an outbound Slack/Teams/webhook notification.
+    const message = redact(`${err.message}${detail}`, []);
     deps.log(`watch: ${stage} error: ${message}`);
     deps.notify({ kind: "watch_error", level: "error", title: `watch: ${stage} error`, detail: message, fields: [] });
   };
