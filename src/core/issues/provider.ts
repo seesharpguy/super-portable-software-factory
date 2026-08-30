@@ -28,7 +28,22 @@
  * (Slack, a webhook, whatever) on top of it without the poll loop caring.
  */
 
-import type { RefinedIssue } from "../data_types.ts";
+import type { RefinedIssue, SpecSplit } from "../data_types.ts";
+
+/**
+ * Every `kind` `IssueAuthoringProvider.createIssue` can be asked to create:
+ * `RefinedIssue["kind"]` (a node in a decomposed spec's tree — never
+ * includes `"spec"`, since a spec is never a node `gates.refinementWellFormed`
+ * validates) plus `"spec"` itself — a spec proposed by `core/refine.ts`'s
+ * `publishSpecs()` when a spec splits into several (see `WatchMarker.split`
+ * below). Kept as its own union here rather than folded into
+ * `RefinedIssueSchema.kind` in `data_types.ts`, because widening THAT
+ * picklist would also widen what `gates.refinementWellFormed`'s
+ * container/leaf derivation has to reason about for a shape ("spec") that
+ * can never legally appear in a `RefineOutput.issues` tree in the first
+ * place.
+ */
+export type IssueAuthoringKind = RefinedIssue["kind"] | "spec";
 
 /**
  * `spec-ready`/`refining` drive the SECOND lane's state machine (a product
@@ -60,7 +75,23 @@ import type { RefinedIssue } from "../data_types.ts";
  * `spec-in-progress` spec each tick and moves it the rest of the way,
  * `-> done`, once `WatchMarker.refined` is entirely `<prefix>:done`.
  *
- * All eleven still live in one `WatchState` union (not several separate
+ * `split-proposed`/`split-approved` are a second escape hatch alongside
+ * `needs-feedback`, for a different problem: not ambiguity, but a spec that
+ * is honestly too big to decompose within the leaf budget (see
+ * `gates.refinementWellFormed`'s budget checks). Instead of asking a
+ * `questions`-shaped question, the refiner proposes splitting the spec into
+ * several standalone specs (`RefineOutput.split` — see `SpecSplitSchema` in
+ * `data_types.ts`); `watch.ts`'s `proposeSpecSplit` records the proposal in
+ * `WatchMarker.split` and moves the spec to `split-proposed`. A human reviews
+ * the proposal comment and either adds `split-approved` (executed
+ * deterministically, no agent re-run — `watch.ts`'s `executeApprovedSplits`)
+ * or answers inline and adds `continue-refinement` to have the refiner
+ * revise its proposal. Deliberately a DIFFERENT label from
+ * `continue-refinement`'s own approval path: approving a split is an
+ * instruction to CODE ("go create these"), not new information a refiner
+ * session needs to reason about, so it skips the agent entirely.
+ *
+ * All thirteen still live in one `WatchState` union (not several separate
  * unions) because `transition()`'s "strip every `<prefix>:<state>` label,
  * then add one" logic (see `github_provider.ts`/`jira_provider.ts`) has to
  * know about every one of them to strip correctly, and `ensureLabels()`
@@ -77,7 +108,9 @@ export type WatchState =
   | "refined"
   | "needs-feedback"
   | "continue-refinement"
-  | "spec-in-progress";
+  | "spec-in-progress"
+  | "split-proposed"
+  | "split-approved";
 
 export interface Issue {
   /** Opaque tracker identifier: a GitHub issue number stringified ("42"), a Jira key ("PROJ-123"). */
@@ -140,6 +173,15 @@ export interface PrStatus {
  * `buildSpecPrompt` uses it to split the issue's comment thread into
  * "answers to the open questions" versus "earlier discussion" when building
  * the resumed run's prompt.
+ *
+ * `split` is the recorded proposal behind `split-proposed` /
+ * `split-approved` (see `WatchState`'s doc comment above): the exact specs
+ * `watch.ts`'s `proposeSpecSplit` posted as a comment, so a human's approval
+ * executes precisely what they read rather than whatever the marker happens
+ * to hold by the time `executeApprovedSplits` runs. `rounds` mirrors
+ * `feedback.rounds` — how many times this spec has been through the
+ * propose/revise loop, for the same "answered after N rounds" summary-comment
+ * purpose.
  */
 export interface WatchMarker {
   worktree?: string;
@@ -148,6 +190,7 @@ export interface WatchMarker {
   attempt?: number;
   refined?: string[];
   feedback?: { rounds: number; asked_at: string };
+  split?: { specs: SpecSplit[]; proposed_at: string; rounds: number };
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */
@@ -253,7 +296,7 @@ export interface CodeHostProvider {
  * that throws at call time.
  */
 export interface IssueAuthoringProvider {
-  createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue>;
+  createIssue(input: { title: string; body: string; labels: string[]; kind: IssueAuthoringKind }): Promise<Issue>;
   /** Link `child` under `parent` using the tracker's native hierarchy — GitHub's sub-issues API, Jira's `parent` field. */
   linkChild(parent: Issue, child: Issue): Promise<void>;
   /**

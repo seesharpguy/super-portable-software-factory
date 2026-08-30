@@ -18,6 +18,7 @@ import { JiraProvider } from "../../core/issues/jira_provider.ts";
 import { BitbucketProvider } from "../../core/issues/bitbucket_provider.ts";
 import { isAuthoringProvider } from "../../core/issues/provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
+import * as refineLib from "../../core/refine.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps, type WatchFanoutDeps } from "../../core/watch.ts";
 import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
@@ -592,7 +593,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
         opts.adwId,
         `Refine chain "${cfg.watch.refine.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
       );
-      return { accepted: false, adwId: opts.adwId, detail, created: [], questions: [] };
+      return { accepted: false, adwId: opts.adwId, detail, created: [], questions: [], split: [] };
     }
     const wtAnchor = paths.resolveAnchor(opts.cwd);
     const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
@@ -609,21 +610,32 @@ export async function watchCommand(argv: string[]): Promise<number> {
     } catch {
       // best-effort, same as above — no questions file means this run wasn't an escalation
     }
+    let split: RefineRunResult["split"] = [];
+    try {
+      split = JSON.parse(readFileSync(path.join(handoffDir, "refine_split.json"), "utf-8"));
+    } catch {
+      // best-effort, same as above — no split file means this run didn't propose one
+    }
     // Defense in depth: `steps.publishIssues()` now clears whichever of
-    // these two files it's NOT about to write, so both should never be
-    // non-empty here — but if some future change (or an older worktree's
-    // leftover files, before that fix existed) ever produces both, a real
-    // completed publish must never be silently overridden by a stale
-    // question. `runSpec` checks `questions.length > 0` first, so without
-    // this it would re-escalate over issues that already landed on the
-    // tracker seconds earlier.
-    if (created.length > 0 && questions.length > 0) {
+    // these three files it's NOT about to write, so at most one should ever
+    // be non-empty here — but if some future change (or an older worktree's
+    // leftover files, before that fix existed) ever produces more than one, a
+    // real completed publish must never be silently overridden by a stale
+    // question or split proposal. `runSpec` checks `questions` before
+    // `split` before the publish path, so without this it would re-escalate
+    // (or re-propose a split) over issues that already landed on the tracker
+    // seconds earlier.
+    if (created.length > 0 && (questions.length > 0 || split.length > 0)) {
       console.error(
-        `watch: ${opts.adwId}: refine_publish.json AND refine_questions.json both had content — treating the ${created.length} published issue(s) as authoritative and discarding the stale question(s)`,
+        `watch: ${opts.adwId}: refine_publish.json had content alongside a stale refine_questions.json/refine_split.json — treating the ${created.length} published issue(s) as authoritative and discarding the stale escalation`,
       );
       questions = [];
+      split = [];
+    } else if (questions.length > 0 && split.length > 0) {
+      console.error(`watch: ${opts.adwId}: refine_questions.json AND refine_split.json both had content — treating the questions as authoritative and discarding the stale split proposal`);
+      split = [];
     }
-    return { accepted: true, adwId: opts.adwId, detail: "", created, questions };
+    return { accepted: true, adwId: opts.adwId, detail: "", created, questions, split };
   };
 
   // `IssueAuthoringProvider`'s read-back half — `isAuthoringProvider()` is a
@@ -675,6 +687,14 @@ export async function watchCommand(argv: string[]): Promise<number> {
     dryRun: Boolean(flags["dry-run"]),
     runChain,
     listChildren: authoringProvider ? (parent) => authoringProvider.listChildren(parent) : undefined,
+    // See `WatchDeps.publishSpecs`'s own doc comment: `authoringProvider` is
+    // guaranteed non-null whenever `refine.enabled` is true (the startup
+    // check above already refuses any `issue_provider` besides github/jira
+    // in that case), so this is never `undefined` in the one state
+    // `executeApprovedSplits` actually reads it in.
+    publishSpecs: authoringProvider
+      ? (specs, opts) => refineLib.publishSpecs(authoringProvider, specs, { labelPrefix: cfg.watch.label_prefix, originalSpecId: opts.originalSpecId, priority: opts.priority })
+      : undefined,
     log: (message) => (dashboard ? dashboard.log(message) : console.log(message)),
     notify: (event) => {
       notifier?.send(event); // unaffected either way — see mountWatchDashboard's own doc comment

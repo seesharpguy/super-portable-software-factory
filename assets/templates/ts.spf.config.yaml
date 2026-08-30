@@ -79,14 +79,21 @@ agents:
 #   # feature/story-or-bug tree of real issues instead of building it
 #   # directly. Off by default; needs issue_provider: github OR jira — both
 #   # support issue authoring (create + link a hierarchy). On Jira, each
-#   # RefinedIssue.kind maps to a real Jira issue type via
-#   # watch.jira.issue_types (defaults: epic/feature -> Epic, story -> Story,
-#   # bug -> Bug, task -> Task) — spf watch init validates this against the
-#   # real project when refine is enabled.
+#   # RefinedIssue.kind (plus spec, from a split proposal) maps to a real
+#   # Jira issue type via watch.jira.issue_types (defaults: epic/feature ->
+#   # Epic, story/spec -> Story, bug -> Bug, task -> Task) — spf watch init
+#   # validates this against the real project when refine is enabled.
+#   # max_leaves/max_nodes/max_depth are the decomposition budget: every leaf
+#   # becomes its own pull request once promoted, so this bounds how many a
+#   # human reviews per spec. An honest overrun proposes splitting the spec
+#   # into several standalone ones instead of publishing an oversized tree.
 #   refine:
 #     enabled: true
 #     chain: refine
 #     concurrency: 1
+#     max_leaves: 4
+#     max_nodes: 6
+#     max_depth: 2
 
 # Optional: push notifications for unattended work — spf watch's daemon
 # lifecycle, and every chain run (including watch's own per-issue runs).

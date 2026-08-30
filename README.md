@@ -471,15 +471,39 @@ watch:
     enabled: true
     chain: refine           # any chain that ends in steps.publishIssues()
     concurrency: 1          # this lane's own budget, independent of watch.concurrency
+    max_leaves: 4           # optional — shown are the defaults; the decomposition BUDGET, see below
+    max_nodes: 6
+    max_depth: 2
 ```
 
 (A third, independent budget lives at `watch.fanout.concurrency` — best-of-N
 attempts per claimed issue, not specs. See "Best-of-N per issue" below.)
 
-On Jira, every `RefinedIssue.kind` (`epic`/`feature`/`story`/`bug`/`task`) maps
-to a real Jira issue type through `watch.jira.issue_types` — defaults
-`epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`,
-overridable per kind since real projects rename or customize these:
+**The decomposition budget.** Every leaf the refiner emits becomes its own
+worktree, its own chain run, and its own pull request a human reads once
+promoted — so leaf count is human review count. `assets/prompts/refiner/
+system.md` targets one feature and three or four leaves; `refine.max_leaves`
+(default 4), `refine.max_nodes` (default 6), and `refine.max_depth` (default
+2) are the hard CEILINGS `gates.refinementWellFormed` enforces on top of that
+target, one slice past where a good decomposition sits so the gate never
+makes the target a floor. `max_nodes` doesn't bind at the defaults — it
+exists so raising `max_leaves` or `max_depth` alone can't silently uncap the
+whole tree. Raising `max_depth` above 2 is unsafe on Jira specifically: see
+"On Jira" just below. A tree with a container wrapping exactly one child also
+fails — a container that groups nothing is pure ceremony — and every leaf
+must carry a one-sentence `user_outcome` (rendered as a `## Outcome` section
+on the tracker issue) naming who benefits and what changes for them; a
+process/QA/rollout leaf has no honest sentence to write and gets folded into
+whichever leaf's acceptance criteria it actually belongs to instead. See
+"Splitting an over-large spec" below for what happens when a spec honestly
+doesn't fit.
+
+On Jira, every `RefinedIssue.kind` (`epic`/`feature`/`story`/`bug`/`task`),
+plus `spec` (a standalone spec proposed by splitting an over-large one — see
+"Splitting an over-large spec" below), maps to a real Jira issue type through
+`watch.jira.issue_types` — defaults `epic`/`feature` → `Epic`, `story`/`spec`
+→ `Story`, `bug` → `Bug`, `task` → `Task`, overridable per kind since real
+projects rename or customize these:
 
 ```yaml
 watch:
@@ -493,6 +517,7 @@ watch:
       story: Story
       bug: Bug
       task: Task
+      spec: Story
   refine:
     enabled: true
 ```
@@ -505,9 +530,13 @@ One accepted platform limitation: Jira doesn't support Epic-under-Epic
 nesting the way GitHub's sub-issues API supports up to 8 levels, so a
 `feature` node parented under another `epic`/`feature` (both `Epic` by
 default) will fail at publish time on Jira specifically — a real platform
-difference, not a bug. Both `spf watch init` and `spf watch`'s own startup
-check validate `watch.jira.issue_types` against the real project before
-anything unattended runs — see "Jira" below.
+difference, not a bug. `refine.max_depth`'s default of 2 makes this
+unreachable in practice (see "The decomposition budget" above); raise it
+past 2 only on a tracker where deeper nesting is actually supported. A `spec`
+never parents another `spec` either way — see "Splitting an over-large spec"
+below. Both `spf watch init` and `spf watch`'s own startup check validate
+`watch.jira.issue_types` against the real project before anything unattended
+runs — see "Jira" below.
 
 Every generated issue carries a `<prefix>:type:epic|feature|story|bug|task`
 label AND a `<prefix>:priority:p0|p1|p2|p3` label (see "Priority, dependencies,
@@ -516,12 +545,14 @@ can relabel it before promoting. A container (a feature/epic — something
 else names it as `parent`) gets only those two labels; a leaf additionally
 gets `<prefix>:refined` — **never** `<prefix>:ready`. Promoting a leaf to
 `<prefix>:ready` is a deliberate human decision: the refine lane never
-auto-promotes anything, so a spec fanning out into twenty stories doesn't
-turn into twenty unattended chain runs and twenty PRs with nobody having
-looked at the breakdown first. Once you do promote a leaf, the existing build
-lane picks it up completely unchanged — including the frontier check: a
-promoted leaf isn't claimed until every issue named in its `blocked_by` is
-`<prefix>:done`.
+auto-promotes anything. This is the SECOND line of defense against a
+decomposition nobody looked at before it turns into unattended chain runs and
+PRs — the first is the decomposition budget itself (see above), which keeps
+that number small (four leaves by default, not twenty) rather than relying on
+manual promotion alone to absorb an oversized tree. Once you do promote a
+leaf, the existing build lane picks it up completely unchanged — including
+the frontier check: a promoted leaf isn't claimed until every issue named in
+its `blocked_by` is `<prefix>:done`.
 
 A spec issue's own `<prefix>:priority:pN` label, if it has one, reaches the
 refiner as a **ceiling**: no generated node may be more urgent than the spec
@@ -547,11 +578,12 @@ spec moves through an extra loop before it's even fully published:
 
 ```text
 spec-ready → refining ──┬─→ spec-in-progress → done / blocked   (published a tree, THEN tracked to completion)
-                         └─→ needs-feedback                      (raised questions)
-                                  │  a human answers in the issue's comments,
-                                  │  then adds continue-refinement
-                                  ▼
-                            refining (again, same adw_id) → ...
+                         ├─→ needs-feedback                      (raised questions)
+                         │        │  a human answers in the issue's comments,
+                         │        │  then adds continue-refinement
+                         │        ▼
+                         │   refining (again, same adw_id) → ...
+                         └─→ split-proposed                       (spec too large — see below)
 ```
 
 Answer the refiner's questions as comments on the spec issue, then add the
@@ -582,13 +614,53 @@ stays `spec-in-progress` — which is the truthful state, not a bug.
 
 The spec issue's full lifecycle: `spec-ready → refining → needs-feedback ⇄
 refining → spec-in-progress → done`/`blocked` (the `needs-feedback ⇄
-refining` loop only when the refiner actually escalates). Try it by hand
-first, against a real spec, before turning on the daemon:
+refining` loop only when the refiner actually escalates), or, when the spec
+is too large rather than ambiguous, `spec-ready → refining → split-proposed →
+...` — see "Splitting an over-large spec" just below. Try it by hand first,
+against a real spec, before turning on the daemon:
 
 ```bash
 spf refine "<spec text or path/to/spec.md>" --issue 42               # --issue renders a "## Parent" section, "Decomposed from #42."
 spf refine "<spec text or path/to/spec.md>" --issue 42 --priority p1 # --priority clamps every generated node to p1 or less urgent
 ```
+
+#### Splitting an over-large spec
+
+Ambiguity isn't the only reason a refiner can't publish a tree this round —
+sometimes the spec is simply too big, honestly, for the decomposition budget
+above. Rather than force-fit an oversized tree (or worse, merge unrelated
+slices into a handful of leaves that hit the number but blur past what a
+reviewer can hold in their head), the refiner proposes a concrete **split**
+into two or more standalone specs — each with its own user value, each
+independently shippable, never "phase 1"/"phase 2" of the same thing:
+
+```text
+spec-ready → refining ──→ split-proposed
+                                │  a human reviews the proposal comment, then either
+                                │    · adds split-approved      → executed deterministically, NO agent re-run
+                                │    · comments + continue-refinement → refiner revises the proposal
+                                ▼
+                          N new specs created (spec-ready, type:spec), recorded
+                          on the ORIGINAL spec, which moves to spec-in-progress
+```
+
+Approving with `<prefix>:split-approved` is a deliberate, different label
+from `continue-refinement`'s "resume the refiner" — creating exactly what a
+human already read in the proposal comment is a `code`-shaped action (no
+scout, no refiner session, no worktree), the same way publishing a tree is.
+Each created spec carries `<prefix>:type:spec` and `<prefix>:spec-ready` (never
+`<prefix>:refined` — a spec is not itself a workable leaf) and a `## Parent`
+back-reference to the original spec it was split from; on Jira it maps to a
+`Story` by default (`watch.jira.issue_types.spec`), never nested under
+another spec, since Jira has no Story-under-Story hierarchy to use. The
+**original** spec's own `spec-in-progress` tracking now waits on both child
+specs finishing their own trees, transitively — the same roll-up mechanism
+"Publishing a tree does not mean the spec is done" above already describes,
+with no separate tracking needed for a split. A child spec that is itself
+still too large can split again — a genuinely huge spec bottoming out over a
+couple of rounds is expected; watch for repeated split proposals on the same
+original spec as the signal something is off, rather than a hard generation
+cap.
 
 #### Container roll-up
 
@@ -613,14 +685,18 @@ the build lane still works fine without roll-up.
 
 `spf watch init` seeds the type labels alongside the state ones — **re-run
 it** after upgrading to this version, so it can create the new
-`<prefix>:needs-feedback` and `<prefix>:continue-refinement` labels. This
-lane's prompt (`assets/prompts/refiner/`) is adapted from a "tracer-bullet
-ticket" decomposition skill — vertical slices, a `blocked_by` dependency
-graph, and an expand/migrate/contract sequence for wide mechanical refactors
-— with a gate (`gates.refinementWellFormed`) added on top to enforce the
-container/leaf shape that skill left as prose convention rather than a
-checked rule, now also enforcing that a refinement never publishes issues and
-raises questions in the same round.
+`<prefix>:type:spec`, `<prefix>:split-proposed`, and
+`<prefix>:split-approved` labels, alongside the earlier
+`<prefix>:needs-feedback` and `<prefix>:continue-refinement`. This lane's
+prompt (`assets/prompts/refiner/`) is adapted from a "tracer-bullet ticket"
+decomposition skill — vertical slices, a `blocked_by` dependency graph, and
+an expand/migrate/contract sequence for wide mechanical refactors — with a
+gate (`gates.refinementWellFormed`) added on top to enforce the container/
+leaf shape that skill left as prose convention rather than a checked rule:
+container/leaf kind agreement, no container with a single child, a depth
+cap, a leaf/node count ceiling, a required per-leaf user-outcome sentence,
+and that a refinement never publishes issues alongside questions or a split
+proposal in the same round.
 
 ### Best-of-N per issue (`watch.fanout`)
 

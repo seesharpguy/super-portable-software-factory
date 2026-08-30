@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { JiraProvider } from "../core/issues/jira_provider.js";
 import type { JiraIssueTypeMap } from "../core/data_types.js";
 
-const DEFAULT_ISSUE_TYPES: JiraIssueTypeMap = { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task" };
+const DEFAULT_ISSUE_TYPES: JiraIssueTypeMap = { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" };
 
 function makeProvider(issueTypes: JiraIssueTypeMap = DEFAULT_ISSUE_TYPES): JiraProvider {
   return new JiraProvider("https://acme.atlassian.net", "PROJ", "spf", "you@example.com", "jira-token", issueTypes);
@@ -161,7 +161,7 @@ test("validateIssueTypes: every configured kind matches the project's real issue
     assert.ok(checks.every((c) => c.exists));
     assert.deepEqual(
       checks.map((c) => c.kind).sort(),
-      ["bug", "epic", "feature", "story", "task"],
+      ["bug", "epic", "feature", "spec", "story", "task"],
     );
   } finally {
     restore();

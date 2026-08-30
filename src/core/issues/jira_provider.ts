@@ -58,9 +58,9 @@
  * Jira API error at publish time — a genuine platform difference, not
  * something this file tries to paper over.
  */
-import type { RefinedIssue, JiraIssueTypeMap } from "../data_types.ts";
+import type { JiraIssueTypeMap } from "../data_types.ts";
 import { fetchRetryTransient } from "../utils.ts";
-import type { EnsureLabelsResult, Issue, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
+import type { EnsureLabelsResult, Issue, IssueAuthoringKind, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
 const STATES: WatchState[] = [
   "ready",
@@ -74,6 +74,8 @@ const STATES: WatchState[] = [
   "needs-feedback",
   "continue-refinement",
   "spec-in-progress",
+  "split-proposed",
+  "split-approved",
 ];
 /**
  * GREEDY capture, not lazy — same fix and same reasoning as
@@ -231,7 +233,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   }
 
   /** `IssueAuthoringProvider` — the refine lane's own need (see `provider.ts`'s module doc). `POST /rest/api/3/issue`'s response is `{id, key, self}`, not the full read shape `toIssue` expects, so this constructs the returned `Issue` locally rather than re-fetching. */
-  async createIssue(input: { title: string; body: string; labels: string[]; kind: RefinedIssue["kind"] }): Promise<Issue> {
+  async createIssue(input: { title: string; body: string; labels: string[]; kind: IssueAuthoringKind }): Promise<Issue> {
     const response = await this.jira<{ id: string; key: string }>("/rest/api/3/issue", {
       method: "POST",
       body: JSON.stringify({

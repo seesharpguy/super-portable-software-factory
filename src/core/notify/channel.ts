@@ -27,6 +27,7 @@ export type NotifyKind =
   | "issue_blocked"
   | "spec_refined"
   | "spec_needs_feedback"
+  | "spec_split_proposed"
   | "feature_done"
   | "spec_done";
 

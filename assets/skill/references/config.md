@@ -159,10 +159,13 @@ Full mechanism: the main README's "`spf watch`" section. Field reference:
 | `concurrency` | int ≥1 | Max ISSUES claimed and run at once — not attempts; see `fanout.concurrency`. The build lane's own budget (independent of `refine.concurrency`). Default `2`. |
 | `chain_options` | map of string -> string | Options passed straight through to `chain` (and `refine.chain`) for every unattended dispatch — the same shape an interactive `spf <chain> --suite <name>` builds, e.g. `{suite: strict}` or `{agent: some-agent}`. Default `{}`. Only useful for a chain whose behavior actually reads the option (a step-derived chain's `--suite`; an imperative chain ignores an option it doesn't know about). |
 | `jira.base_url` / `jira.project_key` | string | Only consulted when `issue_provider: jira`. |
-| `jira.issue_types` | map: `epic`/`feature`/`story`/`bug`/`task` -> string | Only consulted when `issue_provider: jira` AND `refine.enabled`. What each `RefinedIssue.kind` creates as on Jira — defaults `epic`/`feature` → `Epic`, `story` → `Story`, `bug` → `Bug`, `task` → `Task`, overridable per kind. Validated against the real project by both `spf watch init` and `spf watch`'s own startup check. |
+| `jira.issue_types` | map: `epic`/`feature`/`story`/`bug`/`task`/`spec` -> string | Only consulted when `issue_provider: jira` AND `refine.enabled`. What each `RefinedIssue.kind` (plus `spec`, a standalone spec proposed by a split — see below) creates as on Jira — defaults `epic`/`feature` → `Epic`, `story`/`spec` → `Story`, `bug` → `Bug`, `task` → `Task`, overridable per kind. Validated against the real project by both `spf watch init` and `spf watch`'s own startup check. |
 | `refine.enabled` | bool | Turns on the second lane: decompose a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues, instead of running `chain` against it directly (a spec isn't individually workable). Default `false` — off by default, so an existing `watch:` config is unaffected by upgrading. Needs `issue_provider: github` or `"jira"` — both implement issue authoring (create + link a hierarchy); any other value fails loudly at startup. |
 | `refine.chain` | string | Which registered chain runs per claimed spec. Default `refine`. |
 | `refine.concurrency` | int ≥1 | The refine lane's own budget, separate from `concurrency`. Default `1`. |
+| `refine.max_leaves` | int ≥1 | The decomposition budget: at most this many LEAVES per refinement — each one becomes its own worktree, chain run, and pull request once promoted, so this is a human-review budget, not a model-effort one. Default `4`. Enforced by `gates.refinementWellFormed`; exceeding it (with no human-approved split already in the thread) sends the refiner back for a correction, and a genuine overrun proposes a `split` into several specs instead of publishing (see below) rather than force-fitting an oversized tree. |
+| `refine.max_nodes` | int ≥1 | Total node ceiling (leaves + containers). Default `6`. Doesn't bind at the other two defaults — it exists so raising `max_leaves` or `max_depth` alone can't silently uncap the whole tree. |
+| `refine.max_depth` | int ≥1 | Containment-depth ceiling — `1` is a top-level leaf/container, `2` is a leaf directly under a top-level container. Default `2`. **Raising this above 2 is unsafe on Jira**: `epic`/`feature` both map to Jira's Epic type by default, and Jira has no Epic-under-Epic nesting, so a 3-level tree fails partway through a non-transactional publish. At the default, that shape is rejected before any issue is created. |
 | `fanout.n` | int, 1-8 | Best-of-N per claimed issue: run `n` sibling attempts of the same issue and let code pick a winner (`core/fanout.ts`'s `pickBest`, the same mechanism `spf fanout` uses standalone). Default `1` — single dispatch, byte-identical to `spf watch` before this key existed. `n > 1` requires `chain` to have a commit step (`spf watch` refuses to start otherwise — a chain with no commit step would have its N-1 losing attempts' uncommitted work destroyed by best-of-N's own cleanup). |
 | `fanout.concurrency` | int ≥1 | Attempts of ONE issue's fan-out IN FLIGHT at once — **not** `concurrency`, which counts issues. The two multiply: `concurrency: 2` × `fanout.concurrency: 2` is up to 4 chain runs in flight; `spf doctor`'s `watch.fanout` line prints the exact product. Does **not** bound worktrees on disk — a successful attempt's tree is kept until every sibling in its fan-out has settled, so disk peak is `concurrency × fanout.n`, not `concurrency × fanout.concurrency`. Default `2`. |
 
@@ -177,6 +180,9 @@ watch:
     enabled: true       # decompose spf:spec-ready specs into a feature/story tree
     chain: refine
     concurrency: 1
+    max_leaves: 4       # optional — shown are the defaults; see refine.max_leaves above
+    max_nodes: 6
+    max_depth: 2
   fanout:
     n: 1                 # attempts per claimed issue. 1 = single dispatch (default) — no-op for the daemon
     concurrency: 2        # attempts IN FLIGHT per issue — not watch.concurrency (issues in flight)
@@ -206,17 +212,30 @@ The `refine` chain grounds its decomposition with a `scout` phase before the
 refiner runs, so `scout` is a required agent for it — a roster that pruned
 it fails `spf watch` startup by name.
 
-The refine lane's own state machine has an extra loop beyond
-`spec-ready → refining → spec-in-progress → done`/`blocked`: when the
-refiner raises material ambiguity instead of a tree (see
-`assets/prompts/refiner/system.md`'s "Ask, don't decide"), the spec moves to
-`<prefix>:needs-feedback` with a comment naming its questions, instead of
-publishing anything. A human answers in the issue's comments and adds
-`<prefix>:continue-refinement`; `spf watch` claims that label back into
+The refine lane's own state machine has two extra loops beyond
+`spec-ready → refining → spec-in-progress → done`/`blocked`, for two
+different problems. When the refiner raises material ambiguity instead of a
+tree (see `assets/prompts/refiner/system.md`'s "Ask, don't decide"), the spec
+moves to `<prefix>:needs-feedback` with a comment naming its questions,
+instead of publishing anything. A human answers in the issue's comments and
+adds `<prefix>:continue-refinement`; `spf watch` claims that label back into
 `refining` and resumes the **same** `adw_id` — the comment thread (split
 into "answers to your open questions" and "earlier discussion") is folded
 into the resumed prompt, and the refiner's own coding-agent session
 continues rather than starting cold. This can loop any number of rounds.
+
+The other loop is for size, not ambiguity: when the spec honestly exceeds
+`refine.max_leaves` (see above), the refiner proposes a `split` into two or
+more standalone specs instead of a scope question, and the spec moves to
+`<prefix>:split-proposed` with a comment naming each proposed spec and why
+it's coherent on its own. A human either adds `<prefix>:split-approved`
+(executed deterministically — `core/refine.ts`'s `publishSpecs()`, no agent
+re-run: it creates exactly what the proposal comment showed, each new spec
+carrying `<prefix>:type:spec` + `<prefix>:spec-ready`, never
+`<prefix>:refined`) or revises the proposal the same way a question gets
+answered (`<prefix>:continue-refinement`). The original spec then tracks
+both child specs' own trees to completion transitively, the same way it
+tracks a published tree's leaves.
 
 Publishing a tree does NOT mean the spec is done: `<prefix>:spec-in-progress`
 is where a spec lands right after publish, and it stays there — with a

@@ -23,6 +23,7 @@ import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
+import { refineBudget } from "../../core/gates.ts";
 import * as sandbox from "../../core/sandbox.ts";
 import { loadOpenSandboxSdk } from "../../core/sandbox_opensandbox.ts";
 import type { AgentConfig, SFConfig } from "../../core/data_types.ts";
@@ -1286,6 +1287,17 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           : cfg.watch.issue_provider === "jira"
             ? "jira supports issue authoring (createIssue/parent field) — run `spf watch init` to validate watch.jira.issue_types against the real project"
             : `watch.issue_provider is ${JSON.stringify(cfg.watch.issue_provider)} — the refine lane needs "github" or "jira"`,
+      );
+      // Same resolution `gates.refinementWellFormed` itself uses
+      // (refineBudget), never a second reading of these three keys, so this
+      // line can never drift from what a refinement is actually held to.
+      const budget = refineBudget({ repo_root: anchor.repo_root, cfg });
+      check(
+        report,
+        "watch.refine decomposition budget",
+        true,
+        `at most ${budget.maxLeaves} leaf/leaves, ${budget.maxNodes} node(s) total, ${budget.maxDepth} level(s) deep — every leaf becomes one pull request a human reviews once promoted`,
+        "info",
       );
     }
   }

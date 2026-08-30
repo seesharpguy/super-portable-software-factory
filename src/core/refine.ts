@@ -16,7 +16,7 @@
 import { GitHubProvider } from "./issues/github_provider.ts";
 import { JiraProvider } from "./issues/jira_provider.ts";
 import type { Issue, IssueAuthoringProvider } from "./issues/provider.ts";
-import { clampPriority, type RefinedIssue, type RefinedPriority, type SFConfig } from "./data_types.ts";
+import { clampPriority, type RefinedIssue, type RefinedPriority, type SFConfig, type SpecSplit } from "./data_types.ts";
 
 export interface PublishedIssue {
   /** The `RefinedIssue.key` this came from — a run-local id, never a tracker id. */
@@ -149,7 +149,17 @@ export function parseRefineMarker(body: string): RefineMarker {
  * this runs: `topoOrder` visits a node's dependencies before the node itself.
  */
 function renderBody(node: RefinedIssue, byKey: Map<string, PublishedIssue>, specIssueId: string | null | undefined): string {
-  const parts = [node.body.trim()];
+  const parts: string[] = [];
+  // First on the issue, ahead of the refiner's own prose: the one sentence
+  // saying why this ticket exists (see `RefinedIssueSchema.user_outcome`). A
+  // human triaging `spf:refined` leaves reads a title and a first line, and
+  // this is the line worth reading. OMITTED when blank rather than rendered
+  // as an empty heading — a container legitimately has none, and neither a
+  // hand-built `publish()` call nor a tree from before this field existed
+  // carries one. Same tolerate-and-degrade policy as `parseRefineMarker`.
+  const outcome = node.user_outcome.trim();
+  if (outcome) parts.push(`## Outcome\n\n${outcome}`);
+  parts.push(node.body.trim());
   if (specIssueId) parts.push(`## Parent\n\nDecomposed from #${specIssueId}.`);
   const blockedByIds = node.blocked_by.map((key) => {
     const published = byKey.get(key);
@@ -266,6 +276,59 @@ export async function publish(tracker: IssueAuthoringProvider, issues: RefinedIs
       // unresolved parent through, which refinementWellFormed rejects.
       if (parent) await tracker.linkChild(parent.issue, issue);
     }
+  }
+  return created;
+}
+
+export interface PublishSpecsOptions {
+  labelPrefix: string;
+  /** The original, over-large spec's id — every created spec's `## Parent` back-reference names it. */
+  originalSpecId: string;
+  /** The original spec's own priority label, if any — inherited by every proposed spec, same ceiling semantics as `PublishOptions.priorityCeiling`. */
+  priority?: RefinedPriority | null;
+}
+
+/**
+ * `publish()`'s twin for the OTHER escalation path: a spec too large for one
+ * decomposition, split into several standalone specs a human has already
+ * approved (see `WatchState`'s doc comment on `split-proposed`/
+ * `split-approved` in `core/issues/provider.ts`). Called by
+ * `core/watch.ts`'s `executeApprovedSplits` — never by an agent phase, since
+ * approving a recorded proposal is a deterministic instruction, not new
+ * information a refiner session needs to reason about.
+ *
+ * Two deliberate differences from `publish()`:
+ *
+ *  - **No `<prefix>:refined` label.** A spec is not a workable leaf — it is
+ *    itself a thing that gets refined later, by `claimSpecs` picking it up
+ *    once it carries `<prefix>:spec-ready`.
+ *  - **No `linkChild`.** On Jira a spec is a Story by default
+ *    (`JiraIssueTypeMapSchema.spec`), and a Story cannot parent a Story — the
+ *    tracker-native hierarchy `publish()` uses for a `RefinedIssue` tree is
+ *    unavailable for spec-under-spec. The `## Parent` body section is the
+ *    only link, same as a bare `spf refine --issue N` run with no authored
+ *    hierarchy to speak of.
+ *
+ * Same not-transactional contract as `publish()`: a create call failing
+ * partway through leaves whatever was already created stranded, for a human
+ * to sort out the way any other `spf watch` failure is sorted out (`spf
+ * phases`, then a re-run).
+ */
+export async function publishSpecs(tracker: IssueAuthoringProvider, specs: SpecSplit[], opts: PublishSpecsOptions): Promise<Issue[]> {
+  const created: Issue[] = [];
+  for (const spec of specs) {
+    const labels = [
+      typeLabel(opts.labelPrefix, "spec"),
+      `${opts.labelPrefix}:spec-ready`,
+      ...(opts.priority ? [priorityLabel(opts.labelPrefix, opts.priority)] : []),
+    ];
+    const body = [
+      spec.body.trim(),
+      `## Parent\n\nSplit from #${opts.originalSpecId} — too large to decompose as one spec.`,
+      `## Why this is its own spec\n\n${spec.rationale.trim()}`,
+    ].join("\n\n");
+    const issue = await tracker.createIssue({ title: spec.title, body, labels, kind: "spec" });
+    created.push(issue);
   }
   return created;
 }

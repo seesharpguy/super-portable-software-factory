@@ -264,7 +264,7 @@ async function rig(opts: { sandboxYaml?: string; chain: ChainDefinition; n: numb
     refineEnabled: false,
     refineConcurrency: 1,
     refineChain: "refine",
-    runRefine: async (o): Promise<RefineRunResult> => ({ accepted: true, adwId: o.adwId, detail: "", created: [], questions: [] }),
+    runRefine: async (o): Promise<RefineRunResult> => ({ accepted: true, adwId: o.adwId, detail: "", created: [], questions: [], split: [] }),
     worktreesDir,
     // The REAL closure shape (`cli/commands/watch.ts`'s own `linkDataDir`):
     // symlink `.spf/data` to the main repo's data dir, THEN exclude it from

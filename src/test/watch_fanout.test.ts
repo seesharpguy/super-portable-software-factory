@@ -266,7 +266,7 @@ function fanoutHarness(opts: {
     refineEnabled: false,
     refineConcurrency: 1,
     refineChain: "refine",
-    runRefine: async (o): Promise<RefineRunResult> => ({ accepted: true, adwId: o.adwId, detail: "", created: [], questions: [] }),
+    runRefine: async (o): Promise<RefineRunResult> => ({ accepted: true, adwId: o.adwId, detail: "", created: [], questions: [], split: [] }),
     worktreesDir,
     linkDataDir: () => {},
     dryRun: false,

@@ -25,7 +25,7 @@ Respond with ONLY valid JSON matching `ScoutOutput` — no prose before or after
 ```json
 {
   "status": "success",
-  "summary": "<one sentence on what you found>",
+  "summary": "<one sentence: the user-facing surfaces this touches, and roughly how many files back them>",
   "findings": [
     { "file": "src/server.ts", "note": "<why this file matters>" }
   ],

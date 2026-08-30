@@ -12,8 +12,14 @@
  * posts the questions and moves the spec to `needs-feedback`; a human
  * answers in the issue's comments and adds `continue-refinement`;
  * `claimSpecs` resumes it — the SAME `adw_id`, comment thread folded into
- * the prompt (`buildSpecPrompt`) — for as many rounds as it takes. See
- * `provider.ts`'s `WatchState` doc comment for the full state diagram.
+ * the prompt (`buildSpecPrompt`) — for as many rounds as it takes. A second,
+ * different escape hatch handles a spec too large for one decomposition (not
+ * ambiguity — size): `proposeSpecSplit` posts a concrete split into several
+ * standalone specs and moves the spec to `split-proposed`; a human either
+ * approves as-is (`split-approved`, executed deterministically by
+ * `executeApprovedSplits` — no agent re-run) or revises it the same way a
+ * question gets answered (`continue-refinement`). See `provider.ts`'s
+ * `WatchState` doc comment for the full state diagram.
  *
  * Provider-agnostic (drives whatever `IssueProvider` it's given) and
  * chain-agnostic (drives whatever `runChain`/`runRefine` callback it's
@@ -115,15 +121,33 @@ export interface RefinedQuestionRef {
   evidence: string[];
 }
 
+/**
+ * One proposed standalone spec, part of splitting an over-large spec into
+ * several — mirrors `SpecSplitSchema` (`core/data_types.ts`) field-for-field,
+ * same decoupling reasoning as `RefinedIssueRef`/`RefinedQuestionRef` above.
+ * Read back from `steps.publishIssues()`'s `refine_split.json` side channel
+ * (see `cli/commands/watch.ts`'s `runRefine`) and, once a human approves,
+ * handed to `core/refine.ts`'s `publishSpecs()` verbatim via
+ * `WatchDeps.publishSpecs` — structurally identical to `SpecSplit`, so no
+ * conversion is needed at that boundary.
+ */
+export interface RefinedSpecSplitRef {
+  title: string;
+  body: string;
+  rationale: string;
+}
+
 export interface RefineRunResult {
   accepted: boolean;
   adwId: string;
   /** Shown to the engineer via a `blocked` comment on a failed/no-op run. */
   detail: string;
-  /** What `steps.publishIssues()` created, read back from its side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run escalated instead of publishing. */
+  /** What `steps.publishIssues()` created, read back from its side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run escalated (questions) or proposed a split instead of publishing. */
   created: RefinedIssueRef[];
-  /** What the refiner is asking, read back from its own side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run published a tree instead of escalating; `gates.refinementWellFormed` guarantees `created` and `questions` are never both non-empty. */
+  /** What the refiner is asking, read back from its own side-channel file — see `cli/commands/watch.ts`'s `runRefine`. Empty when `!accepted` or when the run published a tree or proposed a split instead of escalating; `gates.refinementWellFormed` guarantees `created`/`questions`/`split` are never more than one non-empty at once. */
   questions: RefinedQuestionRef[];
+  /** What the refiner proposed splitting this spec into, read back from its own side-channel file (`refine_split.json`). Empty unless this round proposed a split — see `questions`' own doc comment for the same three-way exclusion. */
+  split: RefinedSpecSplitRef[];
 }
 
 /**
@@ -224,6 +248,18 @@ export interface WatchDeps {
    * without authoring at all (see `cli/commands/watch.ts`'s startup check).
    */
   listChildren?: (parent: Issue) => Promise<Issue[]>;
+  /**
+   * `core/refine.ts`'s `publishSpecs()`, pre-bound to this run's authoring
+   * provider and label prefix — same injection reasoning as `listChildren`
+   * just above: this module drives whatever it's given without importing a
+   * concrete provider type. `undefined` only on a tracker that isn't
+   * authoring-capable, which `cli/commands/watch.ts`'s startup check already
+   * refuses to let `refineEnabled` be true for (see its own comment on
+   * `watch.refine.enabled` requiring "github" or "jira") — so
+   * `executeApprovedSplits` treats an unset value here as an invariant
+   * violation, not a graceful degrade, unlike `listChildren`'s logged no-op.
+   */
+  publishSpecs?: (specs: RefinedSpecSplitRef[], opts: { originalSpecId: string; priority?: RefinedPriority | null }) => Promise<Array<{ id: string; title: string }>>;
   log: (message: string) => void;
   /**
    * Structured push, alongside `log`'s plain string — a required field, like
@@ -629,16 +665,139 @@ async function escalateSpec(
 }
 
 /**
+ * The refine lane's third finishing move, alongside `announceRefined`
+ * (published a tree) and `escalateSpec` (material ambiguity): a spec too
+ * large for one decomposition (see `gates.refinementWellFormed`'s budget
+ * checks, and `assets/prompts/refiner/system.md`'s "Sizing and the budget").
+ * Posts each proposed spec as its own comment section — title, a short
+ * preview of its body, and the rationale for splitting it out — records the
+ * EXACT proposal in `WatchMarker.split` so `executeApprovedSplits` creates
+ * precisely what a human reviewed rather than whatever the marker happens to
+ * hold by the time approval lands, and moves the spec to `split-proposed`.
+ *
+ * Shares `feedback`'s bookkeeping with `escalateSpec`, deliberately: a human
+ * can revise a proposed split the same way they answer a question — comment
+ * inline, add `continue-refinement` — and `buildSpecPrompt` folds the
+ * comment thread back into the resumed prompt identically either way,
+ * regardless of which of the two escalation shapes the PREVIOUS round used.
+ * `reconcileRefining` below tells the two apart by checking `marker.split`
+ * before `marker.feedback`, since this function always writes both while
+ * `escalateSpec` writes only the latter.
+ */
+async function proposeSpecSplit(
+  deps: WatchDeps,
+  issue: Issue,
+  marker: WatchMarker,
+  specs: RefinedSpecSplitRef[],
+  adwId: string,
+  round: number,
+): Promise<void> {
+  const body =
+    `## spf proposes splitting this spec (round ${round})\n\n` +
+    `This spec doesn't fit in one decomposition. Proposed split into ${specs.length} standalone specs:\n\n` +
+    specs
+      .map((s, i) => {
+        const lines = s.body.trim().split("\n");
+        const preview = lines.slice(0, 6).join("\n");
+        const truncated = lines.length > 6 ? "\n\n_(preview truncated — the full text lands in the created spec)_" : "";
+        return `### ${i + 1}. ${s.title}\n\n${preview}${truncated}\n\n**Why this is its own spec:** ${s.rationale}`;
+      })
+      .join("\n\n---\n\n") +
+    `\n\n---\n\nApprove as proposed by adding the \`${deps.labelPrefix}:split-approved\` label — spf will create these ${specs.length} specs with no further agent run. ` +
+    `Or comment with changes and add \`${deps.labelPrefix}:continue-refinement\` — refinement resumes from where it left off (adw_id \`${adwId}\`) and can revise the proposal.`;
+
+  deps.notify({
+    // "notice" level, not "info" — the same class of event as
+    // spec_needs_feedback: spf needs a human, so it belongs on an
+    // `attention`-scope channel just as much as an `all`-scope one.
+    kind: "spec_split_proposed",
+    level: "notice",
+    title: `spec ${issue.id} split proposed`,
+    detail: `${specs.length} proposed spec(s), round ${round}.`,
+    fields: [
+      ["issue", issue.id],
+      ["title", issue.title],
+      ["chain", deps.refineChain],
+      ["adw_id", adwId],
+      ["round", String(round)],
+    ],
+  });
+
+  if (!deps.dryRun) {
+    await deps.provider.comment(issue, body);
+    await deps.provider.writeMarker(issue, {
+      ...marker,
+      split: { specs, proposed_at: new Date().toISOString(), rounds: round },
+      feedback: { rounds: round, asked_at: new Date().toISOString() },
+    });
+    await deps.provider.transition(issue, "split-proposed");
+  }
+}
+
+/**
+ * The other half of the split flow: a human already approved
+ * (`<prefix>:split-approved`) exactly what `proposeSpecSplit` recorded in
+ * `WatchMarker.split`, so this is a deterministic `code`-shaped action, not
+ * an agent one — no scout, no refiner session, no worktree, mirroring why
+ * `steps.publishIssues()` is a `code` phase rather than an agent phase.
+ * Idempotent the same way `runSpec`'s own publish path is: a non-empty
+ * `marker.refined` (this function writes the created specs' ids there, same
+ * field `finishTrackedSpecs` polls) short-circuits, so a crash between
+ * creating the specs and posting the summary comment never double-creates on
+ * the next tick.
+ *
+ * Recording the child SPECS in `marker.refined` — not their eventual
+ * decomposed issues — is deliberate: it's what lets `finishTrackedSpecs`
+ * close the ORIGINAL spec once both child specs finish their own trees
+ * (transitively — each child spec is a `spec-in-progress` tracked the same
+ * way once IT publishes), with no new tracking code needed anywhere.
+ */
+export async function executeApprovedSplits(deps: WatchDeps): Promise<void> {
+  if (!deps.refineEnabled) return;
+  const approved = await deps.provider.listInState("split-approved");
+  for (const issue of approved) {
+    const marker = await deps.provider.readMarker(issue);
+    if (marker?.refined && marker.refined.length > 0) {
+      deps.log(`watch: spec ${issue.id}: split already executed — finishing`);
+      await announceRefined(deps, issue, marker.refined.map((id) => ({ id })), marker.split?.rounds ?? marker.feedback?.rounds ?? 0);
+      continue;
+    }
+    const specs = marker?.split?.specs ?? [];
+    if (specs.length === 0) {
+      deps.log(`watch: spec ${issue.id} is \`${deps.labelPrefix}:split-approved\` but its marker records no proposed split — leaving it alone`);
+      continue;
+    }
+    if (!deps.publishSpecs) {
+      // See WatchDeps.publishSpecs's own doc comment: refineEnabled true
+      // without an authoring-capable tracker is a startup failure
+      // (cli/commands/watch.ts), never a state this function should reach.
+      throw new Error(`watch: spec ${issue.id}: refine is enabled but no publishSpecs was provided — this is an spf bug, not a config problem`);
+    }
+    deps.log(`watch: spec ${issue.id}: split approved — creating ${specs.length} spec(s)`);
+    if (deps.dryRun) continue;
+    const created = await deps.publishSpecs(specs, { originalSpecId: issue.id, priority: specPriorityLabel(issue, deps.labelPrefix) });
+    await announceRefined(
+      deps,
+      issue,
+      created.map((c) => ({ id: c.id, title: c.title, kind: "spec" })),
+      marker?.split?.rounds ?? 0,
+    );
+  }
+}
+
+/**
  * The refine lane's own `reconcileOrphans` — a `refining`-labeled spec this
- * process isn't tracking is one of three things: a completed publish that
+ * process isn't tracking is one of four things: a completed publish that
  * crashed before its own `transition(issue, "done")` ran (resume: finish it,
- * no re-run), a completed escalation that crashed before its own
+ * no re-run), a completed split proposal that crashed before its own
+ * `transition(issue, "split-proposed")` ran (resume: finish THAT transition
+ * — checked before the escalation case below, since `proposeSpecSplit`
+ * writes BOTH `split` and `feedback` while `escalateSpec` writes only the
+ * latter), a completed escalation that crashed before its own
  * `transition(issue, "needs-feedback")` ran (resume: finish THAT transition,
- * no re-asking — `escalateSpec` writes the marker's `feedback` before it
- * transitions, so seeing `feedback` on a still-`refining` spec can only mean
- * that last step didn't complete), or a genuine orphan (retry up to
- * `MAX_ORPHAN_ATTEMPTS`, then give up). A no-op entirely when `watch.refine`
- * is off — see `WatchDeps.refineEnabled`.
+ * no re-asking), or a genuine orphan (retry up to `MAX_ORPHAN_ATTEMPTS`, then
+ * give up). A no-op entirely when `watch.refine` is off — see
+ * `WatchDeps.refineEnabled`.
  */
 export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): Promise<void> {
   if (!deps.refineEnabled) return;
@@ -649,6 +808,21 @@ export async function reconcileRefining(deps: WatchDeps, state: WatchRunState): 
     if (marker?.refined && marker.refined.length > 0) {
       deps.log(`watch: spec ${issue.id} orphaned after publish already completed — finishing`);
       await announceRefined(deps, issue, marker.refined.map((id) => ({ id })), marker.feedback?.rounds ?? 0);
+      continue;
+    }
+    // Checked BEFORE marker.feedback: proposeSpecSplit always writes both
+    // `split` and `feedback` together, while escalateSpec writes only the
+    // latter — so `split` present is the more specific signal and must win.
+    if (marker?.split) {
+      deps.log(`watch: spec ${issue.id} orphaned after proposing round ${marker.split.rounds}'s split — finishing the transition to split-proposed`);
+      deps.notify({
+        kind: "spec_split_proposed",
+        level: "notice",
+        title: `spec ${issue.id} split proposed`,
+        detail: `Round ${marker.split.rounds}.`,
+        fields: [["issue", issue.id], ["title", issue.title], ["round", String(marker.split.rounds)]],
+      });
+      if (!deps.dryRun) await deps.provider.transition(issue, "split-proposed");
       continue;
     }
     if (marker?.feedback) {
@@ -1318,11 +1492,23 @@ async function runSpec(deps: WatchDeps, issue: Issue): Promise<void> {
     }
 
     // Mutually exclusive by construction — gates.refinementWellFormed
-    // guarantees a `questions`-bearing envelope publishes no `issues` — so
-    // this branches before, never alongside, the publish path below.
+    // guarantees a `questions`-bearing envelope publishes no `issues`/`split`
+    // — so this branches before, never alongside, the split or publish paths
+    // below.
     if (result.questions.length > 0) {
       const round = (existingMarker?.feedback?.rounds ?? 0) + 1;
       await escalateSpec(deps, issue, marker, result.questions, adwId, round);
+      cleanupWorktree(deps, { worktree: worktreePath, branch });
+      return;
+    }
+
+    // Same mutual exclusion, the other escalation shape: a spec too large
+    // for one decomposition, proposed as several standalone specs instead of
+    // a scope question. See proposeSpecSplit's own doc comment for why this
+    // shares `feedback`'s round-tracking with the questions branch above.
+    if (result.split.length > 0) {
+      const round = (existingMarker?.feedback?.rounds ?? existingMarker?.split?.rounds ?? 0) + 1;
+      await proposeSpecSplit(deps, issue, marker, result.split, adwId, round);
       cleanupWorktree(deps, { worktree: worktreePath, branch });
       return;
     }
@@ -1590,6 +1776,11 @@ export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void>
   // on — checking in the same tick is strictly cheaper than making a product
   // manager wait one extra poll interval to see it.
   await finishTrackedSpecs(deps).catch(tickErrorHandler(deps, "finishTrackedSpecs"));
+  // Right after finishTrackedSpecs, same reasoning: a spec a human approved
+  // a split on this tick should get its child specs created this same tick,
+  // not one poll interval later. No agent, no worktree — see
+  // executeApprovedSplits's own doc comment.
+  await executeApprovedSplits(deps).catch(tickErrorHandler(deps, "executeApprovedSplits"));
   await claimSpecs(deps, state, "continue-refinement").catch(tickErrorHandler(deps, "claimSpecs(resume)"));
   await claimSpecs(deps, state).catch(tickErrorHandler(deps, "claimSpecs"));
   await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));

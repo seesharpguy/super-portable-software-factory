@@ -24,12 +24,20 @@
  * same window: 630.0kB packed / 1828.6kB unpacked, 192 files: ≤660 KB
  * packed, ≤1.92 MB unpacked — ~5% headroom, same rationale as every prior
  * raise.
+ *
+ * Raised again for the refiner over-decomposition fix: `assets/prompts/
+ * refiner/system.md`/`user.md` grew substantially (the slice test, the
+ * sizing/budget section, a worked example, a spec-split Report shape) plus
+ * new `gates.ts` budget/shape checks, `watch.ts`'s split-proposal state
+ * machine, and README/config.md doc growth to match — 675.2kB packed /
+ * 1962.2kB unpacked, 195 files: ≤710 KB packed, ≤2.06 MB unpacked — ~5%
+ * headroom, same rationale as every prior raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 660_000;
-const UNPACKED_BUDGET = 1_920_000;
+const PACKED_BUDGET = 710_000;
+const UNPACKED_BUDGET = 2_060_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the

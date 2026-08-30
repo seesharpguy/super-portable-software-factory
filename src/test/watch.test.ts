@@ -229,7 +229,7 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     refineEnabled: false,
     refineConcurrency: 1,
     refineChain: "refine",
-    runRefine: async (opts): Promise<RefineRunResult> => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] }),
+    runRefine: async (opts): Promise<RefineRunResult> => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] }),
     worktreesDir: "/tmp/spf-watch-test-worktrees",
     linkDataDir: () => {},
     dryRun: false,
@@ -939,7 +939,7 @@ test("claimSpecs: claims a spec-ready spec, publishes, and moves it to spec-in-p
         { id: "200", title: "Owner invites by email", kind: "story", isLeaf: true },
         { id: "199", title: "Invitations feature", kind: "feature", isLeaf: false },
       ],
-      questions: [],
+      questions: [], split: [],
     }),
   });
 
@@ -983,7 +983,7 @@ test("claimSpecs: dry-run claims no spec and never calls runRefine", async () =>
     dryRun: true,
     runRefine: async (opts) => {
       called = true;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] };
     },
   });
 
@@ -1026,7 +1026,7 @@ test("claimSpecs: a rejected refine chain blocks the spec with the failure detai
   const state = createWatchState();
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
-    runRefine: async (opts) => ({ accepted: false, adwId: opts.adwId, detail: "refiner failed gates", created: [], questions: [] }),
+    runRefine: async (opts) => ({ accepted: false, adwId: opts.adwId, detail: "refiner failed gates", created: [], questions: [], split: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -1045,7 +1045,7 @@ test("claimSpecs: a re-claimed spec whose marker already lists published issues 
     refineEnabled: true,
     runRefine: async (opts) => {
       called = true;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] };
     },
   });
 
@@ -1127,7 +1127,7 @@ test("claim -> refine -> published fires issue_claimed then spec_refined, both i
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
     notify,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "500", title: "A story", kind: "story", isLeaf: true }], questions: [] }),
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "500", title: "A story", kind: "story", isLeaf: true }], questions: [], split: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -1160,7 +1160,7 @@ test("claimSpecs: a refiner that raises questions escalates instead of publishin
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
     notify,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()] }),
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()], split: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -1192,7 +1192,7 @@ test("claimSpecs: continue-refinement resumes the SAME adw_id as the original ru
     refineEnabled: true,
     runRefine: async (opts) => {
       seenAdwIds.push(opts.adwId);
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "600", title: "Resolved story", kind: "story", isLeaf: true }], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [{ id: "600", title: "Resolved story", kind: "story", isLeaf: true }], questions: [], split: [] };
     },
   });
 
@@ -1215,7 +1215,7 @@ test("claimSpecs: a second escalation round increments marker.feedback.rounds, r
     refineEnabled: true,
     runRefine: async (opts) => {
       seenPrompts.push(opts.prompt);
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion({ id: "Q2", question: "And what about invitations already sent?" })] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion({ id: "Q2", question: "And what about invitations already sent?" })], split: [] };
     },
   });
 
@@ -1257,7 +1257,7 @@ test("claimSpecs: dry-run never claims or runs an escalating spec either", async
     dryRun: true,
     runRefine: async (opts) => {
       called = true;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [sampleQuestion()], split: [] };
     },
   });
 
@@ -1274,7 +1274,7 @@ test("announceRefined: a decomposition that produced zero issues has nothing to 
   const state = createWatchState();
   const deps = makeDeps(provider, codeHost, {
     refineEnabled: true,
-    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] }),
+    runRefine: async (opts) => ({ accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] }),
   });
 
   await claimSpecs(deps, state);
@@ -1549,7 +1549,7 @@ test("claimSpecs: threads deps.chainOptions through to runRefine's opts, same as
     chainOptions: { agent: "flue" },
     runRefine: async (opts) => {
       seenOptions = opts.chainOptions;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] };
     },
   });
 
@@ -1573,7 +1573,7 @@ test("claimSpecs: a spec's spf:priority label reaches both the prompt and runRef
     runRefine: async (opts) => {
       seenPrompt = opts.prompt;
       seenOptions = opts.chainOptions;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] };
     },
   });
 
@@ -1596,7 +1596,7 @@ test("claimSpecs: a spec with no priority label reaches the refiner exactly as b
     runRefine: async (opts) => {
       seenPrompt = opts.prompt;
       seenOptions = opts.chainOptions;
-      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [] };
+      return { accepted: true, adwId: opts.adwId, detail: "", created: [], questions: [], split: [] };
     },
   });
 
@@ -1619,7 +1619,7 @@ test("tick: a spec only reaches done once every issue it produced does — the r
       adwId: opts.adwId,
       detail: "",
       created: [{ id: "800", title: "The only leaf", kind: "story", isLeaf: true }],
-      questions: [],
+      questions: [], split: [],
     }),
   });
 

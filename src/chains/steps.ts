@@ -71,6 +71,7 @@ import {
   type RefinedPriority,
   type RefineQuestion,
   type ReviewOutputT,
+  type SpecSplit,
 } from "../core/data_types.ts";
 import type { ChangeSet } from "../core/data_types.ts";
 import { Run, type PhaseHandle } from "../core/runner.ts";
@@ -845,19 +846,26 @@ export function refine(opts: { owner?: string; description?: string; retries?: n
     output_type: RefineOutput,
     description: opts.description ?? "Decompose the spec into a feature/story tree of vertical slices",
     // refinementWellFormed is NOT in GATE_ALLOWLIST — it is meaningless on
-    // any other envelope type (it reads `issues`/`questions`), so there is
-    // nothing to gain by letting a definition name it, and it stays
+    // any other envelope type (it reads `issues`/`questions`/`split`), so
+    // there is nothing to gain by letting a definition name it, and it stays
     // non-removable here.
     //
-    // retries: 1, not 0 — this gate's own doc comment says a violation
-    // "re-prompts the SAME refiner session before publishIssues() ever
-    // runs." With 0 retries that was never true: agents.ts throws
-    // GateFailure on the first violation and the whole spec goes straight to
-    // spf:blocked with no correction round-trip. The mutual-exclusion rule
-    // between `issues` and `questions` (see refinementWellFormed) makes that
-    // mismatch more likely to bite in practice, not less.
+    // retries: 2, not 1. `retries: 1` bought exactly one correction round
+    // (`core/agents.ts`'s gate loop: attempts 1..retries+1), which is enough
+    // for a MECHANICAL violation — an unresolved parent, a mislabeled kind —
+    // because the fix is local and obvious. The budget checks in
+    // `gates.refinementWellFormed` are not mechanical: the first correction
+    // is "cut this down," and a refiner that genuinely cannot needs a SECOND
+    // round to reach for the other branch (publish nothing, propose a
+    // `split`). Without it, the honest-overrun case exits as a
+    // `GateFailure` — which does NOT return non-zero through
+    // `cli/commands/watch.ts`'s `runRefine`, but THROWS past it into
+    // `core/watch.ts`'s `runSpec` catch, moving the spec to
+    // `<prefix>:blocked` and paging a `watch_error` at level "error". A spec
+    // that is merely too big is not an spf failure, and it should not look
+    // like one.
     gates: withExtraGates([gates.refinementWellFormed], opts.extraGates),
-    retries: opts.retries ?? 1,
+    retries: opts.retries ?? 2,
   });
 }
 
@@ -906,23 +914,23 @@ function parsePriorityOption(raw: string | undefined): RefinedPriority | null {
 }
 
 /**
- * `cli/commands/watch.ts`'s `runRefine()` reads BOTH `refine_publish.json`
- * and `refine_questions.json` back, unconditionally, after this chain
- * exits — it has no other way to learn what THIS run did, since a chain's
- * return value is just an exit code. A resumed spec (`continue-refinement`)
- * reruns this entire chain from `request` on, into the SAME deterministic
- * `context_handoff_dir` a PRIOR round already wrote into. Without clearing
- * the file this run is NOT about to write, a stale `refine_questions.json`
- * from an earlier escalation round survives a LATER round's successful
- * publish — `runRefine` then reports those old questions as if raised
- * again THIS round, so `runSpec` escalates a second time even though real
- * issues were already created on the tracker seconds earlier. Called
- * before EITHER branch writes, so exactly one of the two files reflects
- * this run when the phase returns, never a leftover from a previous one.
- * `force: true` — a first-ever run has neither file yet, which is fine.
+ * `cli/commands/watch.ts`'s `runRefine()` reads `refine_publish.json`,
+ * `refine_questions.json`, AND `refine_split.json` back, unconditionally,
+ * after this chain exits — it has no other way to learn what THIS run did,
+ * since a chain's return value is just an exit code. A resumed spec
+ * (`continue-refinement`) reruns this entire chain from `request` on, into
+ * the SAME deterministic `context_handoff_dir` a PRIOR round already wrote
+ * into. Without clearing the files this run is NOT about to write, a stale
+ * one from an earlier round survives a LATER round's successful publish —
+ * `runRefine` then reports that stale outcome as if it happened again THIS
+ * round, so `runSpec` escalates (or splits) a second time even though real
+ * issues were already created on the tracker seconds earlier. Called before
+ * ANY branch writes, so exactly one of the three files reflects this run
+ * when the phase returns, never a leftover from a previous one. `force:
+ * true` — a first-ever run has none of them yet, which is fine.
  */
 export function clearStaleRefineOutputFiles(contextHandoffDir: string): void {
-  for (const name of ["refine_questions.json", "refine_publish.json"]) {
+  for (const name of ["refine_questions.json", "refine_publish.json", "refine_split.json"]) {
     rmSync(path.join(contextHandoffDir, name), { force: true });
   }
 }
@@ -930,11 +938,12 @@ export function clearStaleRefineOutputFiles(contextHandoffDir: string): void {
 export function publishIssues(opts: { description?: string } = {}): Step {
   preflightDescription("publish", opts.description);
   const fn = async (run: Run, state: ChainState) => {
-    const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[]; questions?: RefineQuestion[] }) | null;
+    const envelope = state.previous as (EnvelopeBase & { issues?: RefinedIssue[]; questions?: RefineQuestion[]; split?: SpecSplit[] }) | null;
     if (!envelope || !Array.isArray(envelope.issues)) {
       throw new Error("publishIssues() requires a preceding refine() step in the chain's step list");
     }
     const questions = envelope.questions ?? [];
+    const split = envelope.split ?? [];
     const priorityCeiling = parsePriorityOption(state.options["priority"]);
     await run.phase(
       makePhaseParams({
@@ -948,6 +957,17 @@ export function publishIssues(opts: { description?: string } = {}): Step {
         if (questions.length > 0) {
           writeFileSync(path.join(run.context_handoff_dir, "refine_questions.json"), JSON.stringify(questions, null, 2));
           ph.log({ escalated: questions.length });
+          return;
+        }
+        if (split.length > 0) {
+          // Recorded, never executed, here: creating the proposed specs is
+          // `core/watch.ts`'s `executeApprovedSplits`' job, gated on a human
+          // adding `<prefix>:split-approved` — this phase only writes the
+          // proposal down for `runRefine` to hand to `runSpec`'s own
+          // `proposeSpecSplit`, same division of labor as the `questions`
+          // branch above (this writes, `runSpec` posts/transitions).
+          writeFileSync(path.join(run.context_handoff_dir, "refine_split.json"), JSON.stringify(split, null, 2));
+          ph.log({ split_proposed: split.length });
           return;
         }
         const tracker = refineLib.resolveAuthoringProvider(run.cfg);

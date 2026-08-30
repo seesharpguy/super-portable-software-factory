@@ -198,6 +198,37 @@ export const RefinedIssueSchema = v.object({
   key: v.string(),
   kind: v.picklist(["epic", "feature", "story", "bug", "task"]),
   title: v.string(),
+  /**
+   * One sentence: what someone can do once this node lands that they could
+   * not before — the "slice test" sentence from
+   * `assets/prompts/refiner/system.md`. A FIELD rather than a `##` section
+   * inside `body`, for three reasons. It rides the constrained decode —
+   * `core/agents.ts` hands `call.output_type.schema` to the coding agent as
+   * `output_schema` on every send, corrections included — so this is a slot
+   * the model fills while it is still deciding what the slice IS, not a
+   * heading it appends afterwards to satisfy a check it read about (the
+   * asymmetry `c9a4471`'s banned-noun rule lacked, and why the model routed
+   * around it). It is checkable without a regex over prose the model
+   * controls the format of. And it leaves `body`'s documented shape — "##
+   * What to build" then "## Acceptance criteria" only, a rule stated in
+   * `body`'s own comment below, in `assets/prompts/refiner/user.md` and in
+   * `system.md` — alone, instead of contradicting it in three places.
+   *
+   * `v.optional(..., "")` rather than a bare `v.string()`, deliberately, and
+   * against the pattern `title`/`body` set: a MISSING field fails the
+   * valibot parse and burns a JSON-repair retry on a generic "field
+   * required" message, whereas an EMPTY one reaches
+   * `gates.refinementWellFormed`, which sends back a correction that says
+   * what sentence to write and why. The better message is worth more here
+   * than the earlier failure, and every existing `core/refine.ts`
+   * `publish()` caller keeps compiling unchanged.
+   *
+   * Present on every node in the schema (a container should have to answer
+   * for itself too), enforced by the gate on LEAVES only: a container's
+   * outcome is the union of its children's, and a blank one there is a
+   * style note, not a decomposition mistake.
+   */
+  user_outcome: v.optional(v.string(), ""),
   body: v.string(), // "## What to build" / "## Acceptance criteria" — see assets/prompts/refiner/user.md
   parent: v.optional(v.string(), ""), // another node's `key`; "" = top level
   blocked_by: v.optional(v.array(v.string()), () => []), // other nodes' `key`s that must land first
@@ -228,10 +259,48 @@ export const RefineQuestionSchema = v.object({
 });
 export type RefineQuestion = v.InferOutput<typeof RefineQuestionSchema>;
 
-/** A product spec decomposed into a feature/story tree — see `steps.refine()` and `core/refine.ts`. */
+/**
+ * One proposed standalone spec, part of splitting an over-large spec into
+ * several — the refiner's answer to "this spec doesn't fit the leaf budget"
+ * that is NOT ambiguity (contrast `RefineQuestionSchema`, which is). `body`
+ * is a complete spec in its own right — problem, proposed outcome, scope —
+ * not a fragment or a "phase" of a larger plan: `assets/prompts/refiner/
+ * system.md`'s sizing section requires each entry to be something a human
+ * would ship on its own. `rationale` is why it's coherent alone, and should
+ * state the leaf count the refiner expects it to decompose into, so a human
+ * approving the split can see at a glance that the split actually fixes the
+ * over-budget problem rather than just moving it downstream.
+ *
+ * `core/refine.ts`'s `publishSpecs()` turns an approved list of these into
+ * real tracker issues (`kind: "spec"`, `<prefix>:type:spec` +
+ * `<prefix>:spec-ready` labels) — see `WatchMarker.split` in
+ * `core/issues/provider.ts` for how a proposal is recorded between "the
+ * refiner proposed it" and "a human approved it."
+ */
+export const SpecSplitSchema = v.object({
+  title: v.string(),
+  body: v.string(),
+  rationale: v.string(),
+});
+export type SpecSplit = v.InferOutput<typeof SpecSplitSchema>;
+
+/**
+ * A product spec decomposed into a feature/story tree — see `steps.refine()`
+ * and `core/refine.ts`. Exactly one of `issues` / `questions` / `split` is
+ * non-empty for a given round (`gates.refinementWellFormed` enforces all
+ * three pairwise): `issues` is an unambiguous decomposition that fits the
+ * budget; `questions` is material ambiguity (scope, data model, an external
+ * dependency, a UX contract — see `system.md`'s "Ask, don't decide");
+ * `split` is neither of those — the spec is simply too large for one
+ * decomposition, and the refiner proposes cutting it into several standalone
+ * specs instead of guessing at a scope cut or force-fitting an oversized
+ * tree. See `SpecSplitSchema`'s own doc comment for what `split`'s job is
+ * *not*: an ambiguity question, or a fragment of a bigger plan.
+ */
 export const RefineOutput = envelopeType("RefineOutput", {
   issues: v.optional(v.array(RefinedIssueSchema), () => []),
   questions: v.optional(v.array(RefineQuestionSchema), () => []),
+  split: v.optional(v.array(SpecSplitSchema), () => []),
 });
 export type RefineOutputT = v.InferOutput<typeof RefineOutput.schema>;
 
@@ -415,8 +484,29 @@ export class GateReport {
 }
 
 /** The minimal shape a gate needs from a run — avoids a circular import with runner.ts. */
+/** The minimal shape a gate needs from a run — avoids a circular import with runner.ts. */
 export interface RunContext {
   repo_root: string;
+  /**
+   * The run's resolved config. The one field here that isn't about the
+   * filesystem: `gates.refinementWellFormed` reads `watch.refine`'s
+   * decomposition budget from it. `core/runner.ts`'s `Run` already carries
+   * `cfg` — it satisfies this interface structurally, which is the entire
+   * point of an interface this narrow — so the single production call site
+   * (`core/agents.ts`'s gate loop, which passes the `Run` itself) always
+   * supplies it.
+   *
+   * OPTIONAL rather than required so a gate stays callable from a test or a
+   * tool holding nothing but a repo root; absent, a gate falls back to the
+   * packaged `DEFAULT_REFINE_*` constants — the SAME numbers a config file
+   * that omits those keys resolves to, never a skipped check. Same shape as
+   * `core/permissions.ts`'s own `RunLike` (`{repo_root, cfg}`), deliberately
+   * — two structural narrowings of `Run` that agree.
+   *
+   * `SFConfig` is declared later in this file; a forward reference in a type
+   * position is erased at compile time and needs no reordering.
+   */
+  cfg?: SFConfig;
 }
 
 export type GateFn = (envelope: EnvelopeBase, run: RunContext) => GateReport | string[];
@@ -816,6 +906,14 @@ export const JiraIssueTypeMapSchema = v.object({
   story: v.optional(v.string(), "Story"),
   bug: v.optional(v.string(), "Bug"),
   task: v.optional(v.string(), "Task"),
+  /**
+   * A spec proposed by `core/refine.ts`'s `publishSpecs()` — a Story by
+   * default, the same hierarchy level BT-1789 itself was created at. Never
+   * `"Epic"`: a spec is not a container in the `RefineOutput.issues` tree
+   * `gates.refinementWellFormed` validates (it can't be a `parent` there),
+   * so it doesn't need Epic-under-Epic nesting the way `feature` does.
+   */
+  spec: v.optional(v.string(), "Story"),
 });
 export type JiraIssueTypeMap = v.InferOutput<typeof JiraIssueTypeMapSchema>;
 
@@ -845,10 +943,62 @@ export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
  * any other value fails loudly at `spf watch` startup rather than running a
  * refine lane that can never publish anything.
  */
+/**
+ * The decomposition BUDGET's packaged defaults, and the single source of
+ * truth for them: `WatchRefineConfigSchema` below uses them as its valibot
+ * defaults, and `gates.refineBudget` falls back to them for a `RunContext`
+ * carrying no `cfg` (see `RunContext.cfg`). Two copies of a default is how a
+ * config file and the gate that enforces it come to disagree about what the
+ * budget IS, so there is one copy.
+ *
+ * These are CEILINGS, not targets. `assets/prompts/refiner/system.md` states
+ * the target — one feature, three or four leaves. A gate that failed AT the
+ * target would MAKE the target a floor: every spec would land exactly on the
+ * number and none would land under it. So the gate fires one slice past
+ * where a good decomposition sits, not at it.
+ *
+ * The unit of `DEFAULT_REFINE_MAX_LEAVES` is HUMAN REVIEWS, not model effort:
+ * every leaf gets `<prefix>:refined`, and `core/watch.ts`'s build lane turns
+ * each one into its own worktree, its own chain run and its own pull request
+ * a person reads.
+ */
+export const DEFAULT_REFINE_MAX_LEAVES = 4;
+export const DEFAULT_REFINE_MAX_NODES = 6;
+export const DEFAULT_REFINE_MAX_DEPTH = 2;
+
+/**
+ * `max_leaves`/`max_nodes`/`max_depth` are the decomposition budget
+ * `gates.refinementWellFormed` enforces — see `DEFAULT_REFINE_*` above for
+ * what each is denominated in and why the gate's number is looser than the
+ * prompt's target. Three notes an operator tuning these needs:
+ *
+ *  - `max_nodes` DOES NOT BIND at the defaults. With `max_depth: 2` and the
+ *    gate's no-singleton-container rule, every container has at least two
+ *    children, so a tree is at most `max_leaves + floor(max_leaves / 2)` = 6
+ *    nodes at the default `max_leaves: 4`. It exists so that raising ONE of
+ *    the other two knobs cannot silently uncap the whole tree.
+ *  - RAISING `max_depth` ABOVE 2 IS UNSAFE ON JIRA. `jira.issue_types` maps
+ *    both `epic` and `feature` to Jira's Epic type by default, and Jira has
+ *    no Epic-under-Epic nesting (see `core/issues/jira_provider.ts`'s
+ *    accepted-limitation note) — a three-level tree reaches `linkChild` and
+ *    comes back as a raw Atlassian API error partway through a publish that
+ *    is deliberately not transactional. At 2, that tree is rejected before a
+ *    single issue is created.
+ *  - There is no "unlimited". `minValue(1)` on all three is deliberate: a
+ *    spec that genuinely needs more slices than the budget allows is a spec
+ *    that should be SPLIT, and the refiner has a first-class way to say so
+ *    (`RefineOutput.split` -> `core/watch.ts`'s `proposeSpecSplit` ->
+ *    `split-proposed`, approved by a human, executed by
+ *    `executeApprovedSplits`). An operator who disagrees raises the number
+ *    rather than removing it.
+ */
 export const WatchRefineConfigSchema = v.object({
   enabled: v.optional(v.boolean(), false),
   chain: v.optional(v.string(), "refine"),
   concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 1),
+  max_leaves: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(50)), DEFAULT_REFINE_MAX_LEAVES),
+  max_nodes: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100)), DEFAULT_REFINE_MAX_NODES),
+  max_depth: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(4)), DEFAULT_REFINE_MAX_DEPTH),
 });
 export type WatchRefineConfig = v.InferOutput<typeof WatchRefineConfigSchema>;
 
