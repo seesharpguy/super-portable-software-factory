@@ -918,18 +918,49 @@ export const JiraIssueTypeMapSchema = v.object({
 export type JiraIssueTypeMap = v.InferOutput<typeof JiraIssueTypeMapSchema>;
 
 /**
+ * Optional, per-project `WatchState` -> Jira workflow-status-name map.
+ * Unlike `JiraIssueTypeMapSchema`, this has no sane universal default:
+ * "To Do" vs "Open" vs "Backlog" (and everything in between) is entirely
+ * per-project workflow configuration in Jira, so every field defaults to
+ * unset. A `WatchState` with no entry here keeps today's behavior exactly —
+ * `jira_provider.ts`'s `transition()`/`claim()` update the label only and
+ * never attempt a status change for it.
+ *
+ * Deliberately covers only the states a human's Jira board status would
+ * plausibly want to reflect (the build lane, `spec-ready` through
+ * `blocked`) — the refine-lane states (`refining`, `split-proposed`, ...)
+ * are internal bookkeeping for `core/refine.ts`, not board-visible work.
+ *
+ * `jira_provider.ts`'s `syncStatus()` is the reader; `validateStatusMap()`
+ * is what `spf watch init` and `spf watch`'s own startup check should call
+ * to confirm each configured name is a real status on the project before an
+ * unattended run relies on it — same shape as `issue_types`/
+ * `validateIssueTypes()`.
+ */
+export const JiraStatusMapSchema = v.object({
+  "spec-ready": v.optional(v.string()),
+  ready: v.optional(v.string()),
+  working: v.optional(v.string()),
+  review: v.optional(v.string()),
+  done: v.optional(v.string()),
+  blocked: v.optional(v.string()),
+});
+export type JiraStatusMap = v.InferOutput<typeof JiraStatusMapSchema>;
+
+/**
  * Only consulted when `issue_provider: jira`. Auth is `JIRA_EMAIL` +
  * `JIRA_API_TOKEN` env vars, checked at startup like `GITHUB_TOKEN`. Whole-
  * object replace on config-file-layer merge, like `refine`/
  * `observability.otel` (see `agents.ts`'s `mergeRawConfig`) — an override
- * file that touches `watch.jira` at all must repeat `issue_types` too if it
- * wants to keep a customized mapping, same caveat that already applies to
- * `base_url`/`project_key` today.
+ * file that touches `watch.jira` at all must repeat `issue_types`/
+ * `status_map` too if it wants to keep a customized mapping, same caveat
+ * that already applies to `base_url`/`project_key` today.
  */
 export const WatchJiraConfigSchema = v.object({
   base_url: v.optional(v.string(), ""), // e.g. "https://your-domain.atlassian.net"
   project_key: v.optional(v.string(), ""), // e.g. "PROJ"
   issue_types: v.optional(JiraIssueTypeMapSchema, () => v.parse(JiraIssueTypeMapSchema, {})),
+  status_map: v.optional(JiraStatusMapSchema, () => v.parse(JiraStatusMapSchema, {})),
 });
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 

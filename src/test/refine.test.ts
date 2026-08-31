@@ -19,7 +19,7 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
       base_branch: "main",
       poll_ms: 60_000,
       concurrency: 2,
-      jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" } },
+      jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} },
       refine: { enabled: false, chain: "refine", concurrency: 1, max_leaves: 4, max_nodes: 6, max_depth: 2 },
       ...watch,
     },
@@ -59,7 +59,7 @@ test("resolveAuthoringProvider: constructs a JiraProvider when issue_provider is
   process.env["JIRA_API_TOKEN"] = "jira-token";
   try {
     const provider = resolveAuthoringProvider(
-      makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" } } }),
+      makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } }),
     );
     assert.ok(provider instanceof JiraProvider);
   } finally {
@@ -72,7 +72,7 @@ test("resolveAuthoringProvider: constructs a JiraProvider when issue_provider is
 
 test("resolveAuthoringProvider: rejects a jira config missing base_url or project_key", () => {
   assert.throws(
-    () => resolveAuthoringProvider(makeCfg({ issue_provider: "jira", jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" } } })),
+    () => resolveAuthoringProvider(makeCfg({ issue_provider: "jira", jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } })),
     /watch\.jira\.base_url and watch\.jira\.project_key/,
   );
 });
@@ -85,7 +85,7 @@ test("resolveAuthoringProvider: rejects when JIRA_EMAIL or JIRA_API_TOKEN is uns
     assert.throws(
       () =>
         resolveAuthoringProvider(
-          makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" } } }),
+          makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } }),
         ),
       /JIRA_EMAIL and JIRA_API_TOKEN/,
     );
