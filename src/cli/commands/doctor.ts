@@ -1106,6 +1106,20 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           : 'not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo); see README.md\'s "GITHUB_TOKEN scope" section',
       );
     }
+    if (cfg.watch.issue_provider === "github") {
+      const statusMapEntries = Object.entries(cfg.watch.github.status_map).filter(([, v]) => Boolean(v));
+      check(
+        report,
+        "watch.github.status_map",
+        true,
+        statusMapEntries.length > 0
+          ? cfg.watch.github.project_number
+            ? `${statusMapEntries.length} state(s) configured to sync Projects v2 #${cfg.watch.github.project_number}'s Status field — run \`spf watch init\` to validate them, and make sure GITHUB_TOKEN has the "project" scope`
+            : `${statusMapEntries.length} state(s) configured but watch.github.project_number is unset — status sync stays disabled until it's set`
+          : "not configured — spf watch will only update labels on this repo, never a Projects v2 board (optional, off by default)",
+        "info",
+      );
+    }
     if (cfg.watch.issue_provider === "jira") {
       check(
         report,

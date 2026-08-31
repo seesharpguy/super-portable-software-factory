@@ -8,7 +8,8 @@
  * a couple dozen REST calls, none of them exotic. `spf`'s own package stays
  * dependency-free either way.
  *
- * Auth is a classic PAT via `GITHUB_TOKEN` (`repo` scope), read once at
+ * Auth is a classic PAT via `GITHUB_TOKEN` (`repo` scope — plus `project` if
+ * `watch.github.status_map` is configured, see below), read once at
  * construction — matching the reference implementation's pattern and this
  * project's existing env-var-for-credentials philosophy. `listByLabel`
  * paginates up to `MAX_LIST_PAGES` (500 issues per label query) — no longer
@@ -17,7 +18,21 @@
  * page 1 would silently lose to a new low-priority one), not just a missed
  * issue. A repo past even that cap gets a loud warning, never a silent
  * truncation — see `listByLabel`'s own doc comment.
+ *
+ * State is modeled as labels (`<prefix>:ready`, etc.) — labels are spf's
+ * ACTUAL state machine and always get written, unconditionally. Native
+ * GitHub Projects v2 board status is a separate, OPTIONAL, best-effort layer
+ * on top (`syncStatus()`), driven entirely by `watch.github.status_map` —
+ * empty by default, so an existing config's behavior is unchanged. It's
+ * opt-in, and GraphQL-only (Projects v2 has no REST API), because not every
+ * repo has a board wired up, and a board's Status option names are per-
+ * project configuration `spf` can't assume; a misconfigured or unreachable
+ * entry degrades to a logged warning, never a thrown error — same rule
+ * `jira_provider.ts`'s own `syncStatus()` follows, for the same reason: a
+ * status-sync miss must never block the label update `spf watch` actually
+ * depends on.
  */
+import type { GithubStatusMap } from "../data_types.ts";
 import type {
   CodeHostProvider,
   EnsureLabelsResult,
@@ -134,10 +149,15 @@ interface GhIssue {
 }
 
 export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAuthoringProvider {
+  /** Resolved lazily by `resolveProjectStatusField()` — cached only on SUCCESS, so a transient GraphQL hiccup gets retried the next call rather than disabling status sync for this instance's entire (potentially daemon-long) lifetime. */
+  private projectMeta?: { projectId: string; statusFieldId: string; options: Map<string, string> };
+
   constructor(
     private readonly repo: string, // "owner/name"
     private readonly labelPrefix: string,
     private readonly token: string,
+    private readonly projectNumber = 0, // 0 = status sync disabled, regardless of statusMap
+    private readonly statusMap: GithubStatusMap = {},
   ) {}
 
   private async gh<T>(path: string, init?: RequestInit): Promise<T> {
@@ -157,6 +177,35 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  /**
+   * Projects v2 has no REST surface at all — this is the one place this
+   * file talks GraphQL instead of REST. A GraphQL "not found" (bad login,
+   * bad project number, missing `project` scope) comes back as a 200 with a
+   * null data field plus an `errors` array, not a non-2xx — callers read
+   * `data` being falsy as "couldn't resolve," same as a 404 elsewhere in
+   * this file.
+   */
+  private async ghGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const response = await fetch(`${API}/graphql`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`GitHub GraphQL -> ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    const json = (await response.json()) as { data?: T | null; errors?: Array<{ message: string }> };
+    if (!json.data) {
+      throw new Error(`GitHub GraphQL returned no data${json.errors ? `: ${json.errors.map((e) => e.message).join("; ")}` : ""}`);
+    }
+    return json.data;
   }
 
   private label(state: WatchState): string {
@@ -301,8 +350,9 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
   }
 
   async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {
+    const toState = opts?.to ?? "working";
     const from = this.label(opts?.from ?? "ready");
-    const to = this.label(opts?.to ?? "working");
+    const to = this.label(toState);
     await this.gh(`/repos/${this.repo}/issues/${issue.id}/labels/${encodeURIComponent(from)}`, {
       method: "DELETE",
     }).catch(() => undefined); // already gone is fine
@@ -319,6 +369,8 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
         method: "POST",
         body: JSON.stringify({ labels: [from] }),
       }).catch(() => undefined);
+    } else {
+      await this.syncStatus(issue, toState);
     }
     return claimed;
   }
@@ -336,7 +388,152 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
       method: "POST",
       body: JSON.stringify({ labels: [this.label(to)] }),
     });
+    await this.syncStatus(issue, to);
     if (detail) await this.comment(issue, detail);
+  }
+
+  /**
+   * Best-effort native Projects v2 status sync — a no-op unless
+   * `project_number` AND `status_map` both configure something for `to`.
+   * Every failure mode (unconfigured, project/field not found, no matching
+   * option, a rejected mutation) is logged and swallowed, never thrown —
+   * see this file's module comment on why a status-sync miss must never
+   * break the label update callers depend on.
+   */
+  private async syncStatus(issue: Issue, to: WatchState): Promise<void> {
+    const statusName = (this.statusMap as Record<string, string | undefined>)[to];
+    if (!statusName) return;
+    const meta = await this.resolveProjectStatusField();
+    if (!meta) return; // already logged inside resolveProjectStatusField, or simply unconfigured (project_number: 0)
+    const optionId = meta.options.get(statusName);
+    if (!optionId) {
+      console.error(
+        `spf watch: issue #${issue.id} — GitHub Projects #${this.projectNumber} has no Status option named ${JSON.stringify(statusName)} (watch.github.status_map.${to}) — skipping status sync, label already updated`,
+      );
+      return;
+    }
+    try {
+      const itemId = await this.resolveProjectItemId(issue, meta.projectId);
+      if (!itemId) return; // already logged inside resolveProjectItemId
+      await this.ghGraphql(
+        `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+          updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: {singleSelectOptionId: $optionId}}) {
+            clientMutationId
+          }
+        }`,
+        { projectId: meta.projectId, itemId, fieldId: meta.statusFieldId, optionId },
+      );
+    } catch (err) {
+      console.error(
+        `spf watch: issue #${issue.id} — GitHub Projects status sync to ${JSON.stringify(statusName)} failed; label already updated — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Resolves (and caches — see `projectMeta`'s own doc comment) `watch.github.project_number`'s
+   * "Status" single-select field against the repo OWNER's Projects v2 board
+   * (Projects v2 numbers are per-owner, not per-repo — see
+   * `WatchGithubConfigSchema`'s doc comment). Tries `organization(login:)`
+   * first, then `user(login:)`: an owner is exactly one of the two, and
+   * GraphQL returns that field as `null` (not a hard error) when it's the
+   * wrong kind, so falling through is safe.
+   */
+  private async resolveProjectStatusField(): Promise<{ projectId: string; statusFieldId: string; options: Map<string, string> } | null> {
+    if (!this.projectNumber) return null;
+    if (this.projectMeta) return this.projectMeta;
+    const owner = this.repo.split("/")[0]!;
+    interface FieldNode {
+      id: string;
+      name: string;
+      options: Array<{ id: string; name: string }>;
+    }
+    interface ProjectNode {
+      id: string;
+      fields: { nodes: Array<FieldNode | null> };
+    }
+    let data: { organization: { projectV2: ProjectNode | null } | null; user: { projectV2: ProjectNode | null } | null };
+    try {
+      data = await this.ghGraphql(
+        `query($login: String!, $number: Int!) {
+          organization(login: $login) { projectV2(number: $number) { id fields(first: 50) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } }
+          user(login: $login) { projectV2(number: $number) { id fields(first: 50) { nodes { ... on ProjectV2SingleSelectField { id name options { id name } } } } } }
+        }`,
+        { login: owner, number: this.projectNumber },
+      );
+    } catch (err) {
+      console.error(
+        `spf watch: couldn't resolve GitHub Projects v2 #${this.projectNumber} for ${owner} — status sync skipped this run — ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    const project = data.organization?.projectV2 ?? data.user?.projectV2;
+    if (!project) {
+      console.error(
+        `spf watch: GitHub Projects v2 #${this.projectNumber} not found for ${owner} (or GITHUB_TOKEN lacks "project" scope) — status sync skipped this run`,
+      );
+      return null;
+    }
+    const statusField = project.fields.nodes.find((f): f is FieldNode => f !== null && f.name === "Status");
+    if (!statusField) {
+      console.error(`spf watch: GitHub Projects v2 #${this.projectNumber} has no "Status" single-select field — status sync skipped this run`);
+      return null;
+    }
+    this.projectMeta = { projectId: project.id, statusFieldId: statusField.id, options: new Map(statusField.options.map((o) => [o.name, o.id])) };
+    return this.projectMeta;
+  }
+
+  /** The item-id half of `syncStatus()`: an issue already on the project has one; otherwise this adds it, since a `status_map` entry is an implicit "yes, put this on the board" — the same way a Jira issue is already assumed to be on its project. `null` (logged) on any lookup/add failure. */
+  private async resolveProjectItemId(issue: Issue, projectId: string): Promise<string | null> {
+    const [owner, name] = this.repo.split("/") as [string, string];
+    let data: { repository: { issue: { id: string; projectItems: { nodes: Array<{ id: string; project: { id: string } }> } } | null } | null };
+    try {
+      data = await this.ghGraphql(
+        `query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) { id projectItems(first: 20) { nodes { id project { id } } } }
+          }
+        }`,
+        { owner, name, number: Number(issue.id) },
+      );
+    } catch (err) {
+      console.error(
+        `spf watch: issue #${issue.id} — couldn't look up its GitHub Projects item; status sync skipped, label already updated — ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    const ghIssue = data.repository?.issue;
+    if (!ghIssue) return null; // deleted between the label update and here — nothing left to sync
+    const existing = ghIssue.projectItems.nodes.find((n) => n.project.id === projectId);
+    if (existing) return existing.id;
+    try {
+      const added = await this.ghGraphql<{ addProjectV2ItemById: { item: { id: string } } }>(
+        `mutation($projectId: ID!, $contentId: ID!) { addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) { item { id } } }`,
+        { projectId, contentId: ghIssue.id },
+      );
+      return added.addProjectV2ItemById.item.id;
+    } catch (err) {
+      console.error(
+        `spf watch: issue #${issue.id} — couldn't add it to GitHub Projects #${this.projectNumber}; status sync skipped, label already updated — ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Read-only validation of the configured `status_map` against the real
+   * project's Status options — what `spf watch init` and `spf watch`'s own
+   * startup check call to catch a misnamed option before an unattended run
+   * silently no-ops its status sync every time, the same role
+   * `validateIssueTypes()`/`validateStatusMap()` play on the Jira side.
+   * Empty when `status_map` has no entries configured at all — nothing to
+   * report, not a mismatch.
+   */
+  async validateStatusMap(): Promise<Array<{ state: string; githubStatus: string; exists: boolean }>> {
+    const entries = Object.entries(this.statusMap).filter((entry): entry is [string, string] => Boolean(entry[1]));
+    if (entries.length === 0) return [];
+    const meta = await this.resolveProjectStatusField();
+    return entries.map(([state, githubStatus]) => ({ state, githubStatus, exists: meta ? meta.options.has(githubStatus) : false }));
   }
 
   async comment(issue: Issue, body: string): Promise<void> {

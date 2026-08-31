@@ -109,7 +109,7 @@ export function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
       console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
       return null;
     }
-    return new GitHubProvider(repo, cfg.watch.label_prefix, token);
+    return new GitHubProvider(repo, cfg.watch.label_prefix, token, cfg.watch.github.project_number, cfg.watch.github.status_map);
   }
   if (cfg.watch.issue_provider === "jira") {
     if (!cfg.watch.jira.base_url.trim() || !cfg.watch.jira.project_key.trim()) {
@@ -146,7 +146,7 @@ function resolveCodeHostProvider(cfg: SFConfig): CodeHostProvider | null {
       console.error('GITHUB_TOKEN is not set — spf watch needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo). See README.md\'s "GITHUB_TOKEN scope" section.');
       return null;
     }
-    return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token);
+    return new GitHubProvider(cfg.watch.repo, cfg.watch.label_prefix, token, cfg.watch.github.project_number, cfg.watch.github.status_map);
   }
   if (cfg.watch.code_host === "bitbucket") {
     const email = process.env["BITBUCKET_EMAIL"];
@@ -204,6 +204,15 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
     console.log(`\nvalidating watch.jira.issue_types against ${cfg.watch.jira.project_key}:`);
     for (const c of checks) {
       console.log(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
+    }
+    if (checks.some((c) => !c.exists)) return 1;
+  }
+
+  if (cfg.watch.issue_provider === "github" && provider instanceof GitHubProvider && Object.values(cfg.watch.github.status_map).some(Boolean)) {
+    const checks = await provider.validateStatusMap();
+    console.log(`\nvalidating watch.github.status_map against Projects v2 #${cfg.watch.github.project_number}:`);
+    for (const c of checks) {
+      console.log(`  ${c.exists ? "✓" : "✗"} ${c.state} → ${c.githubStatus}${c.exists ? "" : ` — no Status option named "${c.githubStatus}" on Projects v2 #${cfg.watch.github.project_number}`}`);
     }
     if (checks.some((c) => !c.exists)) return 1;
   }
@@ -405,6 +414,29 @@ export async function watchCommand(argv: string[]): Promise<number> {
           console.error(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
         }
         console.error(`Fix watch.jira.issue_types, or the project's issue types, before running spf watch unattended. Run \`spf watch init\` any time to re-check.`);
+        return 1;
+      }
+    }
+  }
+
+  // watch.github.status_map applies to every build-lane transition,
+  // independent of watch.refine.enabled — validated at startup for the same
+  // reason watch.jira.issue_types is: a bad Status option name should stop
+  // the daemon before it starts, not fail silently (well, log-and-skip —
+  // see github_provider.ts's syncStatus()) on every single transition once
+  // it's running. Silent when status_map is empty (the default, opt-in
+  // feature) or has no mismatches.
+  if (cfg.watch.issue_provider === "github" && provider instanceof GitHubProvider) {
+    const configured = Object.values(cfg.watch.github.status_map).some(Boolean);
+    if (configured) {
+      const checks = await provider.validateStatusMap();
+      const mismatches = checks.filter((c) => !c.exists);
+      if (mismatches.length > 0) {
+        console.error(`watch.github.status_map has ${mismatches.length} mismatch(es) against Projects v2 #${cfg.watch.github.project_number}:`);
+        for (const c of checks) {
+          console.error(`  ${c.exists ? "✓" : "✗"} ${c.state} → ${c.githubStatus}${c.exists ? "" : ` — no Status option named "${c.githubStatus}" on Projects v2 #${cfg.watch.github.project_number}`}`);
+        }
+        console.error(`Fix watch.github.status_map (and watch.github.project_number), or the project's Status options, before running spf watch unattended. Run \`spf watch init\` any time to re-check.`);
         return 1;
       }
     }

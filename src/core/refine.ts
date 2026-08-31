@@ -78,7 +78,7 @@ export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider 
       'GITHUB_TOKEN is not set — the refine lane needs a classic PAT with "repo" scope (or "public_repo" for a public-only repo)',
     );
   }
-  return new GitHubProvider(repo, cfg.watch.label_prefix, token);
+  return new GitHubProvider(repo, cfg.watch.label_prefix, token, cfg.watch.github.project_number, cfg.watch.github.status_map);
 }
 
 function typeLabel(labelPrefix: string, kind: string): string {

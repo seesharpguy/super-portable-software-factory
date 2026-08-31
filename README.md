@@ -766,9 +766,24 @@ A **classic** PAT (fine-grained tokens use different permission names — not co
 | Private | `repo` | Everything above, full read/write |
 | Public only | `public_repo` | The same, restricted to public repos |
 
-**Do not grant the `project` scope.** It's a separate, unrelated permission for GitHub Projects (classic/org/user boards) — `spf watch` doesn't touch Projects at all, so granting it would just be more access than this tool ever uses.
+There's no dedicated "issues" or "pull requests" scope on classic PATs — GitHub bundles both into `repo`/`public_repo`, which is why that table covers everything by default.
 
-There's no dedicated "issues" or "pull requests" scope on classic PATs — GitHub bundles both into `repo`/`public_repo`, which is why that's the whole table.
+Native GitHub Projects v2 board status (the board's Status column) is a separate, optional layer on top, off by default — labels alone don't move it, so an issue's Status sits wherever it started unless you opt in with `watch.github.project_number` and `watch.github.status_map`:
+
+```yaml
+watch:
+  issue_provider: github
+  repo: owner/name
+  github:
+    project_number: 3   # owner's Projects v2 board number — see the board's own URL
+    status_map:          # optional — unset by default, per state
+      ready: Todo
+      working: In Progress
+      review: In Review
+      done: Done
+```
+
+Only the states you map are touched; an unmapped state keeps today's label-only behavior, and `project_number: 0` (the default) disables sync outright regardless of `status_map`. This needs the **`project`** scope in addition to `repo`/`public_repo` — Projects v2 has no REST API at all, only GraphQL, and that surface is gated by its own scope; grant it only if you're using `status_map`. A configured option name with no matching Status option (or a rejected mutation) is logged and skipped, never thrown — the label update is what `spf watch` actually depends on; status sync is a best-effort convenience on top of it. `spf watch init` and `spf watch`'s own startup check both validate a configured `status_map` against the real project's Status options, read-only, and exit non-zero on a mismatch, the same way Jira's `issue_types` is validated below.
 
 ### Jira (`issue_provider: jira`)
 

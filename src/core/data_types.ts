@@ -934,6 +934,56 @@ export const WatchJiraConfigSchema = v.object({
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 
 /**
+ * Optional, per-repo `WatchState` -> GitHub Projects v2 "Status" option-name
+ * map — the GitHub-side twin of `JiraIssueTypeMap`'s sibling on the Jira
+ * provider (see `jira_provider.ts`'s `status_map`). No sane universal
+ * default: a board's Status column options ("Todo"/"In Progress"/"Done", or
+ * anything else) are per-project configuration, so every field defaults to
+ * unset. A `WatchState` with no entry keeps today's behavior exactly —
+ * `github_provider.ts`'s `transition()`/`claim()` update the label only and
+ * never touch Projects v2 for it.
+ *
+ * Same six build-lane states as Jira's map — the refine-lane's own
+ * bookkeeping states (`refining`, `split-proposed`, ...) aren't board-visible
+ * work, same reasoning as `jira_provider.ts`'s `JiraStatusMapSchema`.
+ *
+ * `github_provider.ts`'s `syncStatus()` is the reader; `validateStatusMap()`
+ * is what `spf watch init` and `spf watch`'s own startup check call to
+ * confirm each configured name is a real Status option on the configured
+ * project before an unattended run relies on it.
+ */
+export const GithubStatusMapSchema = v.object({
+  "spec-ready": v.optional(v.string()),
+  ready: v.optional(v.string()),
+  working: v.optional(v.string()),
+  review: v.optional(v.string()),
+  done: v.optional(v.string()),
+  blocked: v.optional(v.string()),
+});
+export type GithubStatusMap = v.InferOutput<typeof GithubStatusMapSchema>;
+
+/**
+ * Only consulted when `issue_provider: github` (or `code_host: github`) AND
+ * `status_map` actually has an entry configured — `project_number: 0` (the
+ * default) disables status sync outright regardless of `status_map`, since
+ * there's no sane "guess the board" default: a repo can have zero, one, or
+ * many Projects v2 boards, and none of them is canonical. Scoped to the
+ * repo's OWNER (`watch.repo`'s "owner/name", the owner half) — GitHub
+ * Projects v2 numbers are per-owner, not per-repo, so `project_number: 3`
+ * means owner's project #3, which may or may not have this repo's issues on
+ * it yet (`github_provider.ts`'s `syncStatus()` adds the issue to the
+ * project itself the first time it needs to). Whole-object replace on
+ * config-file-layer merge, like `jira`/`refine` above — an override file
+ * that touches `watch.github` at all must repeat `status_map` too if it
+ * wants to keep a customized mapping.
+ */
+export const WatchGithubConfigSchema = v.object({
+  project_number: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
+  status_map: v.optional(GithubStatusMapSchema, () => v.parse(GithubStatusMapSchema, {})),
+});
+export type WatchGithubConfig = v.InferOutput<typeof WatchGithubConfigSchema>;
+
+/**
  * The second `spf watch` lane: decompose a `<prefix>:spec-ready` product
  * spec into a feature/story tree of real issues, instead of running
  * `watch.chain` against it directly (a spec is not individually workable —
@@ -1061,6 +1111,7 @@ export const WatchConfigSchema = v.object({
    */
   chain_options: v.optional(v.record(v.string(), v.string()), () => ({})),
   jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
+  github: v.optional(WatchGithubConfigSchema, () => v.parse(WatchGithubConfigSchema, {})),
   refine: v.optional(WatchRefineConfigSchema, () => v.parse(WatchRefineConfigSchema, {})),
   fanout: v.optional(WatchFanoutConfigSchema, () => v.parse(WatchFanoutConfigSchema, {})),
 });
