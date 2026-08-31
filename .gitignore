@@ -168,3 +168,10 @@ apps/inkwell/inkwell.db*
 # spf runtime
 .spf/data/
 .spf/engine/
+.worktrees
+
+# agent tooling (personal/local state — skills themselves are vendored)
+.claude/settings.local.json
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+.impeccable/review/
