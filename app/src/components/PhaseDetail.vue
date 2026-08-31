@@ -254,14 +254,12 @@ function toggleSection(id: string) {
   else openSections.add(id)
 }
 
+// Hue belongs to outcome, not to event taxonomy: failures and errors are red,
+// a passed gate is green, and everything else is bone in the data voice.
 const typeClass: Record<string, string> = {
   gate_fail: 't-red',
   error: 't-red',
   gate_pass: 't-green',
-  tool_call: 't-cyan',
-  handoff: 't-violet',
-  agent_start: 't-purple',
-  agent_end: 't-green',
 }
 
 // ── Compiled prompts ─────────────────────────────────────────────────────────
@@ -673,11 +671,12 @@ function togglePanel(id: string) {
 </template>
 
 <style scoped>
+/* A detail folio tucked under the board: same square, hairline-ruled material. */
 .detail {
   margin: 0 28px 28px;
-  border: 1px solid var(--border-soft);
-  border-radius: 16px;
-  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--face);
 }
 
 .d-head {
@@ -686,9 +685,8 @@ function togglePanel(id: string) {
   gap: 20px;
   flex-wrap: wrap;
   padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-2);
-  border-radius: 10px 10px 0 0;
+  border-bottom: 1px solid var(--rule);
+  background: var(--inset);
 }
 
 .d-main {
@@ -711,14 +709,15 @@ function togglePanel(id: string) {
   margin-left: auto;
 }
 
+/* A tag is a squared ticket stub: hairline cell, key dim, value bone. */
 .tag {
   display: inline-flex;
   align-items: baseline;
   gap: 7px;
-  padding: 2px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  background: var(--panel-3);
+  padding: 2px 10px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  background: var(--inset);
   font-size: 16px;
   white-space: nowrap;
 }
@@ -728,13 +727,13 @@ function togglePanel(id: string) {
 }
 
 .tag-v {
-  color: var(--text);
+  color: var(--fg);
 }
 
 .close {
   background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
   color: var(--dim);
   font-family: var(--mono);
   font-size: 16px;
@@ -743,7 +742,7 @@ function togglePanel(id: string) {
 }
 
 .close:hover {
-  color: var(--text);
+  color: var(--fg);
   border-color: var(--dim);
 }
 
@@ -754,7 +753,7 @@ function togglePanel(id: string) {
 
 .d-request {
   margin: 0;
-  color: var(--text);
+  color: var(--fg);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -780,7 +779,7 @@ function togglePanel(id: string) {
 }
 
 .cfg-v {
-  color: var(--text);
+  color: var(--fg);
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -802,10 +801,10 @@ function togglePanel(id: string) {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  background: rgba(19, 26, 38, 0.6);
+  padding: 2px 10px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  background: var(--inset);
   font-family: var(--mono);
   font-size: 16px;
   overflow-wrap: anywhere;
@@ -839,7 +838,7 @@ h3 {
   gap: 9px;
   margin: 18px 0 10px;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--rule-soft);
   font-size: 16px;
   font-weight: 700;
   color: var(--dim);
@@ -860,9 +859,9 @@ h3:first-child {
 
 .prompt-panel {
   margin-bottom: 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: var(--panel-3);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  background: var(--inset);
   overflow: hidden;
 }
 
@@ -874,19 +873,20 @@ h3:first-child {
   padding: 9px 14px;
   background: none;
   border: none;
-  color: var(--text);
+  color: var(--fg);
   font-size: 16px;
   cursor: pointer;
   text-align: left;
 }
 
 .prompt-head:hover {
-  background: var(--panel-2);
+  background: var(--face);
 }
 
 .chev {
   color: var(--faint);
   flex: none;
+  font-family: var(--mono);
 }
 
 .prompt-title {
@@ -899,7 +899,7 @@ h3:first-child {
 
 .prompt-body {
   padding: 12px 14px 14px;
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--rule-soft);
   max-height: 60vh;
   overflow: auto;
 }
@@ -912,8 +912,8 @@ h3:first-child {
 
 .prompt-tools button {
   padding: 2px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
   background: none;
   color: var(--dim);
   font-family: var(--mono);
@@ -922,9 +922,9 @@ h3:first-child {
 }
 
 .prompt-tools button.active {
-  color: var(--text);
-  border-color: var(--border);
-  background: var(--panel-2);
+  color: var(--fg);
+  border-color: var(--rule);
+  background: var(--face);
 }
 
 .prompt-raw {
@@ -935,22 +935,22 @@ h3:first-child {
 }
 
 /* ── gates ── */
+/* A failing gate carries its verdict on a tinted hairline — no bars, no fills. */
 
 .gate {
   margin-bottom: 10px;
   padding: 10px 14px;
-  border: 1px solid var(--border-soft);
-  border-left-width: 3px;
-  border-radius: 8px;
-  background: var(--panel-3);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  background: var(--inset);
 }
 
 .gate.pass {
-  border-left-color: var(--green);
+  border-color: var(--rule);
 }
 
 .gate.fail {
-  border-left-color: var(--red);
+  border-color: var(--fail);
 }
 
 .gate-line {
@@ -965,7 +965,7 @@ h3:first-child {
   padding: 0;
   background: none;
   border: none;
-  color: var(--text);
+  color: var(--fg);
   font-size: 16px;
   cursor: pointer;
   text-align: left;
@@ -983,7 +983,7 @@ h3:first-child {
 .gate-checks {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--rule-soft);
 }
 
 .gate-check {
@@ -995,11 +995,11 @@ h3:first-child {
 }
 
 .gate-check.pass .check-mark {
-  color: var(--green);
+  color: var(--pass);
 }
 
 .gate-check.fail .check-mark {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .check-item {
@@ -1020,23 +1020,23 @@ h3:first-child {
 }
 
 .tag-fail {
-  border-color: rgba(255, 111, 103, 0.55);
+  border-color: var(--fail);
 }
 
 .tag-fail .tag-v {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .gate.pass .gate-mark {
-  color: var(--green);
+  color: var(--pass);
 }
 
 .gate.fail .gate-mark {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .gate-name {
-  color: var(--text);
+  color: var(--fg);
   font-weight: 700;
 }
 
@@ -1047,10 +1047,11 @@ h3:first-child {
 .violations {
   margin: 8px 0 2px;
   padding-left: 24px;
-  color: var(--red);
+  color: var(--fail);
 }
 
 /* ── cost ── */
+/* Money is data, not a signal: the ledger column sets in bone mono. */
 
 .usage {
   width: 100%;
@@ -1061,12 +1062,12 @@ h3:first-child {
 
 .usage th {
   padding: 0 0 6px;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 400;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--faint);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--rule-soft);
 }
 
 .usage td {
@@ -1082,11 +1083,7 @@ h3:first-child {
 .usage .u-c {
   text-align: right;
   font-family: var(--mono);
-  color: var(--text);
-}
-
-.usage .u-c {
-  color: var(--green);
+  color: var(--fg);
 }
 
 /* Thinking sits inside output — indent it and mute it so the column still reads
@@ -1103,17 +1100,17 @@ h3:first-child {
 
 .u-total td {
   padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
+  border-top: 1px solid var(--rule-soft);
   font-weight: 700;
 }
 
 .u-total .u-k {
-  color: var(--text);
+  color: var(--fg);
 }
 
 .u-note {
   margin: 10px 0 0;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 /* ── outputs ── */
@@ -1131,16 +1128,16 @@ h3:first-child {
 }
 
 .output-type {
-  color: var(--purple);
+  color: var(--fg);
   font-weight: 700;
 }
 
 .output-valid.pass {
-  color: var(--green);
+  color: var(--pass);
 }
 
 .output-valid.fail {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .output pre {
@@ -1149,9 +1146,10 @@ h3:first-child {
 }
 
 /* ── events ── */
+/* The event log is one mono ledger: time, type, the exact call, the cost. */
 
 .event {
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--rule-soft);
 }
 
 .event-row {
@@ -1162,8 +1160,8 @@ h3:first-child {
   padding: 7px 6px;
   background: none;
   border: none;
-  border-radius: 6px;
-  color: var(--text);
+  border-radius: 0;
+  color: var(--fg);
   font-family: var(--mono);
   font-size: 16px;
   cursor: pointer;
@@ -1172,7 +1170,7 @@ h3:first-child {
 
 .event-row:hover,
 .event-row.open {
-  background: var(--panel-2);
+  background: var(--inset);
 }
 
 .e-time {
@@ -1183,6 +1181,7 @@ h3:first-child {
 .e-type {
   flex: none;
   width: 130px;
+  color: var(--dim);
 }
 
 .e-name {
@@ -1201,9 +1200,9 @@ h3:first-child {
 .payload-panel {
   margin: 6px 0 14px;
   padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--panel-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--inset);
 }
 
 .p-meta {
@@ -1214,7 +1213,7 @@ h3:first-child {
 }
 
 .p-tool {
-  color: var(--cyan);
+  color: var(--fg);
   font-weight: 700;
   font-size: 17px;
 }
@@ -1235,31 +1234,25 @@ h3:first-child {
 /* args and result each get their own delineated block that scrolls in place —
    the full payload is always reachable, never visually cut off. */
 .p-pre {
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
   padding: 10px 12px;
-  background: rgba(6, 8, 15, 0.55);
+  background: var(--board);
   max-height: 42vh;
   overflow: auto;
 }
 
 .t-red {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .t-green {
-  color: var(--green);
+  color: var(--pass);
 }
 
-.t-cyan {
-  color: var(--cyan);
-}
-
-.t-purple {
-  color: var(--purple);
-}
-
-.t-violet {
-  color: var(--violet);
+@media (max-width: 980px) {
+  .detail {
+    margin: 0 16px 24px;
+  }
 }
 </style>

@@ -1,51 +1,5 @@
 import type { AgentStartPayload, EventRow, ToolCallPayload } from './types'
 
-// ── Event dot colors ─────────────────────────────────────────────────────────
-// One color per event type, shared by the session-card timelines and the phase
-// detail list. gate_fail reads as an error signal on purpose.
-
-export const EVENT_DOT_COLORS: Record<string, string> = {
-  agent_start: '#c89bff',
-  tool_call: '#5ad2dd',
-  handoff: '#94a3ff',
-  agent_end: '#4ade80',
-  error: '#ff6f67',
-  gate_fail: '#ff6f67',
-}
-
-export function dotColor(type: string | null): string | null {
-  if (!type) return null
-  return EVENT_DOT_COLORS[type] ?? null
-}
-
-// ── Agent lane colors ────────────────────────────────────────────────────────
-// Config color wins (agents[].color from the API, or the agent_start payload
-// for in-flight agents); the palette below covers dbs written before the
-// color column existed.
-
-export const AGENT_FALLBACK_COLORS = ['#c89bff', '#5ad2dd', '#94a3ff', '#e8b64a', '#f2a2c4']
-
-export function agentColor(
-  configColor: string | null | undefined,
-  payloadColor: string | null | undefined,
-  index: number,
-): string {
-  return (
-    configColor ??
-    payloadColor ??
-    AGENT_FALLBACK_COLORS[index % AGENT_FALLBACK_COLORS.length] ??
-    '#c89bff'
-  )
-}
-
-/** "#c89bff" + alpha → rgba() usable in inline styles. Invalid input → transparent. */
-export function hexAlpha(hex: string, alpha: number): string {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
-  if (!m || !m[1]) return 'transparent'
-  const n = Number.parseInt(m[1], 16)
-  return `rgba(${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}, ${alpha})`
-}
-
 // ── Payload parsing ──────────────────────────────────────────────────────────
 
 export function parsePayload(raw: string | null | undefined): Record<string, unknown> | null {

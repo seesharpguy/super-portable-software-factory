@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 2,
+  "meta": {
+    "name": "Super Portable Software Factory (SPF)",
+    "description": "Runs read like a printed timetable; live traces behave like a departure board.",
+    "generatedAt": "2026-08-26T00:00:00.000Z",
+    "source": "documented from shipped code: app/src/style.css, app/src/components/*, app/public/logo.svg",
+    "seedKey": "22a96b62"
+  },
+  "tokens": {
+    "colors": {
+      "paper-cream": "#f6f3ec",
+      "paper-raised": "#fcfaf4",
+      "paper-sunk": "#ede8db",
+      "ink": "#211e14",
+      "ink-dim": "#5f5948",
+      "ink-faint": "#76705e",
+      "paper-rule": "#d8d2c0",
+      "paper-rule-soft": "#e6e1d0",
+      "board-black": "#141311",
+      "board-raised": "#1e1c17",
+      "board-sunk": "#0c0b09",
+      "bone": "#efe8d4",
+      "bone-dim": "#96907c",
+      "bone-faint": "#857f6a",
+      "board-rule": "#37342b",
+      "board-rule-soft": "#2a2820",
+      "timetable-red": "#da291c",
+      "ballpoint": "#2545a8",
+      "board-amber": "#e8b64a",
+      "pass-paper": "#1e7a3c",
+      "fail-paper": "#b3261e",
+      "pass-board": "#4ade80",
+      "fail-board": "#ff6f67"
+    },
+    "typography": {
+      "display": { "fontFamily": "Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif", "fontSize": "20px", "fontWeight": 700, "lineHeight": 1.2 },
+      "headline": { "fontFamily": "Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif", "fontSize": "17px", "fontWeight": 700, "lineHeight": 1.3 },
+      "body": { "fontFamily": "Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif", "fontSize": "16px", "fontWeight": 400, "lineHeight": 1.5 },
+      "label": { "fontFamily": "Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif", "fontSize": "16px", "fontWeight": 600, "letterSpacing": "0.06em" },
+      "data": { "fontFamily": "'Overpass Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace", "fontSize": "16px", "fontWeight": 400, "fontFeature": "'tnum'" }
+    },
+    "rounded": { "cell": "2px" },
+    "spacing": { "sm": "8px", "md": "16px", "lg": "28px" },
+    "components": {
+      "status-cell": { "textColor": "{colors.board-amber}", "rounded": "{rounded.cell}", "padding": "3px 10px" },
+      "tag-stub": { "textColor": "{colors.bone}", "rounded": "{rounded.cell}", "padding": "2px 10px" },
+      "phase-bay": { "textColor": "{colors.bone}", "rounded": "{rounded.cell}", "padding": "10px 12px" }
+    }
+  },
+  "semanticLayer": {
+    "note": "Components bind only to these aliases; body.board swaps the whole surface. Raw hues never appear in component styles.",
+    "paper(body)": {
+      "--ground": "#f6f3ec", "--face": "#fcfaf4", "--inset": "#ede8db",
+      "--fg": "#211e14", "--dim": "#5f5948", "--faint": "#76705e",
+      "--rule": "#d8d2c0", "--rule-soft": "#e6e1d0",
+      "--accent": "#da291c", "--live": "#2545a8",
+      "--pass": "#1e7a3c", "--fail": "#b3261e"
+    },
+    "board(body.board)": {
+      "--ground": "#141311", "--face": "#1e1c17", "--inset": "#0c0b09",
+      "--fg": "#efe8d4", "--dim": "#96907c", "--faint": "#857f6a",
+      "--rule": "#37342b", "--rule-soft": "#2a2820",
+      "--accent": "#e8b64a", "--live": "#e8b64a",
+      "--pass": "#4ade80", "--fail": "#ff6f67"
+    }
+  },
+  "extensions": {
+    "colorMeta": {
+      "paper": { "anchor": "#f6f3ec", "tonalRamp": ["oklch(0.17 0.003 87.5)", "oklch(0.28 0.005 87.5)", "oklch(0.40 0.008 87.5)", "oklch(0.52 0.010 87.5)", "oklch(0.64 0.010 87.5)", "oklch(0.75 0.008 87.5)", "oklch(0.85 0.006 87.5)", "oklch(0.94 0.004 87.5)"] },
+      "board": { "anchor": "#141311", "tonalRamp": ["oklch(0.17 0.002 84.6)", "oklch(0.28 0.002 84.6)", "oklch(0.40 0.003 84.6)", "oklch(0.52 0.004 84.6)", "oklch(0.64 0.004 84.6)", "oklch(0.75 0.004 84.6)", "oklch(0.85 0.003 84.6)", "oklch(0.94 0.002 84.6)"] },
+      "ink": { "anchor": "#211e14", "tonalRamp": ["oklch(0.17 0.007 93.4)", "oklch(0.28 0.010 93.4)", "oklch(0.40 0.015 93.4)", "oklch(0.52 0.019 93.4)", "oklch(0.64 0.019 93.4)", "oklch(0.75 0.016 93.4)", "oklch(0.85 0.012 93.4)", "oklch(0.94 0.008 93.4)"] },
+      "bone": { "anchor": "#efe8d4", "tonalRamp": ["oklch(0.17 0.010 90.9)", "oklch(0.28 0.015 90.9)", "oklch(0.40 0.022 90.9)", "oklch(0.52 0.028 90.9)", "oklch(0.64 0.028 90.9)", "oklch(0.75 0.023 90.9)", "oklch(0.85 0.018 90.9)", "oklch(0.94 0.012 90.9)"] },
+      "timetable-red": { "anchor": "#da291c", "tonalRamp": ["oklch(0.17 0.074 29.6)", "oklch(0.28 0.117 29.6)", "oklch(0.40 0.170 29.6)", "oklch(0.52 0.213 29.6)", "oklch(0.64 0.213 29.6)", "oklch(0.75 0.181 29.6)", "oklch(0.85 0.138 29.6)", "oklch(0.94 0.096 29.6)"] },
+      "ballpoint": { "anchor": "#2545a8", "tonalRamp": ["oklch(0.17 0.057 266.0)", "oklch(0.28 0.090 266.0)", "oklch(0.40 0.131 266.0)", "oklch(0.52 0.164 266.0)", "oklch(0.64 0.164 266.0)", "oklch(0.75 0.139 266.0)", "oklch(0.85 0.106 266.0)", "oklch(0.94 0.074 266.0)"] },
+      "board-amber": { "anchor": "#e8b64a", "tonalRamp": ["oklch(0.17 0.047 83.6)", "oklch(0.28 0.075 83.6)", "oklch(0.40 0.109 83.6)", "oklch(0.52 0.136 83.6)", "oklch(0.64 0.136 83.6)", "oklch(0.75 0.115 83.6)", "oklch(0.85 0.088 83.6)", "oklch(0.94 0.061 83.6)"] },
+      "pass": { "anchor": "#1e7a3c", "tonalRamp": ["oklch(0.17 0.045 149.7)", "oklch(0.28 0.070 149.7)", "oklch(0.40 0.102 149.7)", "oklch(0.52 0.127 149.7)", "oklch(0.64 0.127 149.7)", "oklch(0.75 0.108 149.7)", "oklch(0.85 0.083 149.7)", "oklch(0.94 0.057 149.7)"] },
+      "fail": { "anchor": "#b3261e", "tonalRamp": ["oklch(0.17 0.062 28.7)", "oklch(0.28 0.098 28.7)", "oklch(0.40 0.143 28.7)", "oklch(0.52 0.178 28.7)", "oklch(0.64 0.178 28.7)", "oklch(0.75 0.152 28.7)", "oklch(0.85 0.116 28.7)", "oklch(0.94 0.080 28.7)"] }
+    },
+    "typographyMeta": {
+      "sans": { "family": "Overpass", "weights": [400, 600, 700], "hosting": "self-hosted latin woff2", "character": "signage in the Interstate lineage — engineered plainness, open apertures" },
+      "mono": { "family": "Overpass Mono", "weights": [400, 700], "hosting": "self-hosted latin woff2", "character": "ledger companion, tabular by default, set only where the reader counts" },
+      "floor": "16px — nothing renders smaller, anywhere"
+    },
+    "shadows": {
+      "none": "This system has no shadows. Depth comes from hairline rules and tonal layering within each scale."
+    },
+    "motion": {
+      "flap": { "name": "flap-in", "duration": "280ms", "easing": "cubic-bezier(0.2, 0.7, 0.3, 1)", "transform": "rotateX settle on status remount, board only" },
+      "pulse": { "duration": "1.8s", "easing": "ease-in-out infinite", "target": "running glyphs and the live lamp, board only" },
+      "context-meter": { "duration": "300ms", "easing": "ease", "transform": "scaleX from left center" },
+      "paper": "none — the paper never moves",
+      "reduced-motion": "prefers-reduced-motion removes every animation in the app"
+    },
+    "breakpoints": [
+      { "name": "fold", "value": "980px", "behavior": "paper rows fold to a stacked 3-column row with a mono meta line; the board pans (horizontal scroll at a 700px floor); masthead tightens" },
+      { "name": "folio", "value": "1100px", "behavior": "phase detail stacks to one column" }
+    ]
+  },
+  "components": [
+    {
+      "name": "status-cell",
+      "description": "Square transparent cell (2px radius, 1px rule border) carrying a state word in the data voice. On the board the label re-mounts on status change and plays the split-flap settle; running states carry a pulsing glyph, board only.",
+      "html": "<span class=\"ds-status-cell ds-status-cell--pass\" style=\"background:#141311\">success</span>\n<span class=\"ds-status-cell ds-status-cell--fail\" style=\"background:#141311\">failed</span>\n<span class=\"ds-status-cell ds-status-cell--running\" style=\"background:#141311\"><span class=\"ds-status-cell__glyph\"></span> running</span>",
+      "css": ".ds-status-cell {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace;\n  font-size: 16px;\n  font-weight: 600;\n  padding: 3px 10px;\n  border: 1px solid #37342b; /* board-rule */\n  border-radius: 2px;\n}\n.ds-status-cell--pass { color: #4ade80; } /* pass-board */\n.ds-status-cell--fail { color: #ff6f67; } /* fail-board */\n.ds-status-cell--running { color: #e8b64a; } /* board-amber */\n.ds-status-cell__glyph {\n  width: 8px; height: 8px; border-radius: 50%;\n  background: #e8b64a;\n  animation: ds-pulse 1.8s ease-in-out infinite;\n}\n@keyframes ds-pulse { 50% { opacity: 0.35; } }\n@media (prefers-reduced-motion: reduce) {\n  .ds-status-cell__glyph { animation: none; }\n}"
+    },
+    {
+      "name": "stat-cell",
+      "description": "Hairline-bordered square cell pairing a line icon in faint with a tabular mono value. The compact variant drops the border to sit inside bays and ledgers.",
+      "html": "<span class=\"ds-stat-cell\" style=\"background:#141311\">\n  <svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><polyline points=\"12 6 12 12 16 14\"/></svg>\n  <span class=\"ds-stat-cell__value\">2m 41s</span>\n</span>",
+      "css": ".ds-stat-cell {\n  display: inline-flex;\n  align-items: center;\n  gap: 8px;\n  padding: 4px 10px;\n  border: 1px solid #37342b; /* board-rule */\n  border-radius: 2px;\n  color: #857f6a; /* bone-faint */\n}\n.ds-stat-cell__value {\n  font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace;\n  font-size: 16px;\n  font-variant-numeric: tabular-nums;\n  color: #efe8d4; /* bone */\n}\n.ds-stat-cell--compact { border: none; padding: 0; }"
+    },
+    {
+      "name": "departure-row",
+      "description": "The paper list item: a baseline-aligned grid row on --tt-columns, hairline bottom border, whole row is the link. Status word printed in signal ink; running in italic ballpoint. Hover raises the row one tonal step.",
+      "html": "<a class=\"ds-row\" href=\"#\" style=\"background:#f6f3ec\">\n  <span class=\"ds-row__col ds-mono\">14:02</span>\n  <span class=\"ds-row__col ds-mono ds-row__id\">run-8f3a</span>\n  <span class=\"ds-row__col\">payments-api</span>\n  <span class=\"ds-row__col ds-row__req\">Add idempotent retry to the invoicing webhook handler</span>\n  <span class=\"ds-row__col ds-mono\">5 <span class=\"ds-row__remarks\">●●●●◐</span></span>\n  <span class=\"ds-row__col ds-row__status--running\">running</span>\n  <span class=\"ds-row__col ds-mono ds-num\">$1.24</span>\n  <span class=\"ds-row__col ds-mono ds-num\">9m 12s</span>\n  <span class=\"ds-row__col ds-mono ds-num\">84.2k</span>\n</a>",
+      "css": ".ds-row {\n  display: grid;\n  grid-template-columns: 84px 160px minmax(90px,140px) minmax(0,1fr) 130px 100px 90px 90px 90px;\n  align-items: baseline;\n  gap: 16px;\n  padding: 10px 18px;\n  border-bottom: 1px solid #d8d2c0; /* paper-rule */\n  text-decoration: none;\n  color: #211e14; /* ink */\n  font-family: Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif;\n  font-size: 16px;\n  line-height: 1.5;\n}\n.ds-row:hover { background: #fcfaf4; } /* paper-raised: one tonal step */\n.ds-mono { font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-variant-numeric: tabular-nums; }\n.ds-num { text-align: right; }\n.ds-row__id { font-weight: 700; }\n.ds-row__req { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5f5948; } /* ink-dim */\n.ds-row__remarks { color: #76705e; } /* ink-faint */\n.ds-row__status--running { font-style: italic; color: #2545a8; } /* ballpoint */"
+    },
+    {
+      "name": "phase-bay",
+      "description": "The 92px squared bay on a board track: status glyph, name at 700, duration chip, description, tool ticks along the lower edge. State is hue — amber border when running, fail border when failed, dashed-transparent when queued, 2px amber outline when selected.",
+      "html": "<div class=\"ds-bay ds-bay--running\" style=\"background:#141311\">\n  <div class=\"ds-bay__head\">\n    <span class=\"ds-bay__glyph ds-bay__glyph--running\"></span>\n    <span class=\"ds-bay__name\">build</span>\n    <span class=\"ds-bay__dur\">1m 58s</span>\n  </div>\n  <div class=\"ds-bay__desc\">Run the build pipeline and collect artifacts</div>\n</div>",
+      "css": ".ds-bay {\n  height: 92px;\n  padding: 10px 12px;\n  border: 1px solid #37342b; /* board-rule */\n  border-radius: 2px;\n  background: #1e1c17; /* board-raised */\n  font-family: Overpass, system-ui, 'Helvetica Neue', Arial, sans-serif;\n  color: #efe8d4; /* bone */\n  overflow: hidden;\n}\n.ds-bay--running { border-color: #e8b64a; } /* board-amber: hue is the state */\n.ds-bay--failed { border-color: #ff6f67; } /* fail-board */\n.ds-bay--queued { border-style: dashed; background: transparent; }\n.ds-bay--selected { outline: 2px solid #e8b64a; outline-offset: 1px; }\n.ds-bay__head { display: flex; align-items: baseline; gap: 8px; }\n.ds-bay__name { font-size: 17px; font-weight: 700; }\n.ds-bay--running .ds-bay__name { color: #e8b64a; }\n.ds-bay__dur { font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace; font-size: 16px; color: #96907c; } /* bone-dim */\n.ds-bay__glyph { width: 8px; height: 8px; flex: none; }\n.ds-bay__glyph--running { border-radius: 50%; background: #e8b64a; animation: ds-pulse 1.8s ease-in-out infinite; }\n.ds-bay__desc { font-size: 16px; color: #96907c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n@keyframes ds-pulse { 50% { opacity: 0.35; } }\n@media (prefers-reduced-motion: reduce) { .ds-bay__glyph--running { animation: none; } }"
+    },
+    {
+      "name": "track-lane-label",
+      "description": "The 250px label column of a board lane: faint mono track number, line icon, lane name in bone 700, model line, and a hairline context-occupancy meter that fills via scaleX and goes amber only while the lane is live.",
+      "html": "<div class=\"ds-lane\" style=\"background:#141311\">\n  <div class=\"ds-lane__top\">\n    <span class=\"ds-lane__track\">02</span>\n    <span class=\"ds-lane__name\">builder</span>\n  </div>\n  <div class=\"ds-lane__model\">claude-sonnet · 84.2k tokens</div>\n  <div class=\"ds-lane__meter\"><span class=\"ds-lane__fill ds-lane__fill--live\" style=\"transform: scaleX(0.62)\"></span></div>\n</div>",
+      "css": ".ds-lane { width: 250px; font-family: Overpass, system-ui, sans-serif; color: #efe8d4; }\n.ds-lane__top { display: flex; align-items: baseline; gap: 10px; }\n.ds-lane__track {\n  font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace;\n  font-size: 16px; color: #857f6a; /* bone-faint */\n}\n.ds-lane__name { font-size: 17px; font-weight: 700; }\n.ds-lane__model {\n  font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace;\n  font-size: 16px; color: #96907c; margin-top: 2px;\n}\n.ds-lane__meter { height: 6px; margin-top: 8px; background: #2a2820; } /* board-rule-soft */\n.ds-lane__fill {\n  display: block; width: 100%; height: 100%;\n  background: #857f6a;\n  transform-origin: left center;\n  transition: transform 300ms ease;\n}\n.ds-lane__fill--live { background: #e8b64a; }"
+    },
+    {
+      "name": "tag-stub",
+      "description": "A ticket-stub cell: faint key, bone value, soft-rule border on the sunk inset ground. Baseline-aligned, 16px, used across detail heads, gate lines, and output lines.",
+      "html": "<div class=\"ds-tags\" style=\"background:#141311\">\n  <span class=\"ds-tag\"><span class=\"ds-tag__k\">model</span> claude-sonnet</span>\n  <span class=\"ds-tag\"><span class=\"ds-tag__k\">gate</span> build-passed</span>\n</div>",
+      "css": ".ds-tags { display: flex; flex-wrap: wrap; gap: 8px; }\n.ds-tag {\n  display: inline-flex; align-items: baseline; gap: 8px;\n  padding: 2px 10px;\n  border: 1px solid #2a2820; /* board-rule-soft */\n  border-radius: 2px;\n  background: #0c0b09; /* board-sunk */\n  font-family: Overpass, system-ui, sans-serif;\n  font-size: 16px;\n  color: #efe8d4; /* bone */\n}\n.ds-tag__k { color: #857f6a; } /* bone-faint */"
+    },
+    {
+      "name": "gate-row",
+      "description": "A square inset cell whose verdict lives on the border: passing gates keep the plain rule, failing gates take the 1px fail-colored border, with ✓/✗ marks and violations listed in the fail signal.",
+      "html": "<div class=\"ds-gate ds-gate--pass\" style=\"background:#141311\">\n  <span class=\"ds-gate__mark\">✓</span>\n  <span class=\"ds-gate__name\">typecheck</span>\n  <span class=\"ds-gate__meta\">0 errors · 4.1s</span>\n</div>\n<div class=\"ds-gate ds-gate--fail\" style=\"background:#141311\">\n  <span class=\"ds-gate__mark\">✗</span>\n  <span class=\"ds-gate__name\">lint</span>\n  <span class=\"ds-gate__meta\">2 violations</span>\n</div>",
+      "css": ".ds-gate {\n  display: flex; align-items: baseline; gap: 10px;\n  padding: 8px 12px;\n  border: 1px solid #37342b; /* board-rule */\n  border-radius: 2px;\n  background: #0c0b09; /* board-sunk */\n  font-family: Overpass, system-ui, sans-serif;\n  font-size: 16px;\n  color: #efe8d4;\n}\n.ds-gate--fail { border-color: #ff6f67; } /* fail-board: the verdict is the hairline */\n.ds-gate__mark { font-family: 'Overpass Mono', ui-monospace, monospace; }\n.ds-gate--pass .ds-gate__mark { color: #4ade80; }\n.ds-gate--fail .ds-gate__mark, .ds-gate--fail .ds-gate__meta { color: #ff6f67; }\n.ds-gate__name { font-weight: 600; }\n.ds-gate__meta { color: #96907c; margin-left: auto; font-family: 'Overpass Mono', ui-monospace, monospace; }"
+    },
+    {
+      "name": "masthead",
+      "description": "The sticky bar both surfaces share: station-code mark, wordmark with breadcrumbs that ellipsize rather than wrap, and the live indicator — square ballpoint pip on paper, round pulsing amber lamp on the board. Paper closes on a 4px double rule; the board takes a single hairline.",
+      "html": "<header class=\"ds-masthead\" style=\"background:#f6f3ec\">\n  <svg class=\"ds-masthead__mark\" viewBox=\"0 0 32 32\" aria-hidden=\"true\">\n    <rect x=\"2.5\" y=\"2.5\" width=\"27\" height=\"27\" rx=\"2\" fill=\"#fcfaf4\" stroke=\"#211e14\" stroke-width=\"1.5\"/>\n    <rect x=\"7\" y=\"8\" width=\"18\" height=\"4\" fill=\"#211e14\"/>\n    <rect x=\"7\" y=\"14\" width=\"18\" height=\"4\" fill=\"#da291c\"/>\n    <rect x=\"7\" y=\"20\" width=\"18\" height=\"4\" fill=\"#211e14\"/>\n  </svg>\n  <span class=\"ds-masthead__brand\">Super Portable Software Factory</span>\n  <span class=\"ds-masthead__live\"><span class=\"ds-masthead__pip\"></span> live</span>\n</header>",
+      "css": ".ds-masthead {\n  display: flex; align-items: center; gap: 10px;\n  padding: 16px 28px 14px;\n  border-bottom: 4px double #211e14; /* the printed masthead rule */\n  font-family: Overpass, system-ui, sans-serif;\n  color: #211e14;\n}\n.ds-masthead__mark { width: 26px; height: 26px; flex: none; }\n.ds-masthead__brand {\n  font-size: 17px; font-weight: 700; letter-spacing: 0.02em;\n  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;\n}\n.ds-masthead__live {\n  margin-left: auto; flex: none;\n  display: inline-flex; align-items: center; gap: 8px;\n  font-family: 'Overpass Mono', ui-monospace, 'SF Mono', Menlo, monospace;\n  font-size: 16px; color: #2545a8; /* ballpoint */\n}\n.ds-masthead__pip { width: 9px; height: 9px; background: #2545a8; } /* square on paper; round + pulsing on the board */"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Timetable",
+    "overview": [
+      "SPF's observability UI is railway operations made screen. It draws two artifacts from that world, split by what the engineer is doing:",
+      "The paper timetable (light): the sessions list — the printed schedule you scan after the fact to catch up, review, and sign off. Ink on warm paper, tabular columns, hairline rules, one red accent carried the way Swiss Federal Railways carries red. Ballpoint blue appears only where live state has annotated the record.",
+      "The departure board (dark): the live session trace — the board you watch while a run is in flight. Near-black ground, bone-white text, board amber as the single accent. Track numbers identify lanes; squared bays carry each phase; motion exists only on state change.",
+      "The world replaces the previous system wholesale — deep-space navy, gradient text, neon glows, aurora backdrop, glass blur. That recipe is this system's recorded anti-reference: the generic AI-tool look the trace exists to outrun."
+    ],
+    "keyCharacteristics": [
+      "One paper surface, one board surface — each owns its accent, and the accents never cross over.",
+      "Depth from hairline rules and tabular alignment; no shadows, no glow, no blur, no gradients.",
+      "Color is signal: green/red are verdicts, amber is board-live; everything else is ink or bone.",
+      "The board flips on state change; the paper never moves at all."
+    ],
+    "rules": [
+      { "name": "The Accents Don't Travel Rule", "section": "colors", "text": "Red and ballpoint live on paper; amber lives on the board. A red element inside the trace is a failure, not a flourish; an amber tint on the list is a stain. New accents require a new artifact, not a new hue on this palette." },
+      { "name": "The Color Is Signal Rule", "section": "colors", "text": "Outside each surface's one accent, hue only ever means data state — green passed, red failed, amber live. Event types, agents, and lanes get no colors of their own; they get names, numbers, and words." },
+      { "name": "The Data Voice Rule", "section": "typography", "text": "Mono is for code, data, and measurement — never prose, never buttons' body copy, never a 'techy' costume. A sentence wearing mono is a misprint." },
+      { "name": "The Floor Is Sixteen Rule", "section": "typography", "text": "Nothing renders below 16px, anywhere. Density comes from hairlines, alignment, and tabular numerals — never from shrinking the type." },
+      { "name": "The Request Is the Origin Rule", "section": "layout", "text": "Every trace begins with what the human asked, and the board reserves it an exclusive zone nothing else may enter. Phase bays map into the remaining track." },
+      { "name": "The Board Pans Rule", "section": "layout", "text": "Below the 980px fold a wide board keeps its full track width and scrolls, the way you read a wall-mounted board by walking along it. Never shrink a board into columns too narrow to read." },
+      { "name": "The Number Names, Not Amputates Rule", "section": "layout", "text": "A reserved zone or column must be wide enough to carry its content's full identity — the request block always reads 'request', never 're…'. Ellipsis is reserved for genuinely unbounded text." },
+      { "name": "The Hairline Rule", "section": "elevation", "text": "Structure is drawn with 1px rules, 1px gaps, weight, and alignment — nothing else. Reach for a shadow, a blur, or a gradient and you have left the system." }
+    ],
+    "dos": [
+      "Do let semantic tokens do the traveling: components bind to --ground/--face/--inset/--fg/--dim/--faint/--rule/--rule-soft/--accent/--live/--pass/--fail, and body.board swaps the whole surface.",
+      "Do right-align numbers in columns, keep them tabular, and give every duration/cost/token figure the data voice.",
+      "Do identify lanes by track number and name; attribute by position, never by hue.",
+      "Do draw structure with 1px rules in --rule / --rule-soft, and separate hover states by one tonal step.",
+      "Do theme the browser surfaces you did not draw: selection colors, scrollbars, focus rings, caret."
+    ],
+    "donts": [
+      "Don't add shadows, glow, gradients, blur, or translucency overlays — the Hairline Rule covers everything a shadow would have claimed.",
+      "Don't animate the paper. Nothing on the sessions list pulses, slides, or fades. Motion belongs to the board, and only on state change.",
+      "Don't carry an accent across artifacts: no red on the board, no amber on the paper.",
+      "Don't assign colors to agents, event types, or lanes; hue is reserved for status and signals, full stop.",
+      "Don't set any text below 16px, use mono for prose, or reach for pills and big radii — these were the tells of the retired system."
+    ]
+  }
+}
