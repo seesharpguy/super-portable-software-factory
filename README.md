@@ -839,6 +839,22 @@ Getting each channel's URL:
 - **webhook** — any endpoint that accepts a JSON POST of the event: Discord,
   n8n, Zapier, a homegrown receiver.
 
+One webhook, many `spf` instances: if several repos' `spf watch` (or
+`spf run`) all post to the same Slack/Teams/webhook endpoint, set
+`notifications.project` to a short label so messages from each are
+distinguishable — it prefixes every title (`[api] watch: reconcileOrphans
+error`) and adds a `repo` field. Left unset, it falls back to `watch.repo`,
+so most `spf watch` setups need nothing extra; set it explicitly when
+`watch.repo` is blank or two watched repos share a basename.
+
+```yaml
+notifications:
+  events: attention
+  project: api            # optional; defaults to watch.repo
+  channels:
+    - kind: slack
+```
+
 Delivery never blocks or fails a run: an unconfigured/misconfigured channel
 is skipped with one warning, and a failed POST logs one line and is
 swallowed — never changes a run's exit code. One thing worth knowing under

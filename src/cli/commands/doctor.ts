@@ -1350,6 +1350,21 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       const label = ch.name ? `${ch.kind} (${ch.name})` : ch.kind;
       check(report, `notifications: ${label}`, Boolean(process.env[envKey]), process.env[envKey] ? `${envKey} set` : `${envKey} is not set`);
     }
+    // See `NotificationsConfigSchema.project`'s doc comment / `resolveNotifier`'s
+    // same fallback — informational only (never fails doctor), since an
+    // unset project tag is harmless unless this webhook ends up shared.
+    if (cfg.notifications.channels.length > 0) {
+      const project = cfg.notifications.project.trim() || cfg.watch.repo.trim();
+      check(
+        report,
+        "notifications.project",
+        true,
+        project
+          ? `tag: "${project}"`
+          : "not set, and watch.repo is empty — outbound messages won't carry a repo/project tag; if this webhook is ever shared across multiple spf instances, set notifications.project to tell them apart",
+        project ? "info" : "warn",
+      );
+    }
   }
 
   return finish(report, flags["json"]);

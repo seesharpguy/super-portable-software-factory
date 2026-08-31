@@ -41,10 +41,14 @@ export class Notifier {
     private readonly timeoutMs: number,
     private readonly dryRun: boolean,
     private readonly log: (message: string) => void = (m) => console.error(m),
+    // See `NotificationsConfigSchema.project`'s doc comment — empty disables
+    // tagging entirely, so a single-repo setup's outbound JSON is unchanged.
+    private readonly project: string = "",
   ) {}
 
   /** Sync, fire-and-forget — every call site is sync and must stay that way. */
-  send(event: NotifyEvent): void {
+  send(rawEvent: NotifyEvent): void {
+    const event = this.project ? tagEvent(rawEvent, this.project) : rawEvent;
     for (const { channel, scope } of this.channels) {
       if (!scopeAllows(scope, event.level)) continue;
       if (this.dryRun) {
@@ -87,6 +91,24 @@ export class Notifier {
       if (deadline) clearTimeout(deadline);
     }
   }
+}
+
+/**
+ * Prefixes `event.title` with `[project]` and adds a `repo` field, so a
+ * webhook shared by several `spf watch` instances reads clearly even
+ * collapsed to one line (Slack's notification/thread-list view only shows
+ * `title`, never `fields`). Skips the field when one's already there
+ * (`watch_started`/`watch_stopped` already carry their own `repo` field —
+ * see `cli/commands/watch.ts`) rather than emit a duplicate key with the
+ * same value.
+ */
+function tagEvent(event: NotifyEvent, project: string): NotifyEvent {
+  const hasRepo = event.fields.some(([key]) => key === "repo");
+  return {
+    ...event,
+    title: `[${project}] ${event.title}`,
+    fields: hasRepo ? event.fields : [["repo", project], ...event.fields],
+  };
 }
 
 function makeChannel(kind: string, url: string, name: string): NotificationChannel | null {
@@ -132,7 +154,14 @@ export function resolveNotifier(cfg: SFConfig, opts: { dryRun?: boolean; log?: (
   }
   if (resolved.length === 0) return null;
 
-  const notifier = new Notifier(resolved, nc.timeout_ms, Boolean(opts.dryRun), log);
+  // See `NotificationsConfigSchema.project`'s doc comment: an explicit
+  // `notifications.project` wins; otherwise fall back to `watch.repo`
+  // (present whenever `spf watch` is what's sending — the common case for a
+  // shared webhook), and empty (a one-off `spf run` with no watch.repo set)
+  // disables tagging, same as today.
+  const project = nc.project.trim() || cfg.watch.repo.trim();
+
+  const notifier = new Notifier(resolved, nc.timeout_ms, Boolean(opts.dryRun), log, project);
   LIVE.push(notifier);
   return notifier;
 }

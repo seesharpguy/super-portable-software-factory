@@ -104,6 +104,59 @@ test("doctor: the same check passes once quality.suites.test is configured with 
   }
 });
 
+test("doctor: notifications configured with no project tag and an empty watch.repo warns 'notifications.project', without flipping report.ok", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, `notifications:\n  events: errors\n  channels:\n    - {kind: webhook, webhook_url_env: SPF_DOCTOR_TEST_HOOK}\n`);
+    const report = await runDoctor(dir);
+
+    const projectCheck = report.checks.find((c) => c.name === "notifications.project");
+    assert.ok(projectCheck, "expected a 'notifications.project' check to exist");
+    assert.equal(projectCheck!.ok, true, "an unset project tag is informational, never a failure");
+    assert.equal(projectCheck!.severity, "warn");
+    assert.match(projectCheck!.detail, /not set, and watch\.repo is empty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: notifications.project falls back to watch.repo — reports the resolved tag as info, not a warning", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      `watch:\n  repo: acme/widgets\n` + `notifications:\n  events: errors\n  channels:\n    - {kind: webhook, webhook_url_env: SPF_DOCTOR_TEST_HOOK}\n`,
+    );
+    const report = await runDoctor(dir);
+
+    const projectCheck = report.checks.find((c) => c.name === "notifications.project");
+    assert.ok(projectCheck);
+    assert.equal(projectCheck!.severity, "info");
+    assert.match(projectCheck!.detail, /tag: "acme\/widgets"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: notifications.project set explicitly wins over watch.repo", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(
+      dir,
+      `watch:\n  repo: acme/widgets\n` +
+        `notifications:\n  events: errors\n  project: acme-widgets-prod\n  channels:\n    - {kind: webhook, webhook_url_env: SPF_DOCTOR_TEST_HOOK}\n`,
+    );
+    const report = await runDoctor(dir);
+
+    const projectCheck = report.checks.find((c) => c.name === "notifications.project");
+    assert.ok(projectCheck);
+    assert.equal(projectCheck!.severity, "info");
+    assert.match(projectCheck!.detail, /tag: "acme-widgets-prod"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("doctor: a repo-local chain's own owners/suites check is unaffected by the refactor into checkChainRequirements()", async () => {
   const dir = tmpRepo();
   try {

@@ -260,6 +260,64 @@ test("resolveNotifier falls back to the kind's default env key when webhook_url_
   }
 });
 
+test("Notifier tags every event's title and adds a repo field when constructed with a project", () => {
+  const channel = new RecordingChannel();
+  const notifier = new Notifier([{ channel, scope: "all" }], 1000, false, () => {}, "my-app");
+  notifier.send(infoEvent());
+  assert.equal(channel.received.length, 1);
+  assert.equal(channel.received[0].title, "[my-app] run started");
+  assert.deepEqual(channel.received[0].fields, [["repo", "my-app"]]);
+});
+
+test("Notifier does not duplicate an event's own repo field when tagging", () => {
+  const channel = new RecordingChannel();
+  const notifier = new Notifier([{ channel, scope: "all" }], 1000, false, () => {}, "my-app");
+  notifier.send({ kind: "watch_started", level: "info", title: "watch started", fields: [["repo", "owner/name"]] });
+  assert.equal(channel.received[0].title, "[my-app] watch started");
+  assert.deepEqual(channel.received[0].fields, [["repo", "owner/name"]]);
+});
+
+test("Notifier with no project leaves events untagged", () => {
+  const channel = new RecordingChannel();
+  const notifier = new Notifier([{ channel, scope: "all" }], 1000, false, () => {});
+  notifier.send(infoEvent());
+  assert.equal(channel.received[0].title, "run started");
+  assert.deepEqual(channel.received[0].fields, []);
+});
+
+test("resolveNotifier falls back to watch.repo for the project tag when notifications.project is unset", async () => {
+  let receivedBody = "";
+  const server: Server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      receivedBody = body;
+      res.writeHead(200);
+      res.end("ok");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const envKey = "SPF_TEST_WEBHOOK_TAGGED";
+  process.env[envKey] = `http://127.0.0.1:${port}/hook`;
+  try {
+    const cfg = v.parse(SFConfigSchema, {
+      watch: { repo: "acme/widgets" },
+      notifications: { events: "all", channels: [{ kind: "webhook", webhook_url_env: envKey }] },
+    });
+    const notifier = resolveNotifier(cfg);
+    assert.notEqual(notifier, null);
+    notifier!.send(infoEvent());
+    await notifier!.flush();
+    const posted = JSON.parse(receivedBody) as NotifyEvent;
+    assert.equal(posted.title, "[acme/widgets] run started");
+    assert.deepEqual(posted.fields, [["repo", "acme/widgets"]]);
+  } finally {
+    delete process.env[envKey];
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("a webhook channel posts the real NotifyEvent JSON over the wire to a local receiver", async () => {
   let receivedBody = "";
   let receivedContentType = "";

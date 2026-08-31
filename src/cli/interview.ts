@@ -594,6 +594,15 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     if (notifications) {
       const timeoutMs = await asker.text("notifications.timeout_ms", { default: "5000" });
       if (timeoutMs !== "5000") notifications.timeout_ms = Number(timeoutMs);
+
+      // Only matters when one Slack/Teams/webhook endpoint is shared across
+      // several `spf` instances — defaults to watch.repo (resolveNotifier's
+      // own fallback), so most single-repo setups can just accept it and
+      // write nothing extra into the generated config.
+      const repoDefault = (watch?.repo as string | undefined) || "";
+      asker.note("Tags every outbound title/field so messages are distinguishable if this webhook is shared across repos — defaults to watch.repo.");
+      const project = await asker.text("notifications.project", { default: repoDefault });
+      if (project !== repoDefault) notifications.project = project;
     }
   }
 

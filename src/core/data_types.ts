@@ -1105,6 +1105,13 @@ export const NotificationsConfigSchema = v.object({
   events: v.optional(NotifyScopeSchema, "off"),
   timeout_ms: v.optional(v.number(), 5_000),
   channels: v.optional(v.array(NotifyChannelSchema), () => []),
+  // Prefixed onto every outbound title (e.g. "[api] watch: ..." ) and added
+  // as a `repo` field, so one Slack/Teams/webhook endpoint shared across
+  // several `spf watch` instances (one per repo) can tell them apart.
+  // Empty means "derive from watch.repo" (see `resolveNotifier`) — set this
+  // explicitly only when that repo string isn't a good enough label, e.g.
+  // it's blank, or two watched repos share a basename.
+  project: v.optional(v.string(), ""),
 });
 export type NotificationsConfig = v.InferOutput<typeof NotificationsConfigSchema>;
 

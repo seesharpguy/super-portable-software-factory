@@ -277,6 +277,7 @@ default; adding it is entirely additive.
 |---|---|---|
 | `events` | `"off"` \| `"errors"` \| `"attention"` \| `"all"` | The whole filter, narrowest to widest. `off` (default): nothing. `errors`: only true failures — failed runs/phases (`run_failed`/`phase_failed`), `watch_error`. `attention`: `errors` plus anything needing a human but not itself a failure — a blocked issue (`issue_blocked`) or a spec needing feedback (`spec_needs_feedback`). `all`: every curated milestone (run started, issue claimed, PR opened, ...) plus `attention` and `errors`. |
 | `timeout_ms` | int | Per-request timeout for a channel's HTTP POST. Default `5000`. |
+| `project` | string | Label prefixed onto every outbound title (`[api] watch: ...`) and added as a `repo` field — for disambiguating multiple `spf` instances that share one webhook. Default `""`, which falls back to `watch.repo`. |
 | `channels[]` | array | See below. |
 
 `channels[].kind`: `"slack"` \| `"teams"` \| `"webhook"`. `channels[].events`

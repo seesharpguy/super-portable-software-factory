@@ -34,19 +34,26 @@ export function newId(length: number = 8): string {
   return randomBytes(Math.floor(length / 2)).toString("hex");
 }
 
-/** Transport-level blips worth one silent retry — see `fetchRetryTransient` below. */
-const TRANSIENT_FETCH_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EPIPE", "ECONNREFUSED", "EAI_AGAIN"]);
+/**
+ * Transport-level blips worth one silent retry — see `fetchRetryTransient`
+ * below. `UND_ERR_SOCKET` is undici's own code for the same stale-keep-alive
+ * race as `ECONNRESET` (the far end closes a pooled socket between calls);
+ * without it here, every `spf watch` poll tick that lands on one of those
+ * sockets surfaces as a bare, undiagnosable "fetch failed (UND_ERR_SOCKET)"
+ * notification instead of being retried away like its `ECONNRESET` sibling.
+ */
+const TRANSIENT_FETCH_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EPIPE", "ECONNREFUSED", "EAI_AGAIN", "UND_ERR_SOCKET"]);
 
 /**
  * `fetch`, but a transport-level blip on the FIRST attempt gets one silent
  * retry before it's allowed to throw. Node's global `fetch` (undici) pools
  * keep-alive connections across calls; Atlassian's Cloud APIs (Jira,
  * Bitbucket) close idle ones from their end, which surfaces here as
- * `ECONNRESET` the next time a long-lived poller (`spf watch`) reuses one —
- * a stale-socket race, not a real problem with the request. Only retries
- * error codes that mean "the transport failed," never an HTTP error status
- * (a 4xx/5xx response is not a thrown error here, and must keep surfacing
- * on the first attempt so callers see it immediately).
+ * `ECONNRESET`/`UND_ERR_SOCKET` the next time a long-lived poller (`spf
+ * watch`) reuses one — a stale-socket race, not a real problem with the
+ * request. Only retries error codes that mean "the transport failed," never
+ * an HTTP error status (a 4xx/5xx response is not a thrown error here, and
+ * must keep surfacing on the first attempt so callers see it immediately).
  */
 export async function fetchRetryTransient(input: string, init?: RequestInit): Promise<Response> {
   try {
