@@ -479,14 +479,28 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
       });
       const projectKey = await asker.text("Jira project key", { validate: (val) => (val.trim() ? null : "required") });
       watch.jira = { base_url: baseUrl.replace(/\/+$/, ""), project_key: projectKey.toUpperCase() };
+      asker.note(
+        "Jira workflow status (the board's Status column) stays untouched by default — labels alone drive spf watch. " +
+          "Opt in with watch.jira.status_map (per-state -> Jira status name) to also sync it, then run `spf watch init` to validate.",
+      );
     }
 
     const needsGithub = issueProvider === "github" || codeHost === "github";
     if (needsGithub) {
-      asker.note('classic PAT, "repo" scope (private) or "public_repo" (public-only) — never "project".');
+      asker.note(
+        issueProvider === "github"
+          ? 'classic PAT, "repo" scope (private) or "public_repo" (public-only) — add "project" too if you plan to use watch.github.status_map (native Projects v2 board sync).'
+          : 'classic PAT, "repo" scope (private) or "public_repo" (public-only).',
+      );
       const token = await asker.secret("GITHUB_TOKEN", { current: ctx.existingEnv.get("GITHUB_TOKEN") });
       if (token) env["GITHUB_TOKEN"] = token;
       envExampleKeys.push("GITHUB_TOKEN");
+      if (issueProvider === "github") {
+        asker.note(
+          "GitHub Projects v2 board status (the board's Status column) stays untouched by default — labels alone drive spf watch. " +
+            "Opt in with watch.github.project_number + watch.github.status_map (per-state -> Status option name) to also sync it, then run `spf watch init` to validate.",
+        );
+      }
     }
     if (issueProvider === "jira") {
       const email = await asker.text("JIRA_EMAIL", { default: ctx.gitEmail ?? "" });

@@ -20,6 +20,7 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
       poll_ms: 60_000,
       concurrency: 2,
       jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} },
+      github: { project_number: 0, status_map: {} },
       refine: { enabled: false, chain: "refine", concurrency: 1, max_leaves: 4, max_nodes: 6, max_depth: 2 },
       ...watch,
     },
