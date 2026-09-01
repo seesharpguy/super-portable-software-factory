@@ -18,13 +18,22 @@
  *    one paragraph of plain text, nothing richer.
  *
  * State is modeled as Jira labels (`<prefix>:ready`, etc.), mirroring
- * `github_provider.ts` exactly, rather than native workflow status
- * transitions — the latter would need per-project transition-id mapping
- * (workflows vary by project/scheme in Jira), while labels work
- * identically everywhere with zero per-project setup. One caveat, verified
- * against Atlassian's own docs: colons ARE a legal label character and JQL
- * matches on them fine, they just don't show up in Jira's label
- * autocomplete UI — cosmetic only, not a functional issue.
+ * `github_provider.ts` exactly — labels are spf's ACTUAL state machine and
+ * always get written, unconditionally. One caveat, verified against
+ * Atlassian's own docs: colons ARE a legal label character and JQL matches
+ * on them fine, they just don't show up in Jira's label autocomplete UI —
+ * cosmetic only, not a functional issue.
+ *
+ * Native workflow status is a separate, OPTIONAL, best-effort layer on top
+ * (`syncStatus()`), driven entirely by the configured `statusMap` — empty
+ * by default, so an existing config's behavior is unchanged. It's optional
+ * rather than baked into every `transition()` call unconditionally because
+ * Jira workflows vary by project/scheme (status names, which transitions
+ * are reachable from where) in a way labels never do; a project that wants
+ * its board's Status column to move when spf changes a label opts in with
+ * `watch.jira.status_map`, and a misconfigured or unreachable entry there
+ * degrades to a logged warning, never a thrown error — a status-sync miss
+ * must never block the label update `spf watch` actually depends on.
  *
  * `ensureLabels()` is a no-op that reports the labels this run will use:
  * Jira labels are freeform strings with no color/description registry to
@@ -58,7 +67,7 @@
  * Jira API error at publish time — a genuine platform difference, not
  * something this file tries to paper over.
  */
-import type { JiraIssueTypeMap } from "../data_types.ts";
+import type { JiraIssueTypeMap, JiraStatusMap } from "../data_types.ts";
 import { fetchRetryTransient } from "../utils.ts";
 import type { EnsureLabelsResult, Issue, IssueAuthoringKind, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
@@ -133,6 +142,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     private readonly email: string,
     private readonly apiToken: string,
     private readonly issueTypes: JiraIssueTypeMap,
+    private readonly statusMap: JiraStatusMap = {},
   ) {}
 
   private authHeader(): string {
@@ -300,8 +310,9 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   }
 
   async claim(issue: Issue, opts?: { from?: WatchState; to?: WatchState }): Promise<boolean> {
+    const toState = opts?.to ?? "working";
     const from = this.label(opts?.from ?? "ready");
-    const to = this.label(opts?.to ?? "working");
+    const to = this.label(toState);
     const next = issue.labels.filter((l) => l !== from);
     next.push(to);
     await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: next } }) });
@@ -314,6 +325,8 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
       await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: revert } }) }).catch(
         () => undefined,
       );
+    } else {
+      await this.syncStatus(issue, toState);
     }
     return claimed;
   }
@@ -322,7 +335,65 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     const next = issue.labels.filter((l) => !STATES.some((s) => this.label(s) === l));
     next.push(this.label(to));
     await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: next } }) });
+    await this.syncStatus(issue, to);
     if (detail) await this.comment(issue, detail);
+  }
+
+  /**
+   * Best-effort native workflow-status sync — a no-op unless `statusMap`
+   * configures a name for `to`. Looked up per call, not cached: the
+   * available transitions are FROM-status-dependent, so the same target
+   * status can need a different transition id depending where the issue
+   * currently sits, and this same issue's status keeps moving across calls
+   * as it advances through the build lane. Every failure mode here
+   * (unconfigured, unreachable, or a rejected transition) is logged and
+   * swallowed, never thrown — see this file's module comment on why a
+   * status-sync miss must never break the label update callers depend on.
+   */
+  private async syncStatus(issue: Issue, to: WatchState): Promise<void> {
+    const statusName = (this.statusMap as Record<string, string | undefined>)[to];
+    if (!statusName) return;
+    let transitions: Array<{ id: string; to: { name: string } }>;
+    try {
+      ({ transitions } = await this.jira<{ transitions: Array<{ id: string; to: { name: string } }> }>(`/rest/api/3/issue/${issue.id}/transitions`));
+    } catch (err) {
+      console.error(`spf watch: ${issue.id} — couldn't fetch available Jira transitions to sync status ${JSON.stringify(statusName)}; label already updated — ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const match = transitions.find((t) => t.to.name === statusName);
+    if (!match) {
+      console.error(
+        `spf watch: ${issue.id} has no available transition to Jira status ${JSON.stringify(statusName)} (watch.jira.status_map.${to}) from its current status — skipping status sync, label already updated`,
+      );
+      return;
+    }
+    await this.jira(`/rest/api/3/issue/${issue.id}/transitions`, { method: "POST", body: JSON.stringify({ transition: { id: match.id } }) }).catch(
+      (err: unknown) => {
+        console.error(`spf watch: ${issue.id} — Jira transition to ${JSON.stringify(statusName)} failed; label already updated — ${err instanceof Error ? err.message : String(err)}`);
+      },
+    );
+  }
+
+  /**
+   * Read-only validation of the configured `status_map` against this
+   * project's real statuses — what `spf watch init` and `spf watch`'s own
+   * startup check should call to catch a misnamed status before an
+   * unattended run silently no-ops its status sync every time, the same
+   * role `validateIssueTypes()` plays for `issue_types`.
+   *
+   * Uses `/rest/api/3/project/{key}/statuses`, which groups statuses by
+   * issue type — Jira workflows can differ per issue type within one
+   * project. A configured name is "exists" if ANY issue type in the project
+   * has it: good enough to catch a typo, not a guarantee every issue type
+   * this map is used against can actually reach it (that's what
+   * `syncStatus()`'s own per-call transition lookup is for).
+   */
+  async validateStatusMap(): Promise<Array<{ state: string; jiraStatus: string; exists: boolean }>> {
+    const result = await this.jira<Array<{ statuses: Array<{ name: string }> }>>(`/rest/api/3/project/${encodeURIComponent(this.projectKey)}/statuses`);
+    const available = new Set(result.flatMap((t) => t.statuses.map((s) => s.name)));
+    return Object.entries(this.statusMap)
+      .filter((entry): entry is [string, string] => Boolean(entry[1]))
+      .map(([state, jiraStatus]) => ({ state, jiraStatus, exists: available.has(jiraStatus) }));
   }
 
   async comment(issue: Issue, body: string): Promise<void> {

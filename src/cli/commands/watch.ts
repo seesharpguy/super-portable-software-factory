@@ -122,7 +122,7 @@ export function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
       console.error('JIRA_EMAIL and JIRA_API_TOKEN must both be set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens). See README.md\'s "spf watch" section.');
       return null;
     }
-    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types);
+    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types, cfg.watch.jira.status_map);
   }
   console.error(`watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} is not supported`);
   return null;
@@ -204,6 +204,15 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
     console.log(`\nvalidating watch.jira.issue_types against ${cfg.watch.jira.project_key}:`);
     for (const c of checks) {
       console.log(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
+    }
+    if (checks.some((c) => !c.exists)) return 1;
+  }
+
+  if (cfg.watch.issue_provider === "jira" && provider instanceof JiraProvider && Object.values(cfg.watch.jira.status_map).some(Boolean)) {
+    const checks = await provider.validateStatusMap();
+    console.log(`\nvalidating watch.jira.status_map against ${cfg.watch.jira.project_key}:`);
+    for (const c of checks) {
+      console.log(`  ${c.exists ? "✓" : "✗"} ${c.state} → ${c.jiraStatus}${c.exists ? "" : ` — no status named "${c.jiraStatus}" in ${cfg.watch.jira.project_key}`}`);
     }
     if (checks.some((c) => !c.exists)) return 1;
   }
@@ -414,6 +423,28 @@ export async function watchCommand(argv: string[]): Promise<number> {
           console.error(`  ${c.exists ? "✓" : "✗"} ${c.kind} → ${c.jiraType}${c.exists ? "" : ` — no issue type named "${c.jiraType}" in ${cfg.watch.jira.project_key}`}`);
         }
         console.error(`Fix watch.jira.issue_types, or the project's issue types, before running spf watch unattended. Run \`spf watch init\` any time to re-check.`);
+        return 1;
+      }
+    }
+  }
+
+  // watch.jira.status_map applies to every build-lane transition, independent
+  // of watch.refine.enabled — validated at startup for the same reason
+  // issue_types is: a bad status name should stop the daemon before it
+  // starts, not fail silently (well, log-and-skip — see jira_provider.ts's
+  // syncStatus()) on every single transition once it's running. Silent when
+  // status_map is empty (the default, opt-in feature) or has no mismatches.
+  if (cfg.watch.issue_provider === "jira" && provider instanceof JiraProvider) {
+    const configured = Object.values(cfg.watch.jira.status_map).some(Boolean);
+    if (configured) {
+      const checks = await provider.validateStatusMap();
+      const mismatches = checks.filter((c) => !c.exists);
+      if (mismatches.length > 0) {
+        console.error(`watch.jira.status_map has ${mismatches.length} mismatch(es) against ${cfg.watch.jira.project_key}:`);
+        for (const c of checks) {
+          console.error(`  ${c.exists ? "✓" : "✗"} ${c.state} → ${c.jiraStatus}${c.exists ? "" : ` — no status named "${c.jiraStatus}" in ${cfg.watch.jira.project_key}`}`);
+        }
+        console.error(`Fix watch.jira.status_map, or the project's statuses, before running spf watch unattended. Run \`spf watch init\` any time to re-check.`);
         return 1;
       }
     }

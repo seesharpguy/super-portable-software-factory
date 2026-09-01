@@ -792,9 +792,26 @@ export JIRA_EMAIL=you@example.com
 export JIRA_API_TOKEN=...   # id.atlassian.com -> Security -> API tokens
 ```
 
-State is modeled as Jira **labels** (`<prefix>:ready`, etc.), mirroring GitHub exactly, rather than native workflow status transitions — the latter would need per-project transition-id mapping, since workflows vary by project/scheme; labels work identically everywhere with zero per-project setup. One caveat: colons are a legal Jira label character and JQL matches on them fine, but they won't show up in Jira's own label autocomplete UI — cosmetic only.
+State is modeled as Jira **labels** (`<prefix>:ready`, etc.), mirroring GitHub exactly — labels are spf's actual state machine and always get written unconditionally, with zero per-project setup. One caveat: colons are a legal Jira label character and JQL matches on them fine, but they won't show up in Jira's own label autocomplete UI — cosmetic only.
 
-`spf watch init` still doesn't create any labels here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it reports the labels this run will use. But with `watch.refine.enabled`, it now also validates `watch.jira.issue_types` against the real project's issue types, read-only, and exits non-zero on a mismatch — see "Refining specs" above.
+Native Jira workflow status (the board's Status column) is a separate, optional layer on top, off by default — labels alone don't move it, so an issue's Status sits wherever it started unless you opt in with `watch.jira.status_map`:
+
+```yaml
+watch:
+  issue_provider: jira
+  jira:
+    base_url: https://your-domain.atlassian.net
+    project_key: PROJ
+    status_map:        # optional — unset by default, per state
+      ready: To Do
+      working: In Progress
+      review: In Review
+      done: Done
+```
+
+Only the states you map are touched; an unmapped state keeps today's label-only behavior. This is opt-in rather than automatic because Jira workflows vary by project/scheme — status names and which transitions are reachable from where isn't something spf can assume, unlike labels. A configured name with no reachable transition (or a rejected one) is logged and skipped, never thrown — the label update is what `spf watch` actually depends on; status sync is a best-effort convenience on top of it.
+
+`spf watch init` still doesn't create any labels here (Jira labels are freeform strings with no color/description registry to seed, unlike GitHub's) — it reports the labels this run will use. With `watch.refine.enabled`, it also validates `watch.jira.issue_types` against the real project's issue types, read-only, and exits non-zero on a mismatch — see "Refining specs" above. Independent of `refine.enabled`, if `watch.jira.status_map` has any entry configured, both `spf watch init` and `spf watch`'s own startup check validate it against the real project's statuses the same way, and exit non-zero on a mismatch.
 
 ### Bitbucket (`code_host: bitbucket`)
 

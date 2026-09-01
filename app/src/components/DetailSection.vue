@@ -17,7 +17,7 @@ defineEmits<{ toggle: [] }>()
   <section class="dsec">
     <button class="dsec-head" @click="$emit('toggle')">
       <span class="chev">{{ open ? '▾' : '▸' }}</span>
-      <component :is="icon" v-if="icon" class="dsec-icon" :size="19" :stroke-width="2" />
+      <component :is="icon" v-if="icon" class="dsec-icon" :size="17" :stroke-width="2" />
       <span class="dsec-title">{{ title }}</span>
       <span v-if="count != null" class="dsec-count dim">({{ count }})</span>
     </button>
@@ -29,7 +29,7 @@ defineEmits<{ toggle: [] }>()
 
 <style scoped>
 .dsec {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .dsec-head {
@@ -37,16 +37,16 @@ defineEmits<{ toggle: [] }>()
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 7px 6px;
   background: none;
   border: none;
-  border-bottom: 1px solid var(--border-soft);
-  border-radius: 6px 6px 0 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
   color: var(--dim);
   font-size: 16px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: lowercase;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
   cursor: pointer;
   text-align: left;
 }
@@ -57,20 +57,23 @@ defineEmits<{ toggle: [] }>()
 }
 
 .dsec-head:hover {
-  background: var(--panel-2);
-  color: var(--text);
+  background: var(--face);
+  color: var(--fg);
 }
 
 .chev {
   color: var(--faint);
   flex: none;
+  font-family: var(--mono);
 }
 
 .dsec-count {
-  font-weight: 500;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .dsec-body {
-  padding-top: 10px;
+  padding-top: 12px;
 }
 </style>

@@ -1137,6 +1137,16 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           ? "set"
           : 'not set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens); see README.md\'s "spf watch" section',
       );
+      const statusMapEntries = Object.entries(cfg.watch.jira.status_map).filter(([, v]) => Boolean(v));
+      check(
+        report,
+        "watch.jira.status_map",
+        true,
+        statusMapEntries.length > 0
+          ? `${statusMapEntries.length} state(s) configured to sync a native Jira status — run \`spf watch init\` to validate them against the real project's statuses`
+          : "not configured — spf watch will only update labels on this project, never the Jira Status field (optional, off by default)",
+        "info",
+      );
     }
     if (cfg.watch.code_host === "bitbucket") {
       check(

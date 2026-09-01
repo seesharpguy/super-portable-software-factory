@@ -7,7 +7,7 @@ const props = defineProps<{
   kind: 'cost' | 'tokens' | 'runtime' | 'read' | 'written'
   /** Raw value — cost in dollars, tokens as a count, runtime in milliseconds. */
   value: number | null | undefined
-  /** Bare value, no pill chrome — for tight spots like waterfall blocks. */
+  /** Bare value, no cell chrome — for tight spots like board strips. */
   compact?: boolean
 }>()
 
@@ -19,7 +19,7 @@ const ICONS = {
   written: PenLine,
 }
 
-// Every chip explains itself on hover. The token numbers in particular are read
+// Every stat explains itself on hover. The token numbers in particular are read
 // wrong without one — the headline is billed volume, not distinct tokens.
 const TITLES = {
   cost: 'Cost — dollars billed for this run, all agents combined.',
@@ -47,20 +47,21 @@ const text = computed(() => {
 
 <template>
   <span class="stat" :class="{ compact }" :title="TITLES[kind]">
-    <component :is="ICONS[kind]" class="stat-icon" :size="compact ? 17 : 19" :stroke-width="2" />
+    <component :is="ICONS[kind]" class="stat-icon" :size="compact ? 16 : 17" :stroke-width="2" />
     <span class="stat-value">{{ text }}</span>
   </span>
 </template>
 
 <style scoped>
+/* A square borderless cell: the timetable records numbers in columns, not in
+   pills. The hairline cell only appears where the stat stands alone. */
 .stat {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 3px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  background: rgba(19, 26, 38, 0.6);
+  padding: 2px 10px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
   font-size: 16px;
   white-space: nowrap;
 }
@@ -71,7 +72,7 @@ const text = computed(() => {
 }
 
 .stat-value {
-  color: var(--text);
+  color: var(--fg);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
@@ -79,7 +80,6 @@ const text = computed(() => {
 .stat.compact {
   padding: 0;
   border: none;
-  background: transparent;
 }
 
 .stat.compact .stat-value {

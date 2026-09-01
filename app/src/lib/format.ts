@@ -54,14 +54,16 @@ export function fmtOffset(ms: number): string {
   return mrem ? `${h}h${String(mrem).padStart(2, '0')}m` : `${h}h`
 }
 
-const TICK_STEPS_MS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600].map(
-  (s) => s * 1000,
-)
+const TICK_STEPS_MS = [
+  1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 21600, 43200, 86400,
+].map((s) => s * 1000)
 
 /** Evenly-stepped time-axis ticks over a span, ≤ maxTicks of them. */
 export function axisTicks(spanMs: number, maxTicks = 8): { pct: number; label: string }[] {
   const span = Math.max(spanMs, 1)
-  const step = TICK_STEPS_MS.find((s) => span / s <= maxTicks) ?? 3_600_000
+  // Off-ladder spans (multi-day runs) fall back to even division — a 1h raster
+  // over a 95h span would smear into an unreadable edge of labels.
+  const step = TICK_STEPS_MS.find((s) => span / s <= maxTicks) ?? span / (maxTicks - 1)
   const out: { pct: number; label: string }[] = []
   for (let t = 0; t <= span; t += step) {
     out.push({ pct: (t / span) * 100, label: fmtOffset(t) })

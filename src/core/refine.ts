@@ -54,7 +54,7 @@ export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider 
         'JIRA_EMAIL and JIRA_API_TOKEN must both be set — the refine lane needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens)',
       );
     }
-    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types);
+    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types, cfg.watch.jira.status_map);
   }
   if (cfg.watch.issue_provider !== "github") {
     throw new Error(

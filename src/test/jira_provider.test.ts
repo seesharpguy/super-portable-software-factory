@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JiraProvider } from "../core/issues/jira_provider.js";
-import type { JiraIssueTypeMap } from "../core/data_types.js";
+import type { JiraIssueTypeMap, JiraStatusMap } from "../core/data_types.js";
 
 const DEFAULT_ISSUE_TYPES: JiraIssueTypeMap = { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" };
 
-function makeProvider(issueTypes: JiraIssueTypeMap = DEFAULT_ISSUE_TYPES): JiraProvider {
-  return new JiraProvider("https://acme.atlassian.net", "PROJ", "spf", "you@example.com", "jira-token", issueTypes);
+function makeProvider(issueTypes: JiraIssueTypeMap = DEFAULT_ISSUE_TYPES, statusMap: JiraStatusMap = {}): JiraProvider {
+  return new JiraProvider("https://acme.atlassian.net", "PROJ", "spf", "you@example.com", "jira-token", issueTypes, statusMap);
 }
 
 interface FetchCall {
@@ -189,6 +189,178 @@ test("validateIssueTypes: a custom mapping is checked against its own configured
     const provider = makeProvider({ ...DEFAULT_ISSUE_TYPES, bug: "Defect" });
     const checks = await provider.validateIssueTypes();
     assert.equal(checks.find((c) => c.kind === "bug")!.exists, true);
+  } finally {
+    restore();
+  }
+});
+
+// ── transition/claim: status_map sync ───────────────────────────────────
+
+const ISSUE = { id: "PROJ-1", title: "x", body: "", labels: ["spf:working"] };
+const STATUS_MAP: JiraStatusMap = { working: "In Progress", review: "In Review" };
+
+test("transition: no status_map entry for the target state — labels PUT only, no transitions lookup", async () => {
+  const { calls, restore } = mockFetch([{}]); // the label PUT, 204
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    await provider.transition(ISSUE, "done"); // "done" has no entry in STATUS_MAP
+    assert.equal(calls.length, 1, "syncStatus should short-circuit before any fetch when the state isn't configured");
+    assert.equal(calls[0]!.method, "PUT");
+  } finally {
+    restore();
+  }
+});
+
+test("transition: a configured state with a matching available transition — labels PUT, then transitions GET, then transition POST", async () => {
+  const { calls, restore } = mockFetch([
+    {}, // label PUT, 204
+    { body: { transitions: [{ id: "21", to: { name: "In Progress" } }, { id: "31", to: { name: "In Review" } }] } }, // GET transitions
+    {}, // POST transition, 204
+  ]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    await provider.transition(ISSUE, "review");
+
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0]!.method, "PUT");
+    assert.equal(calls[1]!.method, "GET");
+    assert.match(calls[1]!.url, /\/rest\/api\/3\/issue\/PROJ-1\/transitions$/);
+    assert.equal(calls[2]!.method, "POST");
+    assert.match(calls[2]!.url, /\/rest\/api\/3\/issue\/PROJ-1\/transitions$/);
+    assert.deepEqual(calls[2]!.body, { transition: { id: "31" } });
+  } finally {
+    restore();
+  }
+});
+
+test("transition: a configured state with no reachable transition from the current status — logs and resolves, never throws", async () => {
+  const { calls, restore } = mockFetch([
+    {}, // label PUT
+    { body: { transitions: [{ id: "41", to: { name: "Done" } }] } }, // "In Review" isn't reachable from here
+  ]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    await assert.doesNotReject(() => provider.transition(ISSUE, "review"));
+    assert.equal(calls.length, 2, "no POST attempted when nothing matches");
+  } finally {
+    restore();
+  }
+});
+
+test("transition: the transitions GET itself fails — logs and resolves, the label update already succeeded", async () => {
+  const { calls, restore } = mockFetch([{}, { status: 500, body: { errorMessages: ["boom"] } }]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    await assert.doesNotReject(() => provider.transition(ISSUE, "review"));
+    assert.equal(calls.length, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("transition: with no status_map configured at all (the default), behaves exactly as before — labels PUT only", async () => {
+  const { calls, restore } = mockFetch([{}]);
+  try {
+    const provider = makeProvider(); // default statusMap = {}
+    await provider.transition(ISSUE, "review");
+    assert.equal(calls.length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("claim: a successful claim also syncs status when status_map configures the target state", async () => {
+  const readyIssue = { id: "PROJ-2", title: "x", body: "", labels: ["spf:ready"] };
+  const { calls, restore } = mockFetch([
+    {}, // label PUT (ready -> working)
+    { body: { fields: { summary: "x", description: null, labels: ["spf:working"] } } }, // re-fetch to confirm the claim
+    { body: { transitions: [{ id: "21", to: { name: "In Progress" } }] } }, // status sync's transitions GET
+    {}, // status sync's transition POST
+  ]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    const claimed = await provider.claim(readyIssue);
+    assert.equal(claimed, true);
+    assert.equal(calls.length, 4, "claim's own 2 calls, then syncStatus's 2");
+    assert.equal(calls[3]!.method, "POST");
+    assert.deepEqual(calls[3]!.body, { transition: { id: "21" } });
+  } finally {
+    restore();
+  }
+});
+
+test("claim: a LOST race (revert path) never attempts a status sync", async () => {
+  const readyIssue = { id: "PROJ-3", title: "x", body: "", labels: ["spf:ready"] };
+  const { calls, restore } = mockFetch([
+    {}, // label PUT (ready -> working)
+    { body: { fields: { summary: "x", description: null, labels: ["spf:ready"] } } }, // someone else already claimed it
+    {}, // revert PUT
+  ]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    const claimed = await provider.claim(readyIssue);
+    assert.equal(claimed, false);
+    assert.equal(calls.length, 3, "no 4th call — a lost claim must never touch Jira status");
+  } finally {
+    restore();
+  }
+});
+
+// ── validateStatusMap ────────────────────────────────────────────────────
+
+test("validateStatusMap: every configured state matches a real status somewhere in the project", async () => {
+  const { calls, restore } = mockFetch([
+    { body: [{ statuses: [{ name: "To Do" }, { name: "In Progress" }, { name: "In Review" }, { name: "Done" }] }] },
+  ]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    const checks = await provider.validateStatusMap();
+
+    assert.match(calls[0]!.url, /\/rest\/api\/3\/project\/PROJ\/statuses$/);
+    assert.equal(calls[0]!.method, "GET");
+    assert.ok(checks.every((c) => c.exists));
+    assert.deepEqual(
+      checks.map((c) => c.state).sort(),
+      ["review", "working"],
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("validateStatusMap: a project missing one configured status reports that one, and only that one, as missing", async () => {
+  const { restore } = mockFetch([{ body: [{ statuses: [{ name: "To Do" }, { name: "In Progress" }, { name: "Done" }] }] }]); // no "In Review"
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, STATUS_MAP);
+    const checks = await provider.validateStatusMap();
+
+    const review = checks.find((c) => c.state === "review")!;
+    assert.equal(review.exists, false);
+    assert.equal(review.jiraStatus, "In Review");
+    assert.ok(checks.filter((c) => c.state !== "review").every((c) => c.exists));
+  } finally {
+    restore();
+  }
+});
+
+test("validateStatusMap: unconfigured states are omitted entirely, not reported as missing", async () => {
+  const { restore } = mockFetch([{ body: [{ statuses: [{ name: "To Do" }] }] }]);
+  try {
+    const provider = makeProvider(DEFAULT_ISSUE_TYPES, { working: "In Progress" }); // only one of the six states set
+    const checks = await provider.validateStatusMap();
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0]!.state, "working");
+  } finally {
+    restore();
+  }
+});
+
+test("validateStatusMap: an empty status_map (the default) reports nothing at all", async () => {
+  const { restore } = mockFetch([{ body: [{ statuses: [{ name: "To Do" }] }] }]);
+  try {
+    const provider = makeProvider(); // default statusMap = {}
+    const checks = await provider.validateStatusMap();
+    assert.deepEqual(checks, []);
   } finally {
     restore();
   }

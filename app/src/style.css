@@ -1,26 +1,86 @@
+/* ─── The Timetable · tokens ────────────────────────────────────────────────
+   Two artifacts, one grid. The sessions list is the printed timetable (paper:
+   warm off-white, ink, rail-red wayfinding, ballpoint for live annotation).
+   The session trace is the departure board (near-black, bone, board amber).
+   Color is signal: outside each surface's single accent, hue only ever means
+   data — green passed, red failed, amber live. No gradients, no glow, no blur;
+   depth comes from hairline rules and tabular alignment. */
+
 :root {
-  --bg: #06080f;
-  --panel: #0d1119;
-  --panel-2: #131a26;
-  --panel-3: #0a0e16;
-  --border: #232c3d;
-  --border-soft: #222b3d;
-  --text: #f2f5fa;
-  --dim: #aabdd5;
-  --faint: #8b9cb6;
-  --green: #4ade80;
-  --red: #ff6f67;
-  --blue: #6cb6ff;
-  --amber: #e8b64a;
-  --purple: #c89bff;
-  --cyan: #5ad2dd;
-  --violet: #94a3ff;
-  /* Play carries the UI voice; mono is reserved for data (ids, times, code). */
-  --sans: 'Play', 'Helvetica Neue', system-ui, sans-serif;
-  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Mono',
-    'Roboto Mono', monospace;
-  /* Surface gradient shared by cards and panels — one recipe, everywhere. */
-  --surface: linear-gradient(180deg, #10141f 0%, #0b0f18 100%);
+  /* Overpass carries the UI voice (signage lineage); Overpass Mono is the data
+     voice — ids, times, counts, code. Never prose. */
+  --sans:
+    'Overpass', system-ui, 'Helvetica Neue', Arial, sans-serif;
+  --mono:
+    'Overpass Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco,
+    'Cascadia Mono', 'Roboto Mono', monospace;
+
+  /* ── paper scale (sessions list) ── */
+  --paper: #f6f3ec;
+  --paper-raised: #fcfaf4;
+  --paper-sunk: #ede8db;
+  --ink: #211e14;
+  --ink-dim: #5f5948; /* 6.2:1 on paper — secondary text */
+  --ink-faint: #76705e; /* exactly ~4.5:1 on paper — meta text floor */
+  --paper-rule: #d8d2c0;
+  --paper-rule-soft: #e6e1d0;
+
+  /* ── board scale (session trace) ── */
+  --board: #141311;
+  --board-raised: #1e1c17;
+  --board-sunk: #0c0b09;
+  --bone: #efe8d4; /* 15:1 on board */
+  --bone-dim: #96907c; /* 6.1:1 on board */
+  --bone-faint: #857f6a; /* ~4.9:1 on board */
+  --board-rule: #37342b;
+  --board-rule-soft: #2a2820;
+
+  /* ── accents: one per artifact, and they don't travel ── */
+  --rail-red: #da291c; /* paper wayfinding — SBB/DB signage lineage */
+  --ballpoint: #2545a8; /* live annotation on paper (7.6:1) */
+  --amber: #e8b64a; /* board-live (inherited anchor, 10:1 on board) */
+
+  /* ── signal colors: data, never decoration. Paper uses print-ink variants;
+     the bright originals only survive contrast on the dark board. ── */
+  --pass-paper: #1e7a3c;
+  --fail-paper: #b3261e;
+  --pass-board: #4ade80;
+  --fail-board: #ff6f67;
+
+  /* Square language: printed cells and strip bays. */
+  --radius: 2px;
+}
+
+/* Semantic layer — components bind to these, never to the raw scales. The
+   body class is the route's artifact: paper by default, board on a trace. */
+body {
+  --ground: var(--paper);
+  --face: var(--paper-raised);
+  --inset: var(--paper-sunk);
+  --fg: var(--ink);
+  --dim: var(--ink-dim);
+  --faint: var(--ink-faint);
+  --rule: var(--paper-rule);
+  --rule-soft: var(--paper-rule-soft);
+  --accent: var(--rail-red);
+  --live: var(--ballpoint);
+  --pass: var(--pass-paper);
+  --fail: var(--fail-paper);
+}
+
+body.board {
+  --ground: var(--board);
+  --face: var(--board-raised);
+  --inset: var(--board-sunk);
+  --fg: var(--bone);
+  --dim: var(--bone-dim);
+  --faint: var(--bone-faint);
+  --rule: var(--board-rule);
+  --rule-soft: var(--board-rule-soft);
+  --accent: var(--amber);
+  --live: var(--amber);
+  --pass: var(--pass-board);
+  --fail: var(--fail-board);
 }
 
 * {
@@ -34,62 +94,123 @@ body {
 }
 
 body {
-  /* Deep space with a faint violet/cyan aurora — fixed so scrolling glides over it. */
-  background:
-    radial-gradient(1100px 700px at 8% -10%, rgba(148, 163, 255, 0.09), transparent 62%),
-    radial-gradient(1000px 720px at 102% 108%, rgba(90, 210, 221, 0.07), transparent 60%),
-    linear-gradient(180deg, #06080f 0%, #090d17 100%);
-  background-attachment: fixed;
-  color: var(--text);
+  background: var(--paper);
+  color: var(--ink);
   font-family: var(--sans);
   /* Readability floor: nothing in the app renders below 16px. */
   font-size: 16px;
   line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+
+body.board {
+  background: var(--board);
+  color: var(--bone);
 }
 
 #app {
   min-height: 100vh;
 }
 
+/* Browser surfaces carry the design too. */
+::selection {
+  background: #f3d8d4; /* rail-red wash */
+  color: var(--ink);
+}
+
+body.board ::selection {
+  background: var(--amber);
+  color: var(--board);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border: 3px solid var(--ground);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 a {
-  color: var(--blue);
+  color: var(--ballpoint);
   text-decoration: none;
+}
+
+body.board a {
+  color: var(--amber);
 }
 
 pre {
   margin: 0;
   padding: 12px 14px;
-  background: var(--panel-3);
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
+  background: var(--inset);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
   overflow-x: auto;
   font-family: var(--mono);
   font-size: 16px;
   line-height: 1.55;
-  color: #cfdded;
+  color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* JSON token colors — spans emitted by lib/highlight.ts */
-.j-key {
-  color: var(--purple);
+/* JSON token colors — spans emitted by lib/highlight.ts. Hue is categorical
+   data here: numbers in the surface's live accent, structure dimmed. */
+body.board .j-key {
+  color: var(--bone-dim);
 }
 
+body.board .j-str {
+  color: var(--bone);
+}
+
+body.board .j-num {
+  color: var(--amber);
+}
+
+body.board .j-bool {
+  color: #d6cdae;
+  font-style: italic;
+}
+
+body.board .j-null {
+  color: var(--fail);
+}
+
+.j-key,
 .j-str {
-  color: var(--green);
+  color: var(--ink-dim);
 }
 
 .j-num {
+  color: var(--ballpoint);
+}
+
+body.board .j-num {
   color: var(--amber);
 }
 
 .j-bool {
-  color: var(--cyan);
+  color: var(--ink-dim);
+  font-style: italic;
 }
 
 .j-null {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .dim {
@@ -103,15 +224,15 @@ pre {
 .error-bar {
   margin: 12px 24px;
   padding: 10px 14px;
-  border: 1px solid rgba(255, 111, 103, 0.5);
-  background: rgba(255, 111, 103, 0.1);
-  color: var(--red);
-  border-radius: 8px;
+  border: 1px solid var(--fail);
+  background: var(--face);
+  color: var(--fail);
+  border-radius: var(--radius);
   font-size: 16px;
 }
 
 .empty-state {
-  padding: 56px 24px;
+  padding: 72px 24px;
   text-align: center;
   color: var(--dim);
   font-size: 16px;
@@ -122,7 +243,7 @@ pre {
 .md {
   font-size: 16px;
   line-height: 1.6;
-  color: var(--text);
+  color: var(--fg);
 }
 
 .md h1 {
@@ -153,10 +274,11 @@ pre {
 }
 
 .md code {
-  background: var(--panel-2);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
+  background: var(--inset);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
   padding: 1px 7px;
+  font-family: var(--mono);
   font-size: 16px;
 }
 
@@ -169,6 +291,7 @@ pre {
   background: transparent;
   border: none;
   padding: 0;
+  font-size: 16px;
 }
 
 .md ul,
@@ -183,16 +306,27 @@ pre {
 
 .md blockquote {
   margin: 10px 0;
-  padding: 4px 0 4px 14px;
-  border-left: 3px solid var(--border);
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--rule);
   color: var(--dim);
   white-space: pre-wrap;
 }
 
 .md hr {
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--rule);
   margin: 14px 0;
+}
+
+/* Board grammar: state changes flip. The paper never plays these — motion on
+   paper is banned by the world; components gate usage by artifact. */
+@keyframes flap-in {
+  from {
+    transform: rotateX(86deg);
+  }
+  to {
+    transform: rotateX(0deg);
+  }
 }
 
 @keyframes pulse {
@@ -202,5 +336,15 @@ pre {
   }
   50% {
     opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
