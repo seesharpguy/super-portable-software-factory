@@ -13,20 +13,28 @@ const ICONS: Record<string, unknown> = {
 
 <template>
   <span class="chip" :class="status">
-    <component :is="ICONS[status] ?? Circle" class="chip-icon" :size="18" :stroke-width="2.5" />
-    {{ status }}
+    <component :is="ICONS[status] ?? Circle" class="chip-icon" :size="16" :stroke-width="2.5" />
+    <!-- Keyed so a status change re-mounts the word — on the board that plays
+         the split-flap. Vue remounts on key change; the paper lists never
+         render this chip, so the flap only ever plays in board grammar. -->
+    <span class="chip-label" :key="status">{{ status }}</span>
   </span>
 </template>
 
 <style scoped>
+/* A square timetable cell, not a pill. Signal colors come from the semantic
+   tokens, so the same markup reads as print ink on paper and as lamp-lit
+   verdict on the board. */
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 3px 13px 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: transparent;
   font-size: 16px;
+  font-weight: 600;
   color: var(--dim);
   white-space: nowrap;
 }
@@ -35,28 +43,31 @@ const ICONS: Record<string, unknown> = {
   flex: none;
 }
 
+.chip-label {
+  display: inline-block;
+  transform-origin: 50% 65%;
+}
+
+body.board .chip-label {
+  animation: flap-in 260ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
 .chip.success {
-  color: var(--green);
-  border-color: rgba(74, 222, 128, 0.45);
-  background: rgba(74, 222, 128, 0.09);
-  box-shadow: 0 0 12px rgba(74, 222, 128, 0.12);
+  color: var(--pass);
+  border-color: var(--pass);
 }
 
 .chip.fail {
-  color: var(--red);
-  border-color: rgba(255, 111, 103, 0.45);
-  background: rgba(255, 111, 103, 0.09);
-  box-shadow: 0 0 12px rgba(255, 111, 103, 0.12);
+  color: var(--fail);
+  border-color: var(--fail);
 }
 
 .chip.running {
-  color: var(--blue);
-  border-color: rgba(108, 182, 255, 0.45);
-  background: rgba(108, 182, 255, 0.09);
-  box-shadow: 0 0 12px rgba(108, 182, 255, 0.18);
+  color: var(--live);
+  border-color: var(--live);
 }
 
-.chip.running .chip-icon {
+body.board .chip.running .chip-icon {
   animation: spin 1.1s linear infinite;
 }
 
@@ -67,7 +78,7 @@ const ICONS: Record<string, unknown> = {
 }
 
 .chip.queued {
-  color: var(--dim);
+  color: var(--faint);
   border-style: dashed;
 }
 </style>

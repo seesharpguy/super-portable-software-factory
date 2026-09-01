@@ -32,11 +32,18 @@
  * machine, and README/config.md doc growth to match — 675.2kB packed /
  * 1962.2kB unpacked, 195 files: ≤710 KB packed, ≤2.06 MB unpacked — ~5%
  * headroom, same rationale as every prior raise.
+ *
+ * Raised again for the Timetable UI (#59): the app replaces Play's two
+ * woff2 files with the self-hosted Overpass family (five: sans 400/600/700
+ * + mono 400/700) and adds DESIGN.md/PRODUCT.md + the design sidecar —
+ * re-measured at 719.5kB packed / 2011.7kB unpacked, 198 files: ≤755 KB
+ * packed, ≤2.06 MB unpacked — ~5% headroom on the packed side, unpacked
+ * unchanged (headroom there grew).
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 710_000;
+const PACKED_BUDGET = 755_000;
 const UNPACKED_BUDGET = 2_060_000;
 
 const root = path.resolve(import.meta.dirname, "..");

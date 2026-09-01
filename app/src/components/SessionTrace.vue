@@ -15,7 +15,7 @@ import { Bot, SquareTerminal, UserRound } from 'lucide-vue-next'
 import { fetchEnvelopes, fetchEvents, fetchGates, fetchSession } from '../lib/api'
 import { axisTicks, fmtDate, payloadOk, ts } from '../lib/format'
 import { modelIcon, modelName } from '../lib/models'
-import { agentColor, hexAlpha, parseAgentStart } from '../lib/events'
+import { parseAgentStart } from '../lib/events'
 import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
@@ -98,21 +98,20 @@ watchEffect(() => {
 })
 
 // ── Lanes ────────────────────────────────────────────────────────────────────
-
-const ENGINEER_COLOR = '#e8b64a'
-const CODE_COLOR = '#5ad2dd'
+// Lanes are tracks: identified by number and name, never by color. Hue on the
+// board means state (amber live, red failed), not actor.
 
 const KIND_ICONS = { engineer: UserRound, code: SquareTerminal, agent: Bot }
 
 interface Lane {
   id: string
+  track: string
   label: string
   /** Model driving this lane's agent — rendered with its provider icon. */
   model: string | null
   /** Context-window occupancy, or null while unknown (running / old db). */
   context: LaneContext | null
   metaLines: string[]
-  color: string
   kind: PhaseKind
   phases: Phase[]
 }
@@ -140,13 +139,17 @@ function contextLabel(ctx: LaneContext): string {
 
 /** Keep a non-zero fill visible — the exact numbers ride in the label and title. */
 function contextFill(ctx: LaneContext): string {
-  return `${Math.max(ctx.pct, 2)}%`
+  return `scaleX(${Math.max(ctx.pct, 2) / 100})`
+}
+
+function laneRunning(lane: Lane): boolean {
+  return lane.phases.some((p) => p.status === 'running')
 }
 
 const NUM = new Intl.NumberFormat('en-US')
 
-// A live agent's model/thinking/color arrive on its agent_start event before
-// any agent_sessions row exists; attribute each start to its phase's owner.
+// A live agent's model/thinking arrive on its agent_start event before any
+// agent_sessions row exists; attribute each start to its phase's owner.
 const ownerStart = computed<Record<string, AgentStartPayload>>(() => {
   const ownerByPhase = new Map<string, string | null>(
     phases.value.map((p) => [p.phase_id, p.owner]),
@@ -172,11 +175,11 @@ const lanes = computed<Lane[]>(() => {
   const out: Lane[] = [
     {
       id: 'engineer',
+      track: '',
       label: session.value?.engineer ?? 'engineer',
       model: null,
       context: null,
       metaLines: ['engineer'],
-      color: ENGINEER_COLOR,
       kind: 'engineer' as const,
       phases: ph.filter((p) => p.kind === 'engineer'),
     },
@@ -184,31 +187,35 @@ const lanes = computed<Lane[]>(() => {
   if (codePhases.length) {
     out.push({
       id: 'code',
+      track: '',
       label: 'code',
       model: null,
       context: null,
       metaLines: ['workspace'],
-      color: CODE_COLOR,
       kind: 'code' as const,
       phases: codePhases,
     })
   }
-  for (const [i, owner] of agentOwners.entries()) {
+  for (const owner of agentOwners) {
     const info = agents.value.find((a) => a.agent === owner)
     const start = ownerStart.value[owner]
     out.push({
       id: `agent:${owner}`,
+      track: '',
       label: owner,
       // The model is the lane's whole story; thinking level lives in the
       // phase detail's agent config section.
       model: info?.model ?? start?.model ?? null,
       context: laneContext(info),
       metaLines: [],
-      color: agentColor(info?.color, start?.color, i),
       kind: 'agent' as const,
       phases: ph.filter((p) => p.kind === 'agent' && p.owner === owner),
     })
   }
+  // Track numbers 01.. stay stable for the session's life.
+  out.forEach((lane, i) => {
+    lane.track = String(i + 1).padStart(2, '0')
+  })
   return out
 })
 
@@ -243,7 +250,9 @@ const range = computed(() => {
 // The engineer's request opens the run and owns the start of the timeline: it
 // gets an exclusive leading zone, and every later phase maps into the rest —
 // nothing can render on top of it.
-const REQ_ZONE_PCT = 16
+// Wide enough that the request block carries its full name at desktop widths
+// — anything narrower amputates the word ("re…"), and amputation is noise.
+const REQ_ZONE_PCT = 24
 
 const requestPhase = computed(
   () => phases.value.find((p) => p.kind === 'engineer' && p.started_at) ?? null,
@@ -347,16 +356,11 @@ function blockGeom(p: Phase): { left: string; width: string } | null {
   return { left: `${geom.left}%`, width: `${geom.width}%` }
 }
 
-function blockStyle(p: Phase, lane: Lane): Record<string, string> | undefined {
+/** Geometry only — color is status, carried by classes. */
+function blockStyle(p: Phase): Record<string, string> | undefined {
   const geom = blockGeom(p)
   if (!geom) return undefined
-  return {
-    left: geom.left,
-    width: geom.width,
-    background: `linear-gradient(180deg, ${hexAlpha(lane.color, 0.2)}, ${hexAlpha(lane.color, 0.05)})`,
-    borderColor: p.status === 'fail' ? 'rgba(255, 111, 103, 0.8)' : hexAlpha(lane.color, 0.55),
-    '--lane-glow': hexAlpha(lane.color, 0.28),
-  }
+  return { left: geom.left, width: geom.width }
 }
 
 function blockDurationMs(p: Phase): number {
@@ -433,7 +437,7 @@ function selectPhase(p: Phase) {
     <div v-if="session" class="run-strip">
       <span class="request" :title="session.request ?? ''">{{ session.request }}</span>
       <StatusChip :status="session.status ?? 'fail'" />
-      <span class="dim">started {{ fmtDate(session.started_at) }}</span>
+      <span class="dim mono">departed {{ fmtDate(session.started_at) }}</span>
       <span class="run-stats">
         <StatChip kind="cost" :value="session.total_cost" />
         <StatChip kind="runtime" :value="sessionDurationMs" />
@@ -460,8 +464,9 @@ function selectPhase(p: Phase) {
 
       <div v-for="lane in lanes" :key="lane.id" class="row lane" :class="`kind-${lane.kind}`">
         <div class="label">
-          <span class="lane-name" :style="{ color: lane.color }">
-            <component :is="KIND_ICONS[lane.kind]" class="lane-icon" :size="22" :stroke-width="2" />
+          <span class="lane-name">
+            <span class="tno mono">{{ lane.track }}</span>
+            <component :is="KIND_ICONS[lane.kind]" class="lane-icon" :size="19" :stroke-width="2" />
             {{ lane.label }}
           </span>
           <span v-if="lane.model" class="lane-meta lane-model" :title="lane.model">
@@ -480,11 +485,8 @@ function selectPhase(p: Phase) {
             <span class="ctx-bar">
               <span
                 class="ctx-fill"
-                :style="{
-                  width: contextFill(lane.context),
-                  background: `linear-gradient(90deg, ${hexAlpha(lane.color, 0.55)}, ${lane.color})`,
-                  boxShadow: `0 0 10px ${hexAlpha(lane.color, 0.45)}`,
-                }"
+                :class="{ live: laneRunning(lane) }"
+                :style="{ width: contextFill(lane.context) }"
               />
             </span>
           </span>
@@ -498,12 +500,14 @@ function selectPhase(p: Phase) {
               v-if="blockGeom(p)"
               class="block"
               :class="[p.status, { selected: p.phase_id === phaseId }]"
-              :style="blockStyle(p, lane)"
+              :style="blockStyle(p)"
               :title="`${p.name} — ${p.status}${p.description ? `\n${p.description}` : ''}`"
               @click="selectPhase(p)"
             >
               <span class="b-top">
-                <span class="b-status" :class="p.status">{{
+                <!-- The glyph is keyed on status: when the poll flips it, the
+                     remount plays the split-flap. -->
+                <span class="flap b-status" :class="p.status" :key="p.status ?? ''">{{
                   STATUS_GLYPH[p.status ?? ''] ?? '○'
                 }}</span>
                 <span class="b-name">{{ p.name }}</span>
@@ -535,7 +539,7 @@ function selectPhase(p: Phase) {
             @click="selectPhase(p)"
           >
             <span class="b-top">
-              <span class="b-status queued">○</span>
+              <span class="flap b-status queued">○</span>
               <span class="b-name">{{ p.name }}</span>
             </span>
             <span class="b-desc">queued</span>
@@ -562,18 +566,20 @@ function selectPhase(p: Phase) {
   padding: 0 0 40px;
 }
 
+/* The board's header strip: the route this run is taking. */
 .run-strip {
   display: flex;
   align-items: center;
   gap: 18px;
-  padding: 14px 24px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--rule);
   flex-wrap: wrap;
 }
 
 .run-strip .request {
   font-size: 17px;
-  color: var(--text);
+  font-weight: 600;
+  color: var(--fg);
   max-width: 52ch;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -582,30 +588,31 @@ function selectPhase(p: Phase) {
 
 .run-stats {
   display: inline-flex;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
+/* The board itself: squared corners, hairline frame, one material. */
 .waterfall {
   margin: 20px 28px;
-  border: 1px solid var(--border-soft);
-  border-radius: 16px;
-  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--face);
   overflow: hidden;
 }
 
 .row {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 250px 1fr;
 }
 
 .axis-row {
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-2);
+  border-bottom: 1px solid var(--rule);
+  background: var(--inset);
 }
 
 .axis-row .track {
-  height: 40px;
+  height: 38px;
   overflow: hidden;
 }
 
@@ -618,16 +625,20 @@ function selectPhase(p: Phase) {
   align-items: center;
   justify-content: center;
   font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--amber);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--rule);
 }
 
 .axis-label {
   position: absolute;
-  bottom: 7px;
+  bottom: 6px;
   transform: translateX(-50%);
   font-family: var(--mono);
   font-size: 16px;
+  font-variant-numeric: tabular-nums;
   color: var(--dim);
   white-space: nowrap;
 }
@@ -637,8 +648,8 @@ function selectPhase(p: Phase) {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
-  border-right: 1px solid var(--border);
+  gap: 3px;
+  border-right: 1px solid var(--rule);
   overflow: hidden;
   white-space: nowrap;
 }
@@ -649,13 +660,23 @@ function selectPhase(p: Phase) {
   gap: 8px;
   font-size: 17px;
   font-weight: 700;
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* The track number is the lane's identity — attribution by position and name,
+   the way a board works, instead of by hue. */
+.tno {
+  flex: none;
+  width: 26px;
+  color: var(--faint);
+  font-size: 16px;
+}
+
 .lane-icon {
   flex: none;
-  opacity: 0.85;
+  color: var(--dim);
 }
 
 .lane-meta {
@@ -673,8 +694,8 @@ function selectPhase(p: Phase) {
 }
 
 .model-icon {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
   flex: none;
   object-fit: contain;
 }
@@ -696,35 +717,42 @@ function selectPhase(p: Phase) {
 }
 
 .ctx-label {
-  font-size: 14px;
-  letter-spacing: 0.06em;
+  font-size: 16px;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--faint);
 }
 
 .ctx-pct {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
   color: var(--dim);
 }
 
 .ctx-bar {
   height: 6px;
-  border-radius: 999px;
-  background: rgba(6, 8, 15, 0.75);
-  border: 1px solid var(--border-soft);
+  background: var(--inset);
+  border: 1px solid var(--rule-soft);
   overflow: hidden;
 }
 
 .ctx-fill {
   display: block;
+  width: 100%;
   height: 100%;
-  border-radius: 999px;
-  transition: width 300ms ease;
+  background: var(--faint);
+  transform-origin: left center;
+  transition: transform 300ms ease;
+}
+
+/* Amber fills only while the lane is live. */
+.ctx-fill.live {
+  background: var(--amber);
 }
 
 .lane {
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--rule-soft);
 }
 
 .lane:last-child {
@@ -741,16 +769,18 @@ function selectPhase(p: Phase) {
   position: absolute;
   top: 0;
   bottom: 0;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--rule);
 }
 
 .gridline {
   position: absolute;
   top: 0;
   bottom: 0;
-  border-left: 1px dashed rgba(174, 191, 212, 0.14);
+  border-left: 1px dashed rgba(239, 232, 212, 0.08);
 }
 
+/* A phase strip: square bay, hairline frame, bone lettering. Hue belongs to
+   the state — amber live, red failed — never to the lane. */
 .block {
   position: absolute;
   top: 13px;
@@ -760,19 +790,23 @@ function selectPhase(p: Phase) {
   justify-content: flex-start;
   gap: 4px;
   padding: 10px 12px 16px;
-  border-radius: 10px;
-  border: 1px solid;
+  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  background: var(--face);
   font-size: 16px;
-  color: var(--text);
+  color: var(--fg);
   cursor: pointer;
   overflow: hidden;
   white-space: nowrap;
   text-align: left;
-  transition: box-shadow 0.16s ease;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
 }
 
 .block:hover {
-  box-shadow: 0 0 18px var(--lane-glow, rgba(108, 182, 255, 0.2));
+  border-color: var(--dim);
+  background: #242119;
 }
 
 .b-top {
@@ -782,22 +816,32 @@ function selectPhase(p: Phase) {
   min-width: 0;
 }
 
+.flap {
+  display: inline-block;
+  transform-origin: 50% 65%;
+  animation: flap-in 280ms cubic-bezier(0.2, 0.7, 0.3, 1), ;
+}
+
 .b-status {
   flex: none;
   font-size: 16px;
+  /* Baseline alignment makes glyphs kiss the name — the padding is the flap. */
+  padding-right: 8px;
 }
 
 .b-status.success {
-  color: var(--green);
+  color: var(--pass);
 }
 
 .b-status.fail {
-  color: var(--red);
+  color: var(--fail);
 }
 
 .b-status.running {
-  color: var(--blue);
-  animation: pulse 1.2s ease-in-out infinite;
+  color: var(--amber);
+  animation:
+    flap-in 280ms cubic-bezier(0.2, 0.7, 0.3, 1),
+    pulse 1.6s ease-in-out 340ms infinite;
 }
 
 .b-status.queued {
@@ -825,20 +869,26 @@ function selectPhase(p: Phase) {
 }
 
 .block.running {
-  animation: pulse 1.6s ease-in-out infinite;
+  border-color: var(--amber);
+}
+
+.block.running .b-name {
+  color: var(--amber);
+}
+
+.block.fail {
+  border-color: var(--fail);
 }
 
 .block.queued {
   background: transparent;
   border-style: dashed;
-  border-color: var(--faint);
   color: var(--dim);
 }
 
 .block.selected {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
-  box-shadow: 0 0 22px var(--lane-glow, rgba(108, 182, 255, 0.25));
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .tool-tick {
@@ -846,13 +896,28 @@ function selectPhase(p: Phase) {
   bottom: 4px;
   width: 3px;
   height: 9px;
-  background: currentColor;
-  opacity: 0.55;
-  border-radius: 1px;
+  background: var(--faint);
+  border-radius: 0;
 }
 
 .tool-tick.err {
-  background: var(--red);
-  opacity: 1;
+  background: var(--fail);
+}
+
+/* On narrow glass the board pans instead of compressing — a wide board keeps
+   its whole track width and the viewer scrolls it, like walking down the wall. */
+@media (max-width: 980px) {
+  .run-strip {
+    padding: 12px 16px;
+  }
+
+  .waterfall {
+    margin: 16px;
+    overflow-x: auto;
+  }
+
+  .waterfall .row {
+    min-width: 700px;
+  }
 }
 </style>
