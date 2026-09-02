@@ -835,8 +835,122 @@ export const OTelConfigSchema = v.object({
 });
 export type OTelConfig = v.InferOutput<typeof OTelConfigSchema>;
 
+/**
+ * MIGRATION NOTE (BT-issue #66, PR 1 of 3): `observability.db` used to be
+ * ONLY a bare string (a local sqlite path, defaulting to
+ * ".spf/data/spf.db"). This is now a discriminated shape that additionally
+ * accepts an explicit `{ kind: "sqlite", path? }` object (equivalent to the
+ * string form, just spelled out) and a new `{ kind: "d1", database_id, ... }`
+ * object that names a remote Cloudflare D1 database instead of a local
+ * file. The bare-string form is unchanged and remains the default for every
+ * existing config — nothing in the wild needs to change. `resolveObservabilityDb`
+ * below normalizes all three accepted forms to one shape; PR 2 builds the
+ * actual D1 `Database` adapter against that normalized shape, and PR 3 wires
+ * `spf doctor`/`spf init`'s interview flow to the new option. This PR only
+ * adds the schema + normalizer + `paths.resolveDataPaths` plumbing — no D1
+ * adapter exists yet, so a `kind: "d1"` config parses and normalizes fine
+ * but `resolveDataPaths` itself still refuses to resolve a usable local
+ * `db_path` for it (see that function's doc comment in `core/paths.ts`).
+ */
+export const SqliteDbConfigSchema = v.object({
+  kind: v.literal("sqlite"),
+  path: v.optional(v.string(), ".spf/data/spf.db"),
+});
+export type SqliteDbConfig = v.InferOutput<typeof SqliteDbConfigSchema>;
+
+/**
+ * `account_id_env`/`api_token_env` default to the SAME env var names
+ * `core/cloudflare_provider.ts` already reads for the Cloudflare Workers AI
+ * provider (`CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN`, see
+ * `core/providers.ts`'s `PROVIDER_ENV_KEYS.cloudflare`) — one Cloudflare
+ * account's credentials, read from the same two env vars, cover both
+ * Workers AI and a D1-backed trace db unless a config explicitly points
+ * elsewhere (e.g. a second Cloudflare account) by naming different env vars.
+ */
+export const D1DbConfigSchema = v.object({
+  kind: v.literal("d1"),
+  database_id: v.string(),
+  account_id_env: v.optional(v.string(), "CLOUDFLARE_ACCOUNT_ID"),
+  api_token_env: v.optional(v.string(), "CLOUDFLARE_API_TOKEN"),
+});
+export type D1DbConfig = v.InferOutput<typeof D1DbConfigSchema>;
+
+/**
+ * A plain `v.union([v.string(), v.variant("kind", [...])])` was tried first
+ * and rejected: valibot's plain union reports every failed branch with the
+ * same generic "Expected (string | Object) but received Object", swallowing
+ * `v.variant`'s own precise "kind must be sqlite or d1" / "database_id is
+ * required" messages. This `rawTransform` dispatches on `typeof value`
+ * itself — string passes through unchanged (the back-compat form), anything
+ * else is handed to `v.variant("kind", ...)` and ITS issues (which already
+ * name the offending field) are re-surfaced verbatim, prefixed with
+ * `observability.db:` so a nested failure is still easy to place in a large
+ * config file. See `src/test/data_types.test.ts` for the exact messages
+ * this produces for each rejected shape.
+ */
+const ObservabilityDbVariantSchema = v.variant("kind", [SqliteDbConfigSchema, D1DbConfigSchema]);
+export const ObservabilityDbSchema = v.pipe(
+  v.unknown(),
+  v.rawTransform<unknown, string | SqliteDbConfig | D1DbConfig>(({ dataset, addIssue, NEVER }) => {
+    const value = dataset.value;
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const result = v.safeParse(ObservabilityDbVariantSchema, value);
+      if (result.success) return result.output;
+      for (const issue of result.issues) addIssue({ message: `observability.db: ${issue.message}` });
+      return NEVER;
+    }
+    addIssue({
+      message: `observability.db must be a string path, or an object with kind: "sqlite" or kind: "d1" (got ${JSON.stringify(value)})`,
+    });
+    return NEVER;
+  }),
+);
+export type ObservabilityDbConfig = v.InferOutput<typeof ObservabilityDbSchema>;
+
+/**
+ * What `resolveObservabilityDb` ACCEPTS — deliberately more permissive than
+ * `ObservabilityDbConfig` (that type is the schema's OUTPUT, post-default,
+ * so every optional field reads as required). This is the pre-default INPUT
+ * shape — `path`/`account_id_env`/`api_token_env` all optional, exactly
+ * what a hand-written `{kind:"sqlite"}` or `{kind:"d1", database_id:"..."}`
+ * literal looks like before `v.parse` fills its defaults in. An already-
+ * parsed `ObservabilityDbConfig` (every optional field present) satisfies
+ * this too, so the one normalizer works on config fresh off `v.parse` AND
+ * on a literal built by hand (e.g. in a test, or by a future caller that
+ * hasn't gone through the schema).
+ */
+export type ObservabilityDbInput =
+  | string
+  | { kind: "sqlite"; path?: string }
+  | { kind: "d1"; database_id: string; account_id_env?: string; api_token_env?: string };
+
+/** What `resolveObservabilityDb` normalizes any of the three accepted `db:` forms to. PR 2's D1 adapter is built against this shape. */
+export type NormalizedObservabilityDb =
+  | { kind: "sqlite"; path: string }
+  | { kind: "d1"; database_id: string; account_id_env: string; api_token_env: string };
+
+/**
+ * Normalizes `observability.db` — bare string, `{kind:"sqlite",...}`, or
+ * `{kind:"d1",...}` — to one shape. Pure and side-effect-free: does NOT
+ * resolve `path` to an absolute path (that's `paths.resolveDataPaths`'s job,
+ * which needs `repo_root` to do it) and does NOT read the D1 env vars it
+ * names (that's PR 2's adapter's job, at the point it actually needs to
+ * authenticate).
+ */
+export function resolveObservabilityDb(db: ObservabilityDbInput): NormalizedObservabilityDb {
+  if (typeof db === "string") return { kind: "sqlite", path: db };
+  if (db.kind === "sqlite") return { kind: "sqlite", path: db.path ?? ".spf/data/spf.db" };
+  return {
+    kind: "d1",
+    database_id: db.database_id,
+    account_id_env: db.account_id_env ?? "CLOUDFLARE_ACCOUNT_ID",
+    api_token_env: db.api_token_env ?? "CLOUDFLARE_API_TOKEN",
+  };
+}
+
 export const ObservabilityConfigSchema = v.object({
-  db: v.optional(v.string(), ".spf/data/spf.db"),
+  db: v.optional(ObservabilityDbSchema, ".spf/data/spf.db"),
   poll_ms: v.optional(v.number(), 500),
   // Absent by default. `agents.ts`'s mergeRawConfig spreads `observability`
   // field-by-field, so this nested object merges as a WHOLE-OBJECT replace on
@@ -844,6 +958,14 @@ export const ObservabilityConfigSchema = v.object({
   // which is the semantics you want for an endpoint + its headers (a
   // half-merged pair of the two would send tokens to the wrong collector).
   // Pinned by a merge-survival test in src/test/data_types.test.ts.
+  //
+  // `db` merges the same whole-value way: `mergeRawConfig`'s `observability`
+  // spread is key-by-key over `observability`'s OWN keys (db/poll_ms/otel),
+  // never deeper — an override's `db:` (string or object, either kind)
+  // replaces the base's `db:` in full, so a `{kind:"d1",...}` override can
+  // never end up with a stray `path` key leaked in from a `{kind:"sqlite",
+  // path:...}` base (or vice versa). See the merge-survival test for `db` in
+  // src/test/data_types.test.ts.
   otel: v.optional(OTelConfigSchema),
 });
 export type ObservabilityConfig = v.InferOutput<typeof ObservabilityConfigSchema>;

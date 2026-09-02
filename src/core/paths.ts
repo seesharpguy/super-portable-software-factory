@@ -20,6 +20,7 @@
 import { existsSync, lstatSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { findRepoRoot } from "./git_helper.ts";
+import { resolveObservabilityDb, type ObservabilityDbInput } from "./data_types.ts";
 
 export const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..", "..");
 export const ASSETS_DIR = path.join(PACKAGE_ROOT, "assets");
@@ -146,12 +147,46 @@ function healBrokenDataDir(data_dir: string): void {
  *
  * Not otherwise side-effect-free: see `healBrokenDataDir` above, which every
  * caller needs run before its own first `mkdirSync` against `data_dir`.
+ *
+ * `rawDb` accepts every form `ObservabilityConfigSchema.db` accepts (bare
+ * string, `{kind:"sqlite",...}`, `{kind:"d1",...}`) — normalized here via
+ * `resolveObservabilityDb` — so every existing call site
+ * (`resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db)`)
+ * keeps compiling and behaving unchanged with no call-site edit needed.
+ *
+ * For a `"sqlite"`-kind db (the only kind that existed before this PR, and
+ * still the only kind any adapter can open), `db_path` resolves BYTE-FOR-
+ * BYTE identically to before: `path.resolve(repo_root, path)`.
+ *
+ * For a `"d1"`-kind db there is no local file to resolve a path for — a
+ * remote Cloudflare D1 database isn't "a sibling of `sessions_dir`" the way
+ * every current caller's `db_path` usage (`new SfDb(dataPaths.db_path)`,
+ * `existsSync(dataPaths.db_path)`, `Tracer(dataPaths.db_path, ...)`, plus
+ * `spf doctor`'s and `spf init`'s own reads of it) all assume. Rather than
+ * hand those unmodified callers a fabricated path that silently opens (or
+ * creates) the wrong sqlite file, or a `null` that would need every one of
+ * them updated to null-check it — this PR's whole point is introducing the
+ * schema WITHOUT touching the adapter or those call sites (PR 2 builds the
+ * D1 `Database` adapter; PR 3 updates `spf doctor`'s/`spf init`'s own
+ * handling) — this throws a clear, actionable error instead. A repo that
+ * sets `observability.db: {kind: d1, ...}` today gets a loud failure at the
+ * first command that resolves data paths, not a silent local-file
+ * fallback or a confusing low-level crash.
  */
-export function resolveDataPaths(anchor: RepoAnchor, rawDataDir: string, rawDbPath: string): DataPaths {
+export function resolveDataPaths(anchor: RepoAnchor, rawDataDir: string, rawDb: ObservabilityDbInput): DataPaths {
   const data_dir = path.resolve(anchor.repo_root, rawDataDir);
   healBrokenDataDir(data_dir);
   const data_dir_rel = path.relative(anchor.repo_root, data_dir).split(path.sep).join("/");
-  const db_path = path.resolve(anchor.repo_root, rawDbPath);
+
+  const db = resolveObservabilityDb(rawDb);
+  if (db.kind === "d1") {
+    throw new Error(
+      `observability.db is configured as a Cloudflare D1 database (database_id: ${JSON.stringify(db.database_id)}), ` +
+        `but this build has no D1 adapter yet — that lands in a follow-up release. ` +
+        `Configure observability.db as a local sqlite path (or omit it — ".spf/data/spf.db" is the default) in the meantime.`,
+    );
+  }
+  const db_path = path.resolve(anchor.repo_root, db.path);
   const sessions_dir = path.resolve(path.dirname(db_path), "sessions");
   return { data_dir, data_dir_rel, db_path, sessions_dir };
 }

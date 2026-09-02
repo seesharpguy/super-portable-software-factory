@@ -39,12 +39,19 @@
  * re-measured at 719.5kB packed / 2011.7kB unpacked, 198 files: ≤755 KB
  * packed, ≤2.06 MB unpacked — ~5% headroom on the packed side, unpacked
  * unchanged (headroom there grew).
+ *
+ * Raised again for issue #66 PR1 (discriminated `observability.db` schema —
+ * local sqlite | remote d1 — plus the resolveObservabilityDb() normalizer
+ * and paths.ts/runner.ts updates, with matching test growth): re-measured
+ * at 732.5kB packed / 2072.7kB unpacked, 198 files — packed still comfortably
+ * under budget, only unpacked needed raising: ≤755 KB packed (unchanged),
+ * ≤2.18 MB unpacked — ~5% headroom, same rationale as every prior raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 const PACKED_BUDGET = 755_000;
-const UNPACKED_BUDGET = 2_060_000;
+const UNPACKED_BUDGET = 2_180_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
