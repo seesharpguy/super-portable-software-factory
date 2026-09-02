@@ -29,6 +29,7 @@ import { loadOpenSandboxSdk } from "../../core/sandbox_opensandbox.ts";
 import type { AgentConfig, SFConfig } from "../../core/data_types.ts";
 import { isInteractive } from "../ask.ts";
 import { paint as paintPlain } from "../../core/console.ts";
+import { SfDb } from "../../ui/server/db.ts";
 
 /**
  * A transient "checking X..." status line around a network probe — real
@@ -323,6 +324,59 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       ? `${dataPaths.db_path}${existsSync(dataPaths.db_path) ? "" : " (not created yet — fine before the first run)"}`
       : `d1 database_id=${JSON.stringify(dataPaths.db.kind === "d1" ? dataPaths.db.database_id : "")} (remote — no local file)`,
   );
+
+  // D1 trace db — only when observability.db resolves to a remote Cloudflare
+  // D1 database (PR 1's resolveObservabilityDb / PR 2's D1TraceDb, both
+  // already folded into `dataPaths.db` by `paths.resolveDataPaths` above).
+  // Same two-step shape as every other Cloudflare probe in this file (Workers
+  // AI above, sandbox.cloudflare below): a static config-shape check first —
+  // the account/token env vars actually need to be SET before there's
+  // anything to probe — then a separate, NEVER-hard-failing reachability
+  // check, gated on --no-probe like every other live probe here.
+  if (dataPaths.db.kind === "d1") {
+    const { account_id_env, api_token_env, database_id } = dataPaths.db;
+    const missingEnv = [account_id_env, api_token_env].filter((k) => !process.env[k]);
+    check(
+      report,
+      "D1 trace db credentials",
+      true, // informational/warning only — same never-a-hard-failure contract as the Cloudflare Workers AI endpoint check above
+      missingEnv.length === 0
+        ? `${account_id_env} and ${api_token_env} are set`
+        : `${missingEnv.join(", ")} not set — required for observability.db kind: "d1"`,
+      missingEnv.length === 0 ? undefined : "warn",
+    );
+
+    if (missingEnv.length === 0 && !flags["no-probe"]) {
+      // A cheap, read-only "does a sessions table exist yet" check —
+      // `SfDb.exists()` (PR 2), never a full `Tracer`/write. Mirrors
+      // `SfDb.open()`'s own friendly-error probe but collapses "nothing
+      // written yet" to a soft finding instead of throwing.
+      const probe = await withProbeStatus("D1 trace db reachability", async () => {
+        try {
+          return { ok: true as const, exists: await SfDb.exists(dataPaths) };
+        } catch (error) {
+          return { ok: false as const, error: (error as Error).message };
+        }
+      });
+      check(
+        report,
+        "D1 trace db reachability",
+        true, // informational/warning only — same contract as every other reachability probe in this file
+        probe.ok
+          ? probe.exists
+            ? `reachable: D1 database ${database_id} has a "sessions" table`
+            : `reachable: D1 database ${database_id} has no "sessions" table yet (fine before the first run)`
+          : `unreachable or errored: ${probe.error}`,
+        // "warn" only when the request itself failed (unreachable, bad
+        // credentials, wrong database_id) — that's the case an operator
+        // needs to act on. A successful request that simply finds no
+        // "sessions" table yet is the healthy fresh-database state (same
+        // as the local `db_path` check above), so it's "info", not "warn".
+        probe.ok ? "info" : "warn",
+      );
+    }
+  }
+
   check(report, "flue_db_path", true, path.join(dataPaths.data_dir, "flue.db"));
 
   // Validate the WHOLE roster and EVERY declared suite — doctor's job is "is

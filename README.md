@@ -901,14 +901,16 @@ Full field reference: `spf install-skill`'s installed skill
 
 ## Observability
 
-Every run produces a complete trace: all events, phases, agent calls, and tool invocations stream into SQLite as they happen. The local trace stays the source of truth — prompts, envelopes, tool arguments, and your source code never leave the machine. Token counts and costs ride alongside.
+Every run produces a complete trace: all events, phases, agent calls, and tool invocations stream into SQLite as they happen. By default the trace is local-only and stays the source of truth — prompts, envelopes, tool arguments, and your source code never leave the machine. Token counts and costs ride alongside.
 
 ```bash
 spf ui                           # browser-based visualizer over the trace
 spf events <adw_id> --follow    # live event stream, tailable
 ```
 
-The default export is SQLite only (`.spf/data/spf.db`). Optionally, you can export **spans only** (phase/agent/tool timing and allowlisted metadata) to an OpenTelemetry collector for integration with a trace UI or observability platform:
+The default backend is local SQLite (`.spf/data/spf.db`) — nothing leaves the machine. `observability.db` can instead be pointed at a remote Cloudflare D1 database (`{kind: d1, database_id, ...}`, offered as an `spf init` advanced option): in that mode the **complete trace** — the raw request text, tool arguments and results, envelope payloads, and gate violation details, not just spans or metadata — is written to Cloudflare over the network on every run, and the local-only guarantee above does not hold. Pick D1 only when you're comfortable with your trace data (including prompts and tool arguments) leaving the machine; stay on the default SQLite backend otherwise. See `assets/skill/references/observability.md`'s D1 section for what's sent and how the backend is selected.
+
+Separately, and orthogonally to which trace-db backend you choose, you can export **spans only** (phase/agent/tool timing and allowlisted metadata, never prompts or tool arguments) to an OpenTelemetry collector for integration with a trace UI or observability platform:
 
 ```yaml
 observability:
@@ -921,9 +923,9 @@ observability:
       Authorization: Bearer ...
 ```
 
-OTEL export is **explicit config only** — an unrelated shell variable cannot become a data-egress switch. OTEL is strictly a spans-only export: each phase is a span with child spans for agent calls and tool calls, annotated with phase status, agent model, token/cost counts, and gate results. This export never blocks a run: if the collector is slow or unreachable, SPF continues normally and logs a single line per run when export fails (not one per batch), and reports the number of dropped spans on the final flush as `spf.otel.dropped_spans` for the backend to surface. The complete trace stays in SQLite regardless.
+OTEL export is **explicit config only** — an unrelated shell variable cannot become a data-egress switch. OTEL is strictly a spans-only export: each phase is a span with child spans for agent calls and tool calls, annotated with phase status, agent model, token/cost counts, and gate results. This export never blocks a run: if the collector is slow or unreachable, SPF continues normally and logs a single line per run when export fails (not one per batch), and reports the number of dropped spans on the final flush as `spf.otel.dropped_spans` for the backend to surface. The complete trace stays in the trace db regardless of OTEL export — but, per above, the trace db itself is remote Cloudflare D1, not local SQLite, when `observability.db` is configured for `kind: d1`.
 
-**Attribute allowlist**: only phase name/kind/owner/status, chain name, adw_id, agent name/model/coding_agent, gate name + passed + violation count, token counts and cost, and durations. Prompts, envelopes, tool arguments, and your source code never leave — that guarantee is enforced in code, not just in documentation.
+**OTEL attribute allowlist**: only phase name/kind/owner/status, chain name, adw_id, agent name/model/coding_agent, gate name + passed + violation count, token counts and cost, and durations. Prompts, envelopes, tool arguments, and your source code never leave *via OTEL* — that guarantee is enforced in code, not just in documentation, and it holds regardless of trace-db backend. It is separate from the trace-db egress question above: a `kind: d1` trace db ships the full trace (prompts, tool arguments, envelope payloads) to Cloudflare even with OTEL left unconfigured.
 
 See `assets/skill/references/config.md`'s `observability` section for the full field reference.
 

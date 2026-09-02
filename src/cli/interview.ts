@@ -580,10 +580,71 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     const protectedList = protectedFiles.split(",").map((s) => s.trim()).filter(Boolean);
     if (protectedList.join(",") !== ".spf/,spf.config.yaml") defaults.protected_files = protectedList;
 
-    const dbPath = await asker.text("observability.db", { default: ".spf/data/spf.db" });
+    // Local sqlite (today's default, unchanged) or a remote Cloudflare D1
+    // database (SPF #66, PR 3) — `resolveObservabilityDb`/`resolveDataPaths`
+    // (data_types.ts/paths.ts, PR 1+2) already accept either shape; this is
+    // just wiring the interview up to the option. `spf init --yes` never
+    // reaches this "advanced" gate at all, so it stays zero-prompt and
+    // defaults to local exactly as before.
+    asker.note(
+      "Data egress: choosing remote (D1) sends the complete trace — your raw request text, tool arguments and results, envelope payloads, and gate violation details, not just spans or metadata — to Cloudflare on every run. Stick with local sqlite if that data should never leave this machine.",
+    );
+    const dbBackend = await asker.select(
+      "Store trace data locally or remotely (Cloudflare D1)?",
+      [
+        { value: "local", label: "local sqlite (default)" },
+        { value: "d1", label: "remote — Cloudflare D1 (sends full trace off-box, see note above)" },
+      ],
+      "local",
+    );
+    let dbValue: string | Record<string, unknown>;
+    if (dbBackend === "d1") {
+      const databaseId = await asker.text("Cloudflare D1 database_id", {
+        validate: (v) => (v.trim() ? null : "required"),
+      });
+      // `account_id_env`/`api_token_env` both default (schema-side, see
+      // data_types.ts's D1DbConfigSchema) to the SAME env vars the Cloudflare
+      // Workers AI provider branch above already reads — leaving both out
+      // here keeps the generated config terse (the object below just says
+      // `{kind:"d1", database_id}`) while still resolving to the exact same
+      // normalized descriptor `resolveObservabilityDb` would produce with
+      // them spelled out.
+      dbValue = { kind: "d1", database_id: databaseId };
+
+      // Reuse CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN if the coding-agent
+      // section above already collected them (this run is ALSO routed
+      // through Cloudflare Workers AI) — `envExampleKeys` is the definitive
+      // record of "already asked this run", true whether or not the answer
+      // itself ended up blank (e.g. an existing .env value was kept as-is).
+      // Otherwise collect them now, same validation/env-bucket convention as
+      // that branch: both are secrets, so they go into `env` (written to
+      // `.env`), never `configEnv`.
+      if (!envExampleKeys.includes("CLOUDFLARE_ACCOUNT_ID")) {
+        const accountId = await asker.text("CLOUDFLARE_ACCOUNT_ID", {
+          validate: (v) => (v.trim() ? null : "required — find it in the Cloudflare dashboard (right sidebar)"),
+        });
+        env["CLOUDFLARE_ACCOUNT_ID"] = accountId;
+        envExampleKeys.push("CLOUDFLARE_ACCOUNT_ID");
+      }
+      if (!envExampleKeys.includes("CLOUDFLARE_API_TOKEN")) {
+        const apiToken = await asker.secret("CLOUDFLARE_API_TOKEN", { current: ctx.existingEnv.get("CLOUDFLARE_API_TOKEN") });
+        if (apiToken) env["CLOUDFLARE_API_TOKEN"] = apiToken;
+        envExampleKeys.push("CLOUDFLARE_API_TOKEN");
+      }
+
+      // D1's own consistency model, not local WAL sqlite's — see
+      // trace_db.ts's D1TraceDb class doc comment (SPF #66) for the full
+      // spike-verified explanation this paraphrases.
+      asker.note(
+        "D1 is not local WAL sqlite: spf ui and a running chain each talk to it over independent HTTP calls, not one shared file, so (per Cloudflare's own read-replication docs) a live trace view can briefly show a slightly-stale read while a chain is actively writing — D1's own consistency model, not a bug. No phase/gate/run outcome depends on that live read.",
+      );
+      asker.note("spf doctor probes the resolved D1 endpoint (informational, never a hard failure).");
+    } else {
+      dbValue = await asker.text("observability.db", { default: ".spf/data/spf.db" });
+    }
     const pollMs = await asker.text("observability.poll_ms", { default: "500" });
-    if (dbPath !== ".spf/data/spf.db" || pollMs !== "500") {
-      defaults["__observability__"] = { ...(dbPath !== ".spf/data/spf.db" ? { db: dbPath } : {}), ...(pollMs !== "500" ? { poll_ms: Number(pollMs) } : {}) };
+    if (dbValue !== ".spf/data/spf.db" || pollMs !== "500") {
+      defaults["__observability__"] = { ...(dbValue !== ".spf/data/spf.db" ? { db: dbValue } : {}), ...(pollMs !== "500" ? { poll_ms: Number(pollMs) } : {}) };
     }
 
     if (watch) {

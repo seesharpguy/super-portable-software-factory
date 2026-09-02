@@ -663,6 +663,122 @@ test("customize models per agent: accepting patches the pinned three and appends
   assert.equal(cfg.agents.find((a) => a.name === "scout")!.model, "haiku");
 });
 
+test("advanced: declining the D1 question (the default) writes nothing under observability — today's local-only behavior, unchanged", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "claude_code", "Model (Claude": "sonnet", Authentication: "login" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Send notifications": false,
+      "Configure advanced": true,
+      "Write .spf": true,
+    },
+    // No "Store trace data" entry in `select` — the fake asker falls back to
+    // its default, "local", same as a real user hitting Enter.
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.observability, undefined, "local sqlite at its default path/poll_ms writes nothing at all — same as before this question existed");
+  assert.equal(result!.env.CLOUDFLARE_ACCOUNT_ID, undefined);
+  assert.equal(result!.env.CLOUDFLARE_API_TOKEN, undefined);
+});
+
+test("advanced: choosing D1 collects database_id + fresh CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN, writes a terse {kind:d1} object, and validates cleanly", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "claude_code",
+      "Model (Claude": "sonnet",
+      Authentication: "login",
+      "Store trace data locally or remotely": "d1",
+    },
+    text: { "Cloudflare D1 database_id": "prod-traces-db", CLOUDFLARE_ACCOUNT_ID: "acct-fresh" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Send notifications": false,
+      "Configure advanced": true,
+      "Write .spf": true,
+    },
+    secret: { CLOUDFLARE_API_TOKEN: "token-fresh" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.deepEqual(config.observability.db, { kind: "d1", database_id: "prod-traces-db" }, "account_id_env/api_token_env match the schema's own defaults — omitted to keep the config terse");
+  assert.equal(result!.env.CLOUDFLARE_ACCOUNT_ID, "acct-fresh");
+  assert.equal(result!.env.CLOUDFLARE_API_TOKEN, "token-fresh");
+  assert.ok(result!.envExampleKeys.includes("CLOUDFLARE_ACCOUNT_ID"));
+  assert.ok(result!.envExampleKeys.includes("CLOUDFLARE_API_TOKEN"));
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.deepEqual(cfg.observability.db, {
+    kind: "d1",
+    database_id: "prod-traces-db",
+    account_id_env: "CLOUDFLARE_ACCOUNT_ID",
+    api_token_env: "CLOUDFLARE_API_TOKEN",
+  });
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
+});
+
+test("advanced: D1 + flue/cloudflare provider reuses the CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN already collected for Workers AI — never asks a second time", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "flue",
+      Provider: "cloudflare",
+      "Store trace data locally or remotely": "d1",
+    },
+    text: {
+      "Model id": "@cf/zai-org/glm-5.3-flash",
+      CLOUDFLARE_ACCOUNT_ID: "acct-shared", // answers the Workers AI branch's asker.text prompt
+      "Cloudflare D1 database_id": "shared-traces-db",
+    },
+    confirm: {
+      "explicit base URL": false,
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Send notifications": false,
+      "Configure advanced": true,
+      "Write .spf": true,
+    },
+    secret: { CLOUDFLARE_API_TOKEN: "cf-shared-token" }, // answers the Workers AI branch's asker.secret prompt
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.deepEqual(config.observability.db, { kind: "d1", database_id: "shared-traces-db" });
+  // Exactly one collection of each — envExampleKeys has no duplicate entries,
+  // which it WOULD if the D1 branch asked a second time instead of reusing.
+  assert.deepEqual(
+    result!.envExampleKeys.filter((k) => k === "CLOUDFLARE_ACCOUNT_ID"),
+    ["CLOUDFLARE_ACCOUNT_ID"],
+  );
+  assert.deepEqual(
+    result!.envExampleKeys.filter((k) => k === "CLOUDFLARE_API_TOKEN"),
+    ["CLOUDFLARE_API_TOKEN"],
+  );
+  assert.equal(result!.env.CLOUDFLARE_ACCOUNT_ID, "acct-shared");
+  assert.equal(result!.env.CLOUDFLARE_API_TOKEN, "cf-shared-token");
+});
+
 test("an existing .env value is offered back as the default when a secret is left blank", async () => {
   const ctx = gatherContext(dir, new Map([["GITHUB_TOKEN", "ghp_existingvalue"]]));
   const asker = createFakeAsker({

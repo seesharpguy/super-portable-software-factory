@@ -32,6 +32,22 @@ same instant. This is a deliberate, documented trade-off (SPF #66), not a
 gap: no phase/gate/run OUTCOME depends on it — only how quickly `spf ui`
 can catch up to a chain still writing.
 
+**D1 ships the complete trace off-box.** The "Two stores, one truth"
+guarantee above ("local sqlite, always gitignored") is specific to
+`kind: sqlite`. Point `observability.db` at `kind: d1` and every write
+`tracer.ts` makes — `sessions.request` (the operator's raw request text),
+`events.payload_json` (including each `tool_call` event's `args` and
+`result_snippet`), `envelopes.payload_json`, and
+`gate_results.violations_json` — is POSTed over HTTPS to
+`https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query`
+(`trace_db.ts`'s `D1TraceDb`). This is the full trace, not the OTEL
+spans-only attribute allowlist described elsewhere in this doc: prompts,
+tool arguments, and tool results leave the machine on every run once
+`kind: d1` is configured. There is no partial mode — a repo is either
+fully local (`kind: sqlite`, the default) or fully remote for trace data
+(`kind: d1`). Choose D1 only when shipping that data to Cloudflare is
+acceptable for the repo in question.
+
 ## Event schema
 
 `tracer.ts` emits these types, every one logged against its `adw_id` **and**

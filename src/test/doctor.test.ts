@@ -352,3 +352,161 @@ test("doctor: an unregistered sandbox.credentials.broker fails the credential gr
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── observability.db kind:d1 — spf doctor's D1 probe (PR 3, SPF #66) ───────
+// Two-step shape, mirrored from the Cloudflare Workers AI / sandbox.cloudflare
+// probes above: a static credential-presence check first, then a separate,
+// never-hard-failing reachability probe (mocked fetch only — no live network
+// or credentials available for this test suite).
+
+const D1_ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID";
+const D1_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+
+/** Temporarily sets (or deletes, for `undefined`) env vars for the duration of `fn`, restoring whatever was there before — same shape as trace_db.test.ts's `withD1Env`, generalized to arbitrary keys/values. */
+async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const originals: Record<string, string | undefined> = {};
+  for (const key of Object.keys(vars)) originals[key] = process.env[key];
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(originals)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** Swaps `globalThis.fetch` for the duration of `fn` — doctor.ts's D1 probe calls `SfDb.exists()` with no injectable `fetchImpl` of its own (unlike trace_db.test.ts's mocked-fetch tests), so the global is the only seam available here. */
+async function withMockedFetch<T>(respond: () => { status: number; body: unknown }, fn: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const { status, body } = respond();
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+async function runDoctorProbing(dir: string): Promise<DoctorReport> {
+  const { logs } = await captureConsole(() => doctorCommand(["--cwd", dir, "--json"]));
+  return JSON.parse(logs.join("\n")) as DoctorReport;
+}
+
+test("doctor: observability.db kind:d1 with no CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN warns 'D1 trace db credentials', names both vars, never probes reachability", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, "observability:\n  db:\n    kind: d1\n    database_id: test-db-id\n");
+    await withEnv({ [D1_ACCOUNT_ENV]: undefined, [D1_TOKEN_ENV]: undefined }, async () => {
+      const report = await runDoctor(dir); // --no-probe, same as every other doctor test here
+      const credsCheck = report.checks.find((c) => c.name === "D1 trace db credentials");
+      assert.ok(credsCheck, "expected a 'D1 trace db credentials' check for a kind:d1 observability.db");
+      assert.equal(credsCheck!.ok, true, "missing credentials is informational, never a hard doctor failure");
+      assert.equal(credsCheck!.severity, "warn");
+      assert.match(credsCheck!.detail, /CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN not set/);
+      assert.equal(report.checks.some((c) => c.name === "D1 trace db reachability"), false, "nothing to probe without credentials");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: observability.db kind:d1 with valid env vars reports credentials clean and skips the reachability probe under --no-probe", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, "observability:\n  db:\n    kind: d1\n    database_id: test-db-id\n");
+    await withEnv({ [D1_ACCOUNT_ENV]: "acct-1", [D1_TOKEN_ENV]: "token-1" }, async () => {
+      const report = await runDoctor(dir);
+      const credsCheck = report.checks.find((c) => c.name === "D1 trace db credentials");
+      assert.ok(credsCheck);
+      assert.equal(credsCheck!.ok, true);
+      assert.equal(credsCheck!.severity, undefined, "both vars set — no warning to show");
+      assert.match(credsCheck!.detail, /CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are set/);
+      assert.equal(report.checks.some((c) => c.name === "D1 trace db reachability"), false, "--no-probe must skip the live check, same as every other reachability probe in this file");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: observability.db kind:d1 reachability probe reports info when a live D1 database already has a sessions table", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, "observability:\n  db:\n    kind: d1\n    database_id: test-db-id\n");
+    await withEnv({ [D1_ACCOUNT_ENV]: "acct-1", [D1_TOKEN_ENV]: "token-1" }, () =>
+      withMockedFetch(
+        () => ({
+          status: 200,
+          body: { success: true, errors: [], messages: [], result: [{ success: true, results: [{ name: "sessions" }], meta: {} }] },
+        }),
+        async () => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "D1 trace db reachability");
+          assert.ok(reachCheck, "expected a live reachability check once credentials are set and --no-probe is absent");
+          assert.equal(reachCheck!.ok, true);
+          assert.equal(reachCheck!.severity, "info");
+          assert.match(reachCheck!.detail, /has a "sessions" table/);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: observability.db kind:d1 reachability probe reports info — a healthy fresh database, not a warning — when the sessions table doesn't exist yet (fine before the first run)", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, "observability:\n  db:\n    kind: d1\n    database_id: test-db-id\n");
+    await withEnv({ [D1_ACCOUNT_ENV]: "acct-1", [D1_TOKEN_ENV]: "token-1" }, () =>
+      withMockedFetch(
+        () => ({
+          status: 200,
+          body: { success: true, errors: [], messages: [], result: [{ success: true, results: [], meta: {} }] },
+        }),
+        async () => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "D1 trace db reachability");
+          assert.ok(reachCheck);
+          assert.equal(reachCheck!.ok, true, "no sessions table yet is informational, never a hard failure");
+          assert.equal(reachCheck!.severity, "info", "the request succeeded — a fresh, reachable database is healthy, not a warning; only an actual request failure (bad creds, wrong database_id) should warn");
+          assert.match(reachCheck!.detail, /no "sessions" table yet/);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: observability.db kind:d1 reachability probe warns with the real error message on a request failure (bad credentials, wrong database_id, network error), never flips report.ok", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, "observability:\n  db:\n    kind: d1\n    database_id: test-db-id\n");
+    await withEnv({ [D1_ACCOUNT_ENV]: "acct-1", [D1_TOKEN_ENV]: "token-1" }, () =>
+      withMockedFetch(
+        () => ({
+          status: 401,
+          body: { success: false, errors: [{ code: 10000, message: "Authentication error" }], messages: [], result: [] },
+        }),
+        async () => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "D1 trace db reachability");
+          assert.ok(reachCheck);
+          assert.equal(reachCheck!.ok, true, "a request failure is still informational, never a hard doctor failure");
+          assert.equal(reachCheck!.severity, "warn");
+          assert.match(reachCheck!.detail, /unreachable or errored/);
+          assert.match(reachCheck!.detail, /Authentication error/);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
