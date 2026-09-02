@@ -263,6 +263,22 @@ export async function commitEnvelope(
   envelope: EnvelopeBase & { commit_message?: string },
   signoff?: CommitterIdentity | null,
 ): Promise<void> {
+  // An agent's own plan can (and sometimes does) instruct it to `git commit`
+  // its own work directly — e.g. a "Commit convention" section the planner
+  // wrote into the plan, following a target repo's own commit-message
+  // rules. When that happens, this phase's working tree is already clean by
+  // the time it runs: `commitAll`'s `git status --porcelain` finds nothing
+  // staged and throws "nothing to commit", even though real, tested work
+  // already landed on the branch a phase ago. Distinguish that from the
+  // genuine "nothing happened at all" case by checking whether HEAD already
+  // holds committed changes ahead of `run.base` — if so, this phase has
+  // nothing left to do and the existing HEAD *is* the result, not a failure.
+  const base = run.cfg.watch?.base_branch ?? "main";
+  if (!run.git.isDirty() && run.git.diffFiles(base).length > 0) {
+    const sha = run.git.shortSha();
+    await ph.log({ sha, message: "(already committed by a preceding phase — nothing new to stage)" });
+    return;
+  }
   let message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
   if (signoff) {
     const trailerLine = `Signed-off-by: ${signoff.name} <${signoff.email}>`;

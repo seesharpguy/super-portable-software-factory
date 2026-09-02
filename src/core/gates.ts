@@ -109,7 +109,24 @@ export function diffMatchesClaims(envelope: EnvelopeBase, run: RunContext): Gate
       continue;
     }
     const exists = existsSync(resolved);
-    report.check(f, exists, exists ? `exists, ${size(resolved)}` : "claimed changed file does not exist");
+    // A bulk/mechanical change (a repo-wide formatter, a codemod) tempts an
+    // agent to compress many identical edits into one descriptive sentence
+    // ("139 files reformatted (app/, components/, ...)") instead of listing
+    // each path — that string obviously never resolves, but the plain
+    // "does not exist" message gives no hint why, so a retry repeats the
+    // same mistake. Whitespace inside an otherwise-nonexistent claim is the
+    // cheap, cheap-to-check signal: a real repo-relative path is never a
+    // prose fragment. Never suppresses the failure itself, only clarifies it.
+    const looksLikeProse = !exists && /\s/.test(f);
+    report.check(
+      f,
+      exists,
+      exists
+        ? `exists, ${size(resolved)}`
+        : looksLikeProse
+          ? "claimed changed file does not exist — this looks like a summary sentence, not a path; list every changed file individually, even for a bulk/mechanical change"
+          : "claimed changed file does not exist",
+    );
   }
   return report;
 }

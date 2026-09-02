@@ -240,15 +240,29 @@ test("trailerFor: a recorded human yes with no git identity configured still yie
 
 // ── commitEnvelope's trailer ─────────────────────────────────────────────
 
-function fakeCommitRun(): { run: Run; committed: string[] } {
+/**
+ * `isDirty`/`diffFiles` default to the "there is something to stage" shape
+ * every existing test here assumes — a plain `commitAll` call, unaffected by
+ * `commitEnvelope`'s already-committed short-circuit. Pass overrides to
+ * exercise that short-circuit instead (see the "already committed by a
+ * preceding phase" tests below).
+ */
+function fakeCommitRun(overrides: { isDirty?: () => boolean; diffFiles?: (base: string) => string[] } = {}): {
+  run: Run;
+  committed: string[];
+} {
   const committed: string[] = [];
   const run = {
     adw_id: "abcd1234",
+    cfg: { watch: { base_branch: "main" } },
     git: {
       commitAll: (message: string) => {
         committed.push(message);
         return "abc1234";
       },
+      isDirty: overrides.isDirty ?? (() => true),
+      diffFiles: overrides.diffFiles ?? (() => []),
+      shortSha: () => "abc1234",
     },
   } as unknown as Run;
   return { run, committed };
@@ -358,6 +372,43 @@ test("commitEnvelope: joins an already-trailered message's block instead of star
     { name: "Ada Lovelace", email: "ada@example.com" },
   );
   assert.equal(committed[0], "Implement the thing\n\nCo-authored-by: Bot <bot@example.com>\nSigned-off-by: Ada Lovelace <ada@example.com>");
+});
+
+// ── commitEnvelope: already committed by a preceding phase (MOB-11/12/13 regression) ──
+
+test("commitEnvelope: a clean tree with real commits already ahead of base is treated as done, not a failure", async () => {
+  // Regression: a plan's own "Commit convention" instructed the builder to
+  // `git commit` its own work directly. The working tree is clean by the
+  // time this phase runs, but real, tested commits already sit ahead of
+  // base — `commitAll`'s "nothing to commit" throw was wrongly turning
+  // already-finished work into a chain failure.
+  const { run, committed } = fakeCommitRun({
+    isDirty: () => false,
+    diffFiles: () => [".github/dependabot.yml"],
+  });
+  await commitEnvelope(run, fakePh(), {
+    status: "success",
+    summary: "did it",
+    artifacts: [],
+    notes_for_next_agent: "",
+    commit_message: "Implement the thing",
+  });
+  assert.equal(committed.length, 0, "commitAll must not be called — nothing new to stage");
+});
+
+test("commitEnvelope: a clean tree with NO commits ahead of base still calls commitAll (genuine no-op, not silently swallowed)", async () => {
+  const { run, committed } = fakeCommitRun({
+    isDirty: () => false,
+    diffFiles: () => [],
+  });
+  await commitEnvelope(run, fakePh(), {
+    status: "success",
+    summary: "did it",
+    artifacts: [],
+    notes_for_next_agent: "",
+    commit_message: "Implement the thing",
+  });
+  assert.equal(committed.length, 1, "a genuinely empty change must still surface commitAll's own error, not be mistaken for already-committed work");
 });
 
 // ── committerIdentity ────────────────────────────────────────────────────
