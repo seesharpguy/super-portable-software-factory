@@ -20,6 +20,8 @@ import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import PhaseDetail from './PhaseDetail.vue'
+import SessionSummary from './SessionSummary.vue'
+import SessionQaPanel from './SessionQaPanel.vue'
 
 const props = defineProps<{ adwId: string; phaseId: string | null }>()
 
@@ -447,6 +449,8 @@ function selectPhase(p: Phase) {
       </span>
     </div>
 
+    <SessionSummary v-if="session" :adw-id="adwId" :session="session" :phases="phases" />
+
     <div v-if="phases.length" class="waterfall">
       <div class="row axis-row">
         <div class="label" />
@@ -549,6 +553,8 @@ function selectPhase(p: Phase) {
     </div>
     <div v-else-if="loaded" class="empty-state">no phases recorded for this session</div>
     <div v-else-if="!apiError" class="empty-state">loading trace…</div>
+
+    <SessionQaPanel v-if="session" :adw-id="adwId" :session="session" :phases="phases" />
 
     <PhaseDetail
       v-if="selectedPhase"
