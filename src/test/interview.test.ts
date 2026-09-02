@@ -142,6 +142,62 @@ test("claude_code + ollama launcher: writes the {model}-templated SPF_CLAUDE_CMD
   validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
 });
 
+// opencode's own model vocabulary is provider/model-id (same shape flue
+// speaks), asked via a free-text prompt rather than claude_code's
+// sonnet/opus/haiku select — and, like the claude_code branches above, the
+// packaged roster's planner/reviewer/documenter pin their own model and must
+// be overridden to match, plus a non-default launch command must be written
+// to config.env.SPF_OPENCODE_CMD (declarative, not a secret — same
+// SPF_CLAUDE_CMD treatment above).
+test("opencode + custom launch command: writes SPF_OPENCODE_CMD, defaults.model from opencode's provider/model-id vocabulary, and pins planner/reviewer/documenter", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: {
+      "backend runs": "opencode",
+    },
+    text: {
+      "Launch command for the `opencode`": "opencode-wrapper",
+      "provider/model-id": "ollama/qwen3-coder:30b",
+    },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  const config = result!.config as any;
+  assert.equal(config.defaults.coding_agent, "opencode");
+  assert.equal(config.defaults.model, "ollama/qwen3-coder:30b");
+  assert.equal(config.env.SPF_OPENCODE_CMD, "opencode-wrapper");
+
+  const overrides = config.agents;
+  assert.deepEqual(
+    overrides.map((a: any) => a.name).sort(),
+    ["documenter", "planner", "reviewer"],
+  );
+  for (const a of overrides) assert.equal(a.model, "ollama/qwen3-coder:30b");
+
+  const configPath = mergedConfigPath();
+  const { stringify } = await import("yaml");
+  writeFileSync(configPath, stringify(config));
+  const cfg = loadConfig([BUILTIN_CONFIG_PATH, configPath]);
+  assert.equal(cfg.defaults.coding_agent, "opencode");
+  assert.equal(cfg.env.SPF_OPENCODE_CMD, "opencode-wrapper");
+  assert.equal(cfg.agents.find((a) => a.name === "planner")!.model, "ollama/qwen3-coder:30b");
+  // Full roster, same as the claude_code tests above: agent_opencode.ts's
+  // TOOL_NAME_MAP includes "webfetch" (scout/refiner's tool), so this is
+  // also the regression test for that mapping — deleting it from
+  // TOOL_NAME_MAP would fail validation here.
+  validate(cfg, cfg.agents.map((a) => a.name), Object.keys(cfg.quality.suites), dir);
+});
+
 test("claude_code + plain claude: no SPF_CLAUDE_CMD written, Model stays Claude Code's own alias vocabulary", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({

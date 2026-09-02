@@ -179,6 +179,12 @@ test("validateSandboxConfig: claude_code + a resolved remote backend is rejected
   assert.ok(problems.some((p) => p.includes("claude_code") && p.includes("opensandbox")));
 });
 
+test("validateSandboxConfig: opencode + a resolved remote backend is rejected, naming both keys — same subprocess-agent-on-a-remote-sandbox check now generalized to cover opencode alongside claude_code", () => {
+  const cfg = makeCfg({ backend: "opensandbox", image: "debian-git", opensandbox: { base_url: "http://x" } });
+  const problems = validateSandboxConfig(cfg, makeAgent({ coding_agent: "opencode" }));
+  assert.ok(problems.some((p) => p.includes("opencode") && p.includes("opensandbox")));
+});
+
 test("validateSandboxConfig: opensandbox requires base_url and image; cloudflare requires bridge_url and api_token_env", () => {
   const os = validateSandboxConfig(makeCfg({ backend: "opensandbox", opensandbox: { base_url: "" } }), makeAgent());
   assert.ok(os.some((p) => p.includes("sandbox.opensandbox.base_url")));
