@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import type { SessionSummary } from '../lib/types'
 import { fetchSessions } from '../lib/api'
 import { ts } from '../lib/format'
-import { isSemanticSearchAvailable, rankSessions } from '../lib/semantic-search'
+import { isSemanticSearchAvailable, isSemanticSearchDisabled, rankSessions } from '../lib/semantic-search'
 import SessionRow from './SessionRow.vue'
 
 const sessions = shallowRef<SessionSummary[]>([])
@@ -15,6 +15,7 @@ const query = ref('')
 // null = no search active, show the default started_at sort.
 const rankedIds = ref<string[] | null>(null)
 const semanticActive = ref(false)
+const searching = ref(false)
 
 let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
@@ -68,6 +69,15 @@ const visible = computed(() => {
   return rankedIds.value.map((id) => byId.get(id)).filter((s): s is SessionSummary => s != null)
 })
 
+/** "N recorded" normally; "N of M recorded" once a search has actually
+ * filtered the list — otherwise the caption keeps citing the unfiltered
+ * total while three rows show under it. */
+const caption = computed(() =>
+  query.value.trim() && rankedIds.value
+    ? `${visible.value.length} of ${ordered.value.length} recorded`
+    : `${ordered.value.length} recorded`,
+)
+
 /** Probes availability lazily, on the user's first real interaction with the
  * box — never eagerly on mount — since create() likely needs a user-
  * activation gesture the poll tick and page load don't have. */
@@ -86,16 +96,31 @@ async function runSearch() {
     return
   }
   const token = ++searchToken
-  const ids = await rankSessions(q, sessions.value)
-  if (token === searchToken) rankedIds.value = ids
+  searching.value = true
+  try {
+    const ids = await rankSessions(q, sessions.value)
+    if (token !== searchToken) return
+    rankedIds.value = ids
+  } finally {
+    if (token === searchToken) {
+      searching.value = false
+      // The embedder can latch itself off mid-session (an unshipped API
+      // failing outright) — re-read that live state after every search so
+      // the caption stops claiming semantic ranking once it's gone.
+      if (isSemanticSearchDisabled()) semanticActive.value = false
+    }
+  }
 }
 
-/** Debounced on input; an empty box snaps back to the default sort right away. */
+/** Debounced on input; an empty box snaps back to the default sort right
+ * away and bumps the token so a still-inflight search for the old query
+ * can't land its results under the now-different (or now-empty) box. */
 function onSearchInput() {
   ensureSemanticChecked()
   clearTimeout(searchTimer)
   if (!query.value.trim()) {
     rankedIds.value = null
+    ++searchToken
     return
   }
   searchTimer = setTimeout(() => void runSearch(), 300)
@@ -116,13 +141,14 @@ function onSearchInput() {
         @focus="ensureSemanticChecked"
         @input="onSearchInput"
       />
-      <span v-if="semanticActive" class="search-note dim mono">semantic search active</span>
+      <span v-if="searching" class="search-note dim mono">searching…</span>
+      <span v-else-if="semanticActive" class="search-note dim mono">semantic search active</span>
     </div>
 
     <div v-if="visible.length" class="tt">
       <div class="tt-caption">
         <span class="tt-title">departures</span>
-        <span class="dim mono">{{ ordered.length }} recorded</span>
+        <span class="dim mono">{{ caption }}</span>
       </div>
       <div class="tt-head" aria-hidden="true">
         <span class="h">departed</span>

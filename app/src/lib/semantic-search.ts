@@ -3,10 +3,9 @@
 // matching otherwise — for browsers without the API, for a running session
 // (its text is still changing), and for anything below the similarity floor.
 // See semantic-embedder-global.d.ts for the API shape.
-import type { SessionDetail, SessionSummary } from './types'
+import type { SessionSummary } from './types'
 import type { SemanticEmbedderInstance, SemanticEmbedderStatic } from './semantic-embedder-global'
-import { fetchSession } from './api'
-import { getVector, hashText, putVector } from './vector-cache'
+import { getVector, hashText, pruneVectors, putVector } from './vector-cache'
 
 // Below this cosine similarity a "semantic" match isn't worth surfacing on its
 // own — the substring pass still catches anything actually relevant.
@@ -30,10 +29,18 @@ export async function isSemanticSearchAvailable(): Promise<boolean> {
   const ctor = embedderCtor()
   if (!ctor) return false
   try {
-    return (await ctor.availability()) !== 'unavailable'
+    // 'downloadable'/'downloading' mean no model exists yet — only
+    // 'available' means a search can actually run semantically right now.
+    return (await ctor.availability()) === 'available'
   } catch {
     return false
   }
+}
+
+/** True once the Semantic Embedder API has failed and been latched off for
+ * this page load — lets the UI stop claiming semantic search is active. */
+export function isSemanticSearchDisabled(): boolean {
+  return disabled
 }
 
 /**
@@ -75,6 +82,10 @@ async function embedText(text: string): Promise<Float32Array | null> {
 }
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  // A length mismatch means the cached vector predates a model/dimension
+  // change — never index past the shorter array (that's how a stale vector
+  // silently produced NaN/garbage scores instead of a clean non-match).
+  if (a.length !== b.length) return 0
   let dot = 0
   let na = 0
   let nb = 0
@@ -87,10 +98,12 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom
 }
 
-/** The text a session gets embedded from: its request plus every phase's name/description/error. */
-export function buildSessionSearchText(detail: SessionDetail): string {
-  const lines = [detail.session.request ?? '']
-  for (const phase of detail.phases) {
+/** The text a session gets embedded from: its request plus every phase's
+ * name/description/error — all of it already present on SessionSummary, so
+ * this never needs a detail fetch. */
+export function buildSessionSearchText(session: Pick<SessionSummary, 'request' | 'phases'>): string {
+  const lines = [session.request ?? '']
+  for (const phase of session.phases) {
     if (phase.name) lines.push(phase.name)
     if (phase.description) lines.push(phase.description)
     if (phase.error) lines.push(phase.error)
@@ -98,26 +111,35 @@ export function buildSessionSearchText(detail: SessionDetail): string {
   return lines.filter(Boolean).join('\n')
 }
 
+/** Substring fallback — checks the same fields buildSessionSearchText reads
+ * (request/adw_name/adw_id plus every phase's name/description/error), since
+ * this is the only path a running session (or a browser without the
+ * Semantic Embedder API) can ever be found through. */
 function substringMatch(query: string, s: SessionSummary): boolean {
   const q = query.toLowerCase()
-  return (
-    (s.request ?? '').toLowerCase().includes(q) ||
-    (s.adw_name ?? '').toLowerCase().includes(q) ||
-    s.adw_id.toLowerCase().includes(q)
+  if ((s.request ?? '').toLowerCase().includes(q)) return true
+  if ((s.adw_name ?? '').toLowerCase().includes(q)) return true
+  if (s.adw_id.toLowerCase().includes(q)) return true
+  return s.phases.some(
+    (p) =>
+      (p.name ?? '').toLowerCase().includes(q) ||
+      (p.description ?? '').toLowerCase().includes(q) ||
+      (p.error ?? '').toLowerCase().includes(q),
   )
 }
 
 /**
  * Vector for one CLOSED session, from cache when its text hasn't changed
- * since caching, else fetched/built/embedded/cached fresh. Null for a still-
- * running session (its text isn't final) or on any failure — either way the
- * caller falls back to substring matching for it.
+ * since caching, else built/embedded/cached fresh — all from the summary
+ * already on hand, never a per-session detail fetch (see SessionSummary,
+ * which carries the same phases the detail endpoint would return). Null for
+ * a still-running session (its text isn't final) or on any failure — either
+ * way the caller falls back to substring matching for it.
  */
 async function vectorForSession(s: SessionSummary): Promise<Float32Array | null> {
   if (!s.ended_at) return null
   try {
-    const detail = await fetchSession(s.adw_id)
-    const text = buildSessionSearchText(detail)
+    const text = buildSessionSearchText(s)
     if (!text.trim()) return null
     const textHash = hashText(text)
     const cached = await getVector(s.adw_id)
@@ -133,16 +155,21 @@ async function vectorForSession(s: SessionSummary): Promise<Float32Array | null>
 
 /**
  * Ranks sessions against `query`, returning adw_ids most-relevant first.
- * Semantic similarity covers closed sessions (fetching/embedding/caching each
- * as needed), unioned with a plain case-insensitive substring match against
- * request/adw_name/adw_id — which is how a running session, and anything
- * under the similarity floor, still surface instead of disappearing. Falls
- * back to substring-only when the Semantic Embedder API is unavailable or
- * fails outright.
+ * Semantic similarity covers closed sessions (embedding/caching each as
+ * needed), unioned with a plain case-insensitive substring match against
+ * request/adw_name/adw_id/phase text — which is how a running session, and
+ * anything under the similarity floor, still surface instead of
+ * disappearing. Falls back to substring-only when the Semantic Embedder API
+ * is unavailable or fails outright.
  */
 export async function rankSessions(query: string, sessions: SessionSummary[]): Promise<string[]> {
   const q = query.trim()
   if (!q) return sessions.map((s) => s.adw_id)
+
+  // Best-effort, fire-and-forget: drop any cached vector for a session no
+  // longer in the live list (archived, aged out) so the store doesn't grow
+  // forever.
+  void pruneVectors(new Set(sessions.map((s) => s.adw_id)))
 
   const substringHits = new Set(sessions.filter((s) => substringMatch(q, s)).map((s) => s.adw_id))
 
