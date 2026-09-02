@@ -23,9 +23,12 @@ import {
   EventRecordTypeSchema,
   GenericOutput,
   NotificationsConfigSchema,
+  ObservabilityConfigSchema,
+  ObservabilityDbSchema,
   PhaseParamsSchema,
   PlanOutput,
   RefineOutput,
+  resolveObservabilityDb,
   ReviewConfigSchema,
   ReviewOutput,
   ScoutOutput,
@@ -385,6 +388,101 @@ test("observability.otel survives loadConfig's merge — absent by default, whol
     const bad = join(dir, "bad.yaml");
     writeFileSync(bad, "observability:\n  otel:\n    endpoint: not-a-url\n");
     assert.throws(() => loadConfig([bad]), /invalid config/, "endpoint is URL-validated");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── observability.db (BT-issue #66, PR 1 of 3) ──────────────────────────────
+//
+// `db:` now accepts three forms — a bare string (the only form that existed
+// before this PR, and still every existing config's actual shape), an
+// explicit `{kind:"sqlite",...}` object, and a new `{kind:"d1",...}` object
+// for a remote Cloudflare D1 database. `resolveObservabilityDb` normalizes
+// all three to one shape; `paths.resolveDataPaths` (see paths.test.ts) is
+// the consumer that turns a normalized "sqlite" into an absolute db_path.
+
+test("resolveObservabilityDb: legacy bare string normalizes to {kind:sqlite, path}, unchanged", () => {
+  assert.deepEqual(resolveObservabilityDb(".spf/data/spf.db"), { kind: "sqlite", path: ".spf/data/spf.db" });
+  assert.deepEqual(resolveObservabilityDb("custom/spf.db"), { kind: "sqlite", path: "custom/spf.db" });
+});
+
+test("resolveObservabilityDb: {kind:sqlite} object form — path defaults the same as the bare string form", () => {
+  assert.deepEqual(resolveObservabilityDb({ kind: "sqlite" }), { kind: "sqlite", path: ".spf/data/spf.db" });
+  assert.deepEqual(resolveObservabilityDb({ kind: "sqlite", path: "elsewhere/spf.db" }), { kind: "sqlite", path: "elsewhere/spf.db" });
+});
+
+test("resolveObservabilityDb: {kind:d1} object form — account_id_env/api_token_env default to the same env vars core/cloudflare_provider.ts reads", () => {
+  assert.deepEqual(resolveObservabilityDb({ kind: "d1", database_id: "abc123" }), {
+    kind: "d1",
+    database_id: "abc123",
+    account_id_env: "CLOUDFLARE_ACCOUNT_ID",
+    api_token_env: "CLOUDFLARE_API_TOKEN",
+  });
+  assert.deepEqual(
+    resolveObservabilityDb({ kind: "d1", database_id: "abc123", account_id_env: "MY_ACCOUNT_ID", api_token_env: "MY_API_TOKEN" }),
+    { kind: "d1", database_id: "abc123", account_id_env: "MY_ACCOUNT_ID", api_token_env: "MY_API_TOKEN" },
+  );
+});
+
+test("ObservabilityDbSchema/ObservabilityConfigSchema: all three accepted db: forms parse to the expected shape", () => {
+  assert.equal(v.parse(ObservabilityDbSchema, ".spf/data/spf.db"), ".spf/data/spf.db");
+  assert.deepEqual(v.parse(ObservabilityDbSchema, { kind: "sqlite" }), { kind: "sqlite", path: ".spf/data/spf.db" });
+  assert.deepEqual(v.parse(ObservabilityDbSchema, { kind: "d1", database_id: "abc123" }), {
+    kind: "d1",
+    database_id: "abc123",
+    account_id_env: "CLOUDFLARE_ACCOUNT_ID",
+    api_token_env: "CLOUDFLARE_API_TOKEN",
+  });
+
+  // The default (`db:` entirely absent) is still the bare-string legacy default.
+  assert.equal(v.parse(ObservabilityConfigSchema, {}).db, ".spf/data/spf.db");
+  // And a config that only sets `db:` to a d1 object still gets poll_ms's own default.
+  const parsed = v.parse(ObservabilityConfigSchema, { db: { kind: "d1", database_id: "abc123" } });
+  assert.deepEqual(parsed.db, { kind: "d1", database_id: "abc123", account_id_env: "CLOUDFLARE_ACCOUNT_ID", api_token_env: "CLOUDFLARE_API_TOKEN" });
+  assert.equal(parsed.poll_ms, 500);
+});
+
+test("ObservabilityDbSchema: a malformed db value is rejected with a clear, specific error — not a generic union failure", () => {
+  assert.throws(() => v.parse(ObservabilityDbSchema, { kind: "d1" }), /database_id/, "missing database_id must name the field");
+  assert.throws(() => v.parse(ObservabilityDbSchema, { kind: "bogus" }), /sqlite.*d1|d1.*sqlite/, "an unknown kind must name the allowed values");
+  assert.throws(() => v.parse(ObservabilityDbSchema, 123), /observability\.db/, "a wrong-typed value must be rejected, not coerced");
+  assert.throws(() => v.parse(ObservabilityDbSchema, null), /observability\.db/);
+  assert.throws(() => v.parse(ObservabilityDbSchema, ["not", "an", "object"]), /observability\.db/, "an array must not be accepted as a db object");
+});
+
+// The same silent-drop / stray-key trap `observability.otel` (above) already
+// guards against, applied to `db` itself: `mergeRawConfig`'s `observability`
+// spread is key-by-key over `observability`'s OWN keys only — an override's
+// `db:` (whichever kind) replaces the base's `db:` in full, so a d1 override
+// on a sqlite base (or vice versa) can never end up with a stray leftover
+// key from the other kind.
+test("observability.db survives loadConfig's merge as a whole-value replace — no stray key crosses kinds", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-db-merge-test-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "observability:\n  db:\n    kind: sqlite\n    path: base/spf.db\n  poll_ms: 250\n");
+    writeFileSync(override, "observability:\n  db:\n    kind: d1\n    database_id: abc123\n");
+    const cfg = loadConfig([base, override]);
+    assert.deepEqual(cfg.observability.db, {
+      kind: "d1",
+      database_id: "abc123",
+      account_id_env: "CLOUDFLARE_ACCOUNT_ID",
+      api_token_env: "CLOUDFLARE_API_TOKEN",
+    });
+    assert.ok(!("path" in (cfg.observability.db as object)), "no stray sqlite `path` key leaked onto the d1 override");
+    assert.equal(cfg.observability.poll_ms, 250, "observability's other keys still merge key-by-key around db");
+
+    // A single config file must reach SFConfig at all, same trap `otel` guards.
+    const single = join(dir, "single.yaml");
+    writeFileSync(single, "observability:\n  db: custom/spf.db\n");
+    assert.equal(loadConfig([single]).observability.db, "custom/spf.db");
+
+    // A typo fails at config load, not deep inside a later sqlite/D1 open call.
+    const bad = join(dir, "bad.yaml");
+    writeFileSync(bad, "observability:\n  db:\n    kind: d1\n");
+    assert.throws(() => loadConfig([bad]), /invalid config/, "a d1 db missing database_id is rejected at config load");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

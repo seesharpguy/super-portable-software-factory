@@ -82,3 +82,47 @@ test("resolveDataPaths: a real FILE at data_dir's path (not a symlink) is left a
   assert.ok(existsSync(dataDir), "only a broken SYMLINK is this function's concern, not any other kind of misconfiguration");
   assert.equal(lstatSync(dataDir).isSymbolicLink(), false);
 });
+
+// ── observability.db discriminated forms (BT-issue #66, PR 1 of 3) ─────────
+//
+// Every existing caller (`resolveDataPaths(anchor, cfg.defaults.data_dir,
+// cfg.observability.db)`) passes cfg.observability.db straight through, so
+// this exercises the same three accepted forms `data_types.test.ts` covers
+// at the schema level, but through the actual path-resolution consumer.
+
+test("resolveDataPaths: legacy bare-string db resolves db_path byte-for-byte identically to before this PR", () => {
+  const anchor = resolveAnchor(dir);
+  const viaString = resolveDataPaths(anchor, ".spf/data", ".spf/data/spf.db");
+  const viaSqliteObject = resolveDataPaths(anchor, ".spf/data", { kind: "sqlite", path: ".spf/data/spf.db" });
+  assert.equal(viaString.db_path, join(dir, ".spf", "data", "spf.db"));
+  assert.deepEqual(viaSqliteObject, viaString, "the equivalent {kind:sqlite} object form must resolve to the exact same DataPaths");
+});
+
+test("resolveDataPaths: {kind:sqlite} object form with a custom path resolves relative to repo_root, same as a bare string would", () => {
+  const anchor = resolveAnchor(dir);
+  const paths = resolveDataPaths(anchor, ".spf/data", { kind: "sqlite", path: "elsewhere/custom.db" });
+  assert.equal(paths.db_path, join(dir, "elsewhere", "custom.db"));
+  assert.equal(paths.sessions_dir, join(dir, "elsewhere", "sessions"), "sessions_dir stays a sibling of db_path");
+});
+
+test("resolveDataPaths: {kind:sqlite} object form with path omitted defaults to .spf/data/spf.db, same as the bare-string default", () => {
+  const anchor = resolveAnchor(dir);
+  const paths = resolveDataPaths(anchor, ".spf/data", { kind: "sqlite" });
+  assert.equal(paths.db_path, join(dir, ".spf", "data", "spf.db"));
+});
+
+test("resolveDataPaths: {kind:d1} throws a clear, actionable error instead of fabricating a local db_path — no adapter exists yet", () => {
+  const anchor = resolveAnchor(dir);
+  assert.throws(
+    () => resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" }),
+    /d1|D1/,
+    "the error must mention D1 so an operator understands why this failed",
+  );
+  assert.throws(
+    () => resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" }),
+    /abc123/,
+    "the error should name the configured database_id, to help pin down which config is at fault",
+  );
+  // Never silently creates/heals a local data_dir for a config that isn't actually local.
+  assert.equal(existsSync(join(dir, ".spf", "data")), false);
+});

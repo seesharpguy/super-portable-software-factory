@@ -15,7 +15,7 @@ import * as agents from "./agents.ts";
 import { makeGit, type GitHandle } from "./git_helper.ts";
 import { Console, type RunObserver } from "./console.ts";
 import { Tracer } from "./tracer.ts";
-import { makeEventRecord, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
+import { makeEventRecord, resolveObservabilityDb, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
 import type { TierResolution } from "./tiering.ts";
 import { ensureDir, nowIso } from "./utils.ts";
 import type { Notifier } from "./notify/notifier.ts";
@@ -24,6 +24,19 @@ interface AgentMapEntry {
   session_id: string;
   model: string;
   coding_agent: string;
+}
+
+/**
+ * `Console.sessionFinished`'s trailing `db` row wants a short, human-facing
+ * label, not a filesystem path specifically — `cfg.observability.db` is now
+ * a discriminated shape (see `data_types.ts`'s migration note), so this
+ * normalizes it to whichever of "the sqlite path" or "the D1 database id"
+ * is actually meaningful to show, rather than assuming it's always a path
+ * string the way this call site did before that field existed.
+ */
+function describeObservabilityDb(db: SFConfig["observability"]["db"]): string {
+  const resolved = resolveObservabilityDb(db);
+  return resolved.kind === "sqlite" ? resolved.path : `d1:${resolved.database_id}`;
 }
 
 export interface PhaseHandle {
@@ -192,7 +205,7 @@ export class Run {
       this.tracer.phaseUpsert(phase);
       this.tracer.sessionFinish(this.adw_id, false);
       this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
-      this.console.sessionFinished(false, this.tokens, this.cost, this.cfg.observability.db);
+      this.console.sessionFinished(false, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
       throw error;
     }
   }
@@ -223,7 +236,7 @@ export class Run {
       this.console.note(`not accepted: ${note}`);
     }
     this.tracer.sessionFinish(this.adw_id, ok);
-    this.console.sessionFinished(ok, this.tokens, this.cost, this.cfg.observability.db);
+    this.console.sessionFinished(ok, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
     return ok ? 0 : 1;
   }
 }

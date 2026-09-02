@@ -47,6 +47,13 @@
  * re-measured at 735.8kB packed / 2084.7kB unpacked, 198 files: ≤775 KB
  * packed, ≤2.19 MB unpacked — ~5% headroom, same rationale as every prior
  * raise.
+ *
+ * Merging in issue #66 PR1 (discriminated `observability.db` schema — local
+ * sqlite | remote d1 — plus the resolveObservabilityDb() normalizer and
+ * paths.ts/runner.ts updates, with matching test growth) on top of the
+ * WebMCP batch above re-measures at 740.9kB packed / 2099.4kB unpacked, 198
+ * files — comfortably inside the budget the WebMCP raise already set, so no
+ * further raise was needed here.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
