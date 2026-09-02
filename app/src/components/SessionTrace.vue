@@ -20,6 +20,7 @@ import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
 import PhaseDetail from './PhaseDetail.vue'
+import SessionSummary from './SessionSummary.vue'
 
 const props = defineProps<{ adwId: string; phaseId: string | null }>()
 
@@ -446,6 +447,8 @@ function selectPhase(p: Phase) {
         <StatChip kind="written" :value="usage.written" />
       </span>
     </div>
+
+    <SessionSummary v-if="session" :adw-id="adwId" :session="session" :phases="phases" />
 
     <div v-if="phases.length" class="waterfall">
       <div class="row axis-row">
