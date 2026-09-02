@@ -1,7 +1,10 @@
 // Ambient declaration for Chrome's on-device Prompt API (self.LanguageModel)
 // — not in Chrome's shipped TS DOM lib yet. Typed only to the surface
 // prompt-qa.ts calls; see developer.chrome.com/docs/ai/prompt-api.
-import type { SummarizerMonitor } from './summarizer-global'
+// Deliberately does NOT import SummarizerMonitor from summarizer-global —
+// the two APIs' downloadprogress events are structurally identical today,
+// but this API's typing shouldn't silently change shape if Summarizer's ever
+// does, so LanguageModelMonitor is declared standalone below.
 
 interface LanguageModelInitialPrompt {
   role: 'system' | 'user' | 'assistant'
@@ -17,12 +20,21 @@ interface LanguageModelAvailabilityOptions {
   expectedInputs?: LanguageModelExpectedInput[]
 }
 
+/** Progress reporter passed to a create() call's `monitor` option. See
+ * summarizer-global.d.ts's SummarizerMonitor — same shape, kept as a
+ * separate declaration on purpose (see note above). */
+interface LanguageModelMonitor {
+  addEventListener(
+    type: 'downloadprogress',
+    listener: (event: { loaded: number }) => void,
+  ): void
+}
+
 interface LanguageModelCreateOptions {
   initialPrompts?: LanguageModelInitialPrompt[]
   /** Called synchronously from create() with a monitor to attach a
-   * 'downloadprogress' listener to — same shape as Summarizer's, the model
-   * may need to download. */
-  monitor?: (monitor: SummarizerMonitor) => void
+   * 'downloadprogress' listener to — the model may need to download. */
+  monitor?: (monitor: LanguageModelMonitor) => void
   signal?: AbortSignal
 }
 
@@ -42,6 +54,12 @@ interface LanguageModelSession {
   readonly contextWindow?: number
   prompt(input: string, options?: LanguageModelPromptOptions): Promise<string>
   promptStreaming(input: string, options?: LanguageModelPromptOptions): ReadableStream<string>
+  /** Adds messages to the session's context without prompting a response.
+   * Unlike create(), append() isn't gated on user activation — the way to add
+   * context after the fact (e.g. a condensed summary that took too long to
+   * compute before create() without spending the gesture's activation
+   * window) without needing another gesture. */
+  append(prompts: LanguageModelInitialPrompt[], options?: LanguageModelPromptOptions): Promise<void>
   destroy(): void
   /** Fired when the session silently dropped earlier turns to fit the context
    * window — the one signal a caller has that trace data was left out. */
@@ -66,6 +84,7 @@ declare global {
 export type {
   LanguageModelCreateOptions,
   LanguageModelInitialPrompt,
+  LanguageModelMonitor,
   LanguageModelSession,
   LanguageModelStatic,
 }
