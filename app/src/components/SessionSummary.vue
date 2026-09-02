@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { Phase, Session } from '../lib/types'
 import { Sparkles } from 'lucide-vue-next'
 import {
@@ -12,6 +12,7 @@ import {
   summaryCacheKey,
 } from '../lib/summarizer'
 import { renderMarkdown } from '../lib/markdown'
+import DetailSection from './DetailSection.vue'
 
 const props = defineProps<{ adwId: string; session: Session; phases: Phase[] }>()
 
@@ -29,6 +30,10 @@ const errorMessage = ref<string | null>(null)
 // The key the currently-shown summary was generated for — not a ref, since
 // nothing needs to render off it directly (see `stale` below).
 let shownKey: string | null = null
+// Lets a component unmount (navigating away mid-generation) cancel the
+// in-flight create()/summarize() instead of leaving the on-device model
+// running for a view nobody's looking at.
+let abortController: AbortController | null = null
 
 onMounted(async () => {
   if (!isSummarizerNamespacePresent()) return
@@ -39,11 +44,21 @@ onMounted(async () => {
   }
 })
 
-const inputText = computed(() =>
-  buildSessionSummaryInput({ session: props.session, phases: props.phases }),
+onUnmounted(() => {
+  abortController?.abort()
+})
+
+// null while the card isn't shown (no API, or availability() said no) — SessionTrace
+// hands in fresh session/phases objects every 500ms tick, so without this
+// gate the input text and its hash would get rebuilt on every tick for a
+// feature that's invisible or, in Chrome, not yet opened.
+const summaryText = computed(() =>
+  visible.value ? buildSessionSummaryInput({ session: props.session, phases: props.phases }) : null,
 )
 
-const cacheKey = computed(() => summaryCacheKey(props.adwId, inputText.value))
+const cacheKey = computed(() =>
+  summaryText.value ? summaryCacheKey(props.adwId, summaryText.value.full) : null,
+)
 
 // A summary already generated for this exact session content (e.g. the trace
 // was left and revisited) shows immediately, with no regeneration. When the
@@ -52,7 +67,7 @@ const cacheKey = computed(() => summaryCacheKey(props.adwId, inputText.value))
 watch(
   cacheKey,
   (key) => {
-    if (key === shownKey || state.value === 'generating') return
+    if (key == null || key === shownKey || state.value === 'generating') return
     const cached = getCachedSummary(key)
     if (cached) {
       html.value = renderMarkdown(cached)
@@ -72,16 +87,22 @@ const stale = computed(() => state.value === 'ready' && cacheKey.value !== shown
  */
 async function generate() {
   const key = cacheKey.value
-  const text = inputText.value
+  const text = summaryText.value?.input
+  if (key == null || text == null) return
   state.value = 'generating'
   downloadPct.value = null
   errorMessage.value = null
+  abortController = new AbortController()
   try {
-    const summary = await generateSummary(text, (m) => {
-      m.addEventListener('downloadprogress', (e) => {
-        downloadPct.value = Math.round(e.loaded * 100)
-      })
-    })
+    const summary = await generateSummary(
+      text,
+      (m) => {
+        m.addEventListener('downloadprogress', (e) => {
+          downloadPct.value = Math.round(e.loaded * 100)
+        })
+      },
+      abortController.signal,
+    )
     setCachedSummary(key, summary)
     html.value = renderMarkdown(summary)
     shownKey = key
@@ -91,19 +112,14 @@ async function generate() {
     errorMessage.value = err instanceof Error ? err.message : String(err)
   } finally {
     downloadPct.value = null
+    abortController = null
   }
 }
 </script>
 
 <template>
   <section v-if="visible" class="summary-card">
-    <button class="summary-head" type="button" @click="open = !open">
-      <span class="chev">{{ open ? '▾' : '▸' }}</span>
-      <Sparkles class="summary-icon" :size="17" :stroke-width="2" />
-      <span class="summary-title">summary</span>
-    </button>
-
-    <div v-if="open" class="summary-body">
+    <DetailSection title="summary" :icon="Sparkles" :open="open" @toggle="open = !open">
       <div v-if="state === 'idle'" class="sum-row">
         <button class="sum-btn" type="button" @click="generate">generate summary</button>
         <span class="dim">on-device key points — nothing leaves the browser</span>
@@ -125,16 +141,18 @@ async function generate() {
       </template>
 
       <div v-else class="sum-row">
-        <span class="dim">summary unavailable</span>
+        <span class="dim" :title="errorMessage ?? undefined">summary unavailable</span>
         <button class="sum-btn" type="button" @click="generate">try again</button>
       </div>
-    </div>
+    </DetailSection>
   </section>
 </template>
 
 <style scoped>
 /* Same material as the waterfall board: hairline frame, face fill, an inset
-   header — a small board of its own, not a generic panel. */
+   header — a small board of its own, not a generic panel. The disclosure
+   itself (chevron, icon, uppercase title, toggle) is DetailSection's; only
+   this outer frame and the inset header band are specific to this card. */
 .summary-card {
   margin: 20px 28px 0;
   border: 1px solid var(--rule);
@@ -143,40 +161,20 @@ async function generate() {
   overflow: hidden;
 }
 
-.summary-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
+.summary-card :deep(.dsec) {
+  margin-bottom: 0;
+}
+
+.summary-card :deep(.dsec-head) {
   padding: 10px 16px;
   background: var(--inset);
-  border: none;
-  border-bottom: 1px solid var(--rule);
-  color: var(--dim);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  cursor: pointer;
-  text-align: left;
 }
 
-.summary-head:hover {
-  color: var(--fg);
+.summary-card :deep(.dsec-head:hover) {
+  background: var(--inset);
 }
 
-.summary-icon {
-  flex: none;
-  color: var(--faint);
-}
-
-.chev {
-  color: var(--faint);
-  flex: none;
-  font-family: var(--mono);
-}
-
-.summary-body {
+.summary-card :deep(.dsec-body) {
   padding: 14px 16px;
 }
 
@@ -205,7 +203,7 @@ async function generate() {
   border-color: var(--accent);
 }
 
-.summary-body .md {
+.md {
   margin-bottom: 12px;
 }
 </style>

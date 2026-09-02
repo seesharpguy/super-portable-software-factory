@@ -2,8 +2,12 @@
 // — not in Chrome's shipped TS DOM lib yet. Typed only to the surface
 // summarizer.ts calls; see developer.chrome.com/docs/ai/summarizer-api.
 
-/** Progress reporter passed to a create() call's `monitor` option. */
-interface SummarizerMonitor extends EventTarget {
+/** Progress reporter passed to a create() call's `monitor` option. Declared
+ * standalone rather than `extends EventTarget` — the real object *is* an
+ * EventTarget, but re-narrowing `addEventListener`'s listener type on top of
+ * DOM's own overloads doesn't typecheck (TS2430); this only types the one
+ * method summarizer.ts actually calls. */
+interface SummarizerMonitor {
   addEventListener(
     type: 'downloadprogress',
     listener: (event: { loaded: number }) => void,
