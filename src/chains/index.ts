@@ -276,6 +276,6 @@ export async function runChain(chain: ChainDefinition, ctx: ChainContext, option
     // exactly as it always did (the signal listener needs no such fallback:
     // the process is gone).
     await otel.releaseOtelExporter(ctx.adw_id);
-    session.finalize(ctx.adw_id);
+    await session.finalize(ctx.adw_id);
   }
 }

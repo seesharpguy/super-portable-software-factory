@@ -51,13 +51,13 @@ function cfg(): SFConfig {
   return v.parse(SFConfigSchema, {}) as SFConfig;
 }
 
-test("ensure() registers a run as active, and finalize() removes it", () => {
+test("ensure() registers a run as active, and finalize() removes it", async () => {
   const dir = tmpRepo();
   try {
-    const run = ensure(cfg(), "adw_session_finalize_a", dir, "plan");
+    const run = await ensure(cfg(), "adw_session_finalize_a", dir, "plan");
     assert.ok(activeRunIdsForTest().includes("adw_session_finalize_a"), "a just-started run is tracked as active");
 
-    finalize("adw_session_finalize_a");
+    await finalize("adw_session_finalize_a");
     assert.ok(!activeRunIdsForTest().includes("adw_session_finalize_a"), "a finalized run is no longer tracked — a later signal must not touch it");
 
     // The Tracer's sqlite handle is actually closed, not merely forgotten —
@@ -68,47 +68,47 @@ test("ensure() registers a run as active, and finalize() removes it", () => {
   }
 });
 
-test("finalize(id) on an id that was never registered, or already finalized, is a silent no-op", () => {
+test("finalize(id) on an id that was never registered, or already finalized, is a silent no-op", async () => {
   const dir = tmpRepo();
   try {
-    assert.doesNotThrow(() => finalize("adw_never_registered"));
-    assert.doesNotThrow(() => finalize(null));
-    assert.doesNotThrow(() => finalize(undefined));
+    await assert.doesNotReject(() => finalize("adw_never_registered"));
+    await assert.doesNotReject(() => finalize(null));
+    await assert.doesNotReject(() => finalize(undefined));
 
-    const run = ensure(cfg(), "adw_session_double_finalize", dir, "plan");
-    finalize("adw_session_double_finalize");
+    const run = await ensure(cfg(), "adw_session_double_finalize", dir, "plan");
+    await finalize("adw_session_double_finalize");
     // A second finalize() must not try to close an already-closed handle.
-    assert.doesNotThrow(() => finalize("adw_session_double_finalize"));
+    await assert.doesNotReject(() => finalize("adw_session_double_finalize"));
     void run;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("two ensure() calls in one process install the shared signal listener only once", () => {
+test("two ensure() calls in one process install the shared signal listener only once", async () => {
   const dirA = tmpRepo();
   const dirB = tmpRepo();
   try {
-    ensure(cfg(), "adw_session_listener_a", dirA, "plan");
-    ensure(cfg(), "adw_session_listener_b", dirB, "plan");
+    await ensure(cfg(), "adw_session_listener_a", dirA, "plan");
+    await ensure(cfg(), "adw_session_listener_b", dirB, "plan");
 
     assert.equal(process.listenerCount("SIGTERM"), baselineSigterm + 1, "a second ensure() must not add a second SIGTERM listener");
     assert.equal(process.listenerCount("SIGINT"), baselineSigint + 1, "a second ensure() must not add a second SIGINT listener");
   } finally {
-    finalize("adw_session_listener_a");
-    finalize("adw_session_listener_b");
+    await finalize("adw_session_listener_a");
+    await finalize("adw_session_listener_b");
     rmSync(dirA, { recursive: true, force: true });
     rmSync(dirB, { recursive: true, force: true });
   }
 });
 
-test("a run still active (never finalized) stays in the active set — a signal must still be able to reach it", () => {
+test("a run still active (never finalized) stays in the active set — a signal must still be able to reach it", async () => {
   const dir = tmpRepo();
   try {
-    ensure(cfg(), "adw_session_still_running", dir, "plan");
+    await ensure(cfg(), "adw_session_still_running", dir, "plan");
     assert.ok(activeRunIdsForTest().includes("adw_session_still_running"), "an in-flight run is exactly what the signal handler must still finalize");
   } finally {
-    finalize("adw_session_still_running");
+    await finalize("adw_session_still_running");
     rmSync(dir, { recursive: true, force: true });
   }
 });

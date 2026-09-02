@@ -40,8 +40,8 @@ export interface RunLike {
   phases: Phase[];
   context_handoff_dir: string;
   repo_root: string;
-  console: { note: (message: string) => void };
-  tracer: { event: (record: EventRecord) => string };
+  console: { note: (message: string) => Promise<void> };
+  tracer: { event: (record: EventRecord) => Promise<string> };
   adw_id: string;
 }
 
@@ -83,14 +83,14 @@ function shellJoin(argv: string[]): string {
     .join(" ");
 }
 
-function runCheck(spec: QualityCheckSpec, run: RunLike): QualityCheckResult {
+async function runCheck(spec: QualityCheckSpec, run: RunLike): Promise<QualityCheckResult> {
   const phase = run.phases[run.phases.length - 1];
   const outputDir = checkDir(run, spec.name);
   const outputArtifact = path.join(outputDir, "command.log");
   const command = shellJoin(spec.argv);
   const env = operatorEnv(); // the engineer's own shell environment
 
-  run.console.note(`quality ${spec.name}: ${command}`);
+  await run.console.note(`quality ${spec.name}: ${command}`);
   const startedAt = nowIso();
   const clock = performance.now();
   let stdout = "";
@@ -129,7 +129,7 @@ function runCheck(spec: QualityCheckSpec, run: RunLike): QualityCheckResult {
       `\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`,
   );
   const passed = returncode === 0;
-  run.tracer.event(
+  await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
       phase_id: phase.phase_id,
@@ -147,7 +147,7 @@ function runCheck(spec: QualityCheckSpec, run: RunLike): QualityCheckResult {
       ended_at: nowIso(),
     }),
   );
-  run.console.note(`quality ${spec.name}: ${passed ? "passed" : "failed"} (exit ${returncode}, ${duration.toFixed(1)}s)`);
+  await run.console.note(`quality ${spec.name}: ${passed ? "passed" : "failed"} (exit ${returncode}, ${duration.toFixed(1)}s)`);
   return {
     name: spec.name,
     area: spec.area,
@@ -171,9 +171,14 @@ function runCheck(spec: QualityCheckSpec, run: RunLike): QualityCheckResult {
  * QualityNotConfigured (via resolveSuite) if the suite or any of its checks
  * isn't in the config — before any check runs, let alone any agent spawns.
  */
-export function runSuite(run: RunLike, suiteName: string): QualityResult {
+export async function runSuite(run: RunLike, suiteName: string): Promise<QualityResult> {
   const specs = resolveSuite(run, suiteName);
-  const checks = specs.map((spec) => runCheck(spec, run));
+  // Sequential, not Promise.all: check output/duration/tool_call ordering has
+  // always been one-at-a-time (spawnSync itself was always sequential) — a
+  // parallel run would interleave `run.console.note`/`run.tracer.event`
+  // calls across checks with no ordering guarantee.
+  const checks: QualityCheckResult[] = [];
+  for (const spec of specs) checks.push(await runCheck(spec, run));
   // A failure is the command, its exit code, and what it actually printed —
   // everything a builder needs to repair without opening a log or being told
   // what the error "means" by a parser that guessed.
@@ -196,12 +201,12 @@ export function runSuite(run: RunLike, suiteName: string): QualityResult {
  * subprocess already knows; the repair loop is unchanged, because a failure
  * still reaches the builder through `asEnvelope` below.
  */
-export function runTests(run: RunLike): QualityResult {
+export async function runTests(run: RunLike): Promise<QualityResult> {
   return runSuite(run, "test");
 }
 
 /** Every configured check, across every configured suite's union — the `all` suite. */
-export function runQuality(run: RunLike): QualityResult {
+export async function runQuality(run: RunLike): Promise<QualityResult> {
   return runSuite(run, "all");
 }
 
@@ -211,9 +216,9 @@ export function runQuality(run: RunLike): QualityResult {
  * Every quality/test phase in every chain reported this same summary by
  * hand; one copy here instead of one per chain.
  */
-export function record(ph: { log: (payload: Record<string, unknown>) => void }, result: QualityResult): void {
+export async function record(ph: { log: (payload: Record<string, unknown>) => Promise<void> }, result: QualityResult): Promise<void> {
   const passed = result.checks.filter((c) => c.passed).length;
-  ph.log({ passed: result.passed, checks: `${passed}/${result.checks.length}`, artifacts: result.artifacts.join(", ") });
+  await ph.log({ passed: result.passed, checks: `${passed}/${result.checks.length}`, artifacts: result.artifacts.join(", ") });
 }
 
 /**

@@ -20,7 +20,7 @@
 import { existsSync, lstatSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { findRepoRoot } from "./git_helper.ts";
-import { resolveObservabilityDb, type ObservabilityDbInput } from "./data_types.ts";
+import { resolveObservabilityDb, type NormalizedObservabilityDb, type ObservabilityDbInput } from "./data_types.ts";
 
 export const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..", "..");
 export const ASSETS_DIR = path.join(PACKAGE_ROOT, "assets");
@@ -89,9 +89,22 @@ export interface DataPaths {
   data_dir: string;
   /** Repo-root-relative, forward-slash — for matching against git's own path output. */
   data_dir_rel: string;
-  /** Absolute. */
-  db_path: string;
-  /** Absolute. ALWAYS a sibling of `db_path` — relocating `data_dir` must never break this. */
+  /**
+   * The normalized `observability.db` descriptor — `core/trace_db.ts`'s
+   * `createTraceDb()` (called by both `Tracer` and `SfDb`) is built against
+   * exactly this shape. For `kind: "sqlite"`, `path` here is already
+   * resolved ABSOLUTE (byte-for-byte the same value as `db_path` below); for
+   * `kind: "d1"` there is no local path at all.
+   */
+  db: NormalizedObservabilityDb;
+  /** Absolute local sqlite path, or `null` for a `kind: "d1"` config — there is no local file to open. */
+  db_path: string | null;
+  /**
+   * Absolute. Anchored directly off `data_dir` (NOT off `db_path`) — session
+   * JSONL/envelope artifact files always live on the local filesystem
+   * regardless of where the queryable trace mirror (`db` above) lives, so
+   * this must resolve even when `db_path` is `null` for a d1-backed repo.
+   */
   sessions_dir: string;
 }
 
@@ -154,41 +167,36 @@ function healBrokenDataDir(data_dir: string): void {
  * (`resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db)`)
  * keeps compiling and behaving unchanged with no call-site edit needed.
  *
- * For a `"sqlite"`-kind db (the only kind that existed before this PR, and
- * still the only kind any adapter can open), `db_path` resolves BYTE-FOR-
- * BYTE identically to before: `path.resolve(repo_root, path)`.
+ * For a `"sqlite"`-kind db, `db_path`/`db.path` resolve BYTE-FOR-BYTE
+ * identically to before this PR: `path.resolve(repo_root, path)`.
  *
- * For a `"d1"`-kind db there is no local file to resolve a path for — a
- * remote Cloudflare D1 database isn't "a sibling of `sessions_dir`" the way
- * every current caller's `db_path` usage (`new SfDb(dataPaths.db_path)`,
- * `existsSync(dataPaths.db_path)`, `Tracer(dataPaths.db_path, ...)`, plus
- * `spf doctor`'s and `spf init`'s own reads of it) all assume. Rather than
- * hand those unmodified callers a fabricated path that silently opens (or
- * creates) the wrong sqlite file, or a `null` that would need every one of
- * them updated to null-check it — this PR's whole point is introducing the
- * schema WITHOUT touching the adapter or those call sites (PR 2 builds the
- * D1 `Database` adapter; PR 3 updates `spf doctor`'s/`spf init`'s own
- * handling) — this throws a clear, actionable error instead. A repo that
- * sets `observability.db: {kind: d1, ...}` today gets a loud failure at the
- * first command that resolves data paths, not a silent local-file
- * fallback or a confusing low-level crash.
+ * For a `"d1"`-kind db there is no local file at all — `db_path` is `null`,
+ * and `db` carries the resolved `{kind:"d1", database_id, account_id_env,
+ * api_token_env}` for `core/trace_db.ts`'s `createTraceDb()` to open (PR 2:
+ * SPF #66). `sessions_dir` has no `db_path` to anchor off in this case, so it
+ * falls back to `data_dir/sessions` — session JSONL/envelope artifacts still
+ * always live on disk regardless of where the queryable trace mirror lives.
+ *
+ * For a `"sqlite"`-kind db, `sessions_dir` stays what it always was — ALWAYS
+ * a sibling of `db_path` (`dirname(db_path)/sessions`), never `data_dir`
+ * directly — `migrate.ts` and `SfDb` both depend on that: a repo whose db
+ * lives outside `data_dir` (`observability.db: elsewhere/custom.db` next to
+ * `defaults.data_dir: .spf/data`) still has its sessions found. Relocating
+ * `data_dir` alone must never orphan an existing db's session artifacts.
  */
 export function resolveDataPaths(anchor: RepoAnchor, rawDataDir: string, rawDb: ObservabilityDbInput): DataPaths {
   const data_dir = path.resolve(anchor.repo_root, rawDataDir);
   healBrokenDataDir(data_dir);
   const data_dir_rel = path.relative(anchor.repo_root, data_dir).split(path.sep).join("/");
 
-  const db = resolveObservabilityDb(rawDb);
-  if (db.kind === "d1") {
-    throw new Error(
-      `observability.db is configured as a Cloudflare D1 database (database_id: ${JSON.stringify(db.database_id)}), ` +
-        `but this build has no D1 adapter yet — that lands in a follow-up release. ` +
-        `Configure observability.db as a local sqlite path (or omit it — ".spf/data/spf.db" is the default) in the meantime.`,
-    );
+  const normalized = resolveObservabilityDb(rawDb);
+  if (normalized.kind === "d1") {
+    const sessions_dir = path.resolve(data_dir, "sessions");
+    return { data_dir, data_dir_rel, db: normalized, db_path: null, sessions_dir };
   }
-  const db_path = path.resolve(anchor.repo_root, db.path);
+  const db_path = path.resolve(anchor.repo_root, normalized.path);
   const sessions_dir = path.resolve(path.dirname(db_path), "sessions");
-  return { data_dir, data_dir_rel, db_path, sessions_dir };
+  return { data_dir, data_dir_rel, db: { kind: "sqlite", path: db_path }, db_path, sessions_dir };
 }
 
 /**

@@ -17,7 +17,6 @@
  * picks up on its own is a different, larger feature (a `goal-ready` watch
  * lane) that needs its own crash-safe marker schema and is not this.
  */
-import { existsSync } from "node:fs";
 import type { SFConfig } from "../../core/data_types.ts";
 import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
@@ -53,8 +52,13 @@ function qualityRunLike(input: { cfg: SFConfig; repoRoot: string; contextHandoff
     phases: [{ phase_id: `${input.adwId}_00_loop_stop`, adw_id: input.adwId, seq: 0, params: { name: "loop_stop", kind: "code", owner: "quality", description: "loop stop check", retries: 0 }, status: "running", attempt: 0 }],
     context_handoff_dir: input.contextHandoffDir,
     repo_root: input.repoRoot,
-    console: { note: (message: string) => console.log(`[spf] loop    ${message}`) },
-    tracer: { event: () => "" },
+    console: {
+      note: (message: string) => {
+        console.log(`[spf] loop    ${message}`);
+        return Promise.resolve();
+      },
+    },
+    tracer: { event: () => Promise.resolve("") },
     adw_id: input.adwId,
   };
 }
@@ -172,15 +176,28 @@ export async function loopCommand(argv: string[]): Promise<number> {
     // total, not for deciding correctness.
     let tokens = 0;
     let cost = 0;
-    if (existsSync(dataPaths.db_path)) {
-      const db = new SfDb(dataPaths.db_path);
-      try {
-        const session = db.session(iteration.adw_id);
-        tokens = session?.total_tokens ?? 0;
-        cost = session?.total_cost ?? 0;
-      } finally {
-        db.close();
+    // `SfDb.exists` covers both backends: `existsSync(dataPaths.db_path)`
+    // for local sqlite, and a cheap `sqlite_master` probe (false, not a
+    // throw, when the table isn't there yet) for d1. Both the existence
+    // check and the read itself are inside this loop's own try/catch —
+    // `runIteration` is documented as never throwing (see loop.ts's header),
+    // and a D1 hiccup reaching this readback must rank as zero, not abort
+    // the iteration, the same "never throw, rank as zero" discipline
+    // `fanout.ts`'s `readMetrics` already uses.
+    try {
+      if (await SfDb.exists(dataPaths)) {
+        const db = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
+        try {
+          const session = await db.session(iteration.adw_id);
+          tokens = session?.total_tokens ?? 0;
+          cost = session?.total_cost ?? 0;
+        } finally {
+          await db.close();
+        }
       }
+    } catch {
+      // best-effort readback only — tokens/cost simply stay 0 for this
+      // iteration's ledger row.
     }
 
     let commitSha: string | null = null;
@@ -188,7 +205,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
     if (exitCode === 0 && error === null) {
       const git = makeGit(anchor.repo_root);
       commitSha = git.shortSha();
-      const result = quality.runSuite(
+      const result = await quality.runSuite(
         qualityRunLike({ cfg, repoRoot: anchor.repo_root, contextHandoffDir: dataPaths.sessions_dir, adwId: iteration.adw_id }),
         stop.suite,
       );

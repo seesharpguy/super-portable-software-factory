@@ -284,7 +284,7 @@ export interface FanoutDeps {
   /** Run one attempt's chain in `cwd`, returning its exit code. */
   runAttempt: (dispatch: AttemptDispatch) => Promise<number>;
   /** Read this adw_id's gate/usage rows from the SHARED db. Must not throw — return `ZERO_METRICS` on any hiccup. */
-  readMetrics: (adwId: string) => AttemptMetrics;
+  readMetrics: (adwId: string) => Promise<AttemptMetrics>;
   log: (message: string) => void;
   /**
    * Opt-in first-past-the-post. Default (unset/false): every attempt that
@@ -374,7 +374,7 @@ export async function runBestOf(deps: FanoutDeps): Promise<FanoutResult> {
 
     let metrics = ZERO_METRICS;
     try {
-      metrics = deps.readMetrics(adwId);
+      metrics = await deps.readMetrics(adwId);
     } catch (caught) {
       // Metrics are for RANKING, never for correctness — an attempt whose
       // rows can't be read ranks as a zero-gate, zero-cost run rather than

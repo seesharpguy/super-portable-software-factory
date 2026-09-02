@@ -32,8 +32,8 @@ before(async () => {
   );
 
   const dbPath = join(dir, "spf.db");
-  const tracer = new Tracer(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
-  tracer.sessionStart(ADW_ID, "tester", "quality");
+  const tracer = await Tracer.open(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
+  await tracer.sessionStart(ADW_ID, "tester", "quality");
   const phase = {
     phase_id: `${ADW_ID}_01_request`,
     adw_id: ADW_ID,
@@ -45,13 +45,14 @@ before(async () => {
     started_at: null,
     ended_at: null,
   };
-  tracer.phaseUpsert(phase);
-  tracer.event(makeEventRecord({ adw_id: ADW_ID, phase_id: phase.phase_id, type: "log", name: "request", payload: { input: "seed" } }));
-  tracer.sessionFinish(ADW_ID, true);
+  await tracer.phaseUpsert(phase);
+  await tracer.event(makeEventRecord({ adw_id: ADW_ID, phase_id: phase.phase_id, type: "log", name: "request", payload: { input: "seed" } }));
+  await tracer.sessionFinish(ADW_ID, true);
+  await tracer.close();
 
   // dist/test/ui_server.test.js -> dist -> package root -> web
   const webDir = join(import.meta.dirname, "..", "..", "web");
-  handle = await runUi({ dbPath, webDir, port: 0, open: false });
+  handle = await runUi({ db: { kind: "sqlite", path: dbPath }, webDir, port: 0, open: false });
 });
 
 after(async () => {

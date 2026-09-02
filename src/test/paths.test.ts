@@ -102,7 +102,10 @@ test("resolveDataPaths: {kind:sqlite} object form with a custom path resolves re
   const anchor = resolveAnchor(dir);
   const paths = resolveDataPaths(anchor, ".spf/data", { kind: "sqlite", path: "elsewhere/custom.db" });
   assert.equal(paths.db_path, join(dir, "elsewhere", "custom.db"));
-  assert.equal(paths.sessions_dir, join(dir, "elsewhere", "sessions"), "sessions_dir stays a sibling of db_path");
+  // sessions_dir is ALWAYS a sibling of db_path for a sqlite-kind db — NOT
+  // anchored off data_dir — so a custom sqlite path elsewhere than data_dir
+  // does not orphan a repo's historical session JSONL/envelope artifacts.
+  assert.equal(paths.sessions_dir, join(dir, "elsewhere", "sessions"), "sessions_dir is a sibling of db_path, unaffected by data_dir");
 });
 
 test("resolveDataPaths: {kind:sqlite} object form with path omitted defaults to .spf/data/spf.db, same as the bare-string default", () => {
@@ -111,18 +114,45 @@ test("resolveDataPaths: {kind:sqlite} object form with path omitted defaults to 
   assert.equal(paths.db_path, join(dir, ".spf", "data", "spf.db"));
 });
 
-test("resolveDataPaths: {kind:d1} throws a clear, actionable error instead of fabricating a local db_path — no adapter exists yet", () => {
+// ── {kind:d1} resolves to a usable descriptor (SPF #66, PR 2) ──────────────
+//
+// PR 1 left resolveDataPaths throwing for a d1 config ("no D1 adapter yet").
+// PR 2 builds that adapter (core/trace_db.ts's D1TraceDb) — resolveDataPaths
+// must stop throwing and instead hand back enough for createTraceDb() to
+// open a real D1 connection, while sessions_dir still resolves to a real
+// LOCAL directory (session JSONL/envelope artifacts always live on disk).
+
+test("resolveDataPaths: {kind:d1} no longer throws — db_path is null, db carries the normalized d1 descriptor", () => {
   const anchor = resolveAnchor(dir);
-  assert.throws(
-    () => resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" }),
-    /d1|D1/,
-    "the error must mention D1 so an operator understands why this failed",
-  );
-  assert.throws(
-    () => resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" }),
-    /abc123/,
-    "the error should name the configured database_id, to help pin down which config is at fault",
-  );
-  // Never silently creates/heals a local data_dir for a config that isn't actually local.
-  assert.equal(existsSync(join(dir, ".spf", "data")), false);
+  const paths = resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" });
+  assert.equal(paths.db_path, null, "there is no local sqlite file for a d1-backed repo");
+  assert.deepEqual(paths.db, {
+    kind: "d1",
+    database_id: "abc123",
+    account_id_env: "CLOUDFLARE_ACCOUNT_ID",
+    api_token_env: "CLOUDFLARE_API_TOKEN",
+  });
+});
+
+test("resolveDataPaths: {kind:d1} still resolves a real local sessions_dir, anchored off data_dir — session artifacts stay local regardless of the trace db backend", () => {
+  const anchor = resolveAnchor(dir);
+  const paths = resolveDataPaths(anchor, ".spf/data", { kind: "d1", database_id: "abc123" });
+  assert.equal(paths.sessions_dir, join(dir, ".spf", "data", "sessions"));
+  assert.equal(paths.data_dir, join(dir, ".spf", "data"));
+});
+
+test("resolveDataPaths: {kind:d1} with custom account_id_env/api_token_env passes them through unchanged", () => {
+  const anchor = resolveAnchor(dir);
+  const paths = resolveDataPaths(anchor, ".spf/data", {
+    kind: "d1",
+    database_id: "abc123",
+    account_id_env: "MY_ACCOUNT_ID",
+    api_token_env: "MY_API_TOKEN",
+  });
+  assert.deepEqual(paths.db, {
+    kind: "d1",
+    database_id: "abc123",
+    account_id_env: "MY_ACCOUNT_ID",
+    api_token_env: "MY_API_TOKEN",
+  });
 });

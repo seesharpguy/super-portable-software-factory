@@ -236,7 +236,7 @@ export async function estimateCommand(argv: string[]): Promise<number> {
   }
   const prompt = resolvePrompt(promptArg!);
 
-  const trace = openTraceIfExists(options);
+  const trace = await openTraceIfExists(options);
   const cfg = trace.cfg;
 
   // Same shape as run.ts:54-56 — conditional insertion, never `{agent: flags["agent"] ?? ""}`.
@@ -261,7 +261,7 @@ export async function estimateCommand(argv: string[]): Promise<number> {
     validateError = error instanceof Error ? error.message : String(error);
   }
 
-  const history = trace.db ? trace.db.chainPhaseHistory(chain.name) : { sessions: [], joinedExcluded: 0 };
+  const history = trace.db ? await trace.db.chainPhaseHistory(chain.name) : { sessions: [], joinedExcluded: 0 };
   const sample = selectSample(history.sessions, history.joinedExcluded);
   const coldStart = sample.sessions.length === 0;
 
@@ -273,7 +273,7 @@ export async function estimateCommand(argv: string[]): Promise<number> {
   const historicalModels = new Map<string, string>();
   if (trace.db) {
     for (const session of sample.sessions) {
-      for (const row of trace.db.agentSessions(session.adw_id)) {
+      for (const row of await trace.db.agentSessions(session.adw_id)) {
         if (row.model !== null && !historicalModels.has(row.agent)) historicalModels.set(row.agent, row.model);
       }
     }

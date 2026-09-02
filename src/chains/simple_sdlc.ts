@@ -97,8 +97,8 @@ export interface SignoffParams {
   asker: Asker | null;
   /** `undefined` when `git config user.name`/`user.email` is unset at this repo — see `git_helper.committerIdentity`. */
   identity: CommitterIdentity | undefined;
-  /** Routes into the phase's own trace record — `ph.log`, unchanged (no tracer changes on this thread). */
-  log: (payload: Record<string, unknown>) => void;
+  /** Routes into the phase's own trace record — `ph.log`, now async (`Tracer`'s write methods all are — see `core/tracer.ts`'s header). */
+  log: (payload: Record<string, unknown>) => Promise<void>;
   /** Console-only, never traced — the prompt itself and its framing, kept out of the event stream on purpose (the DECISION is what `log` records). */
   warn: (line: string) => void;
 }
@@ -145,7 +145,7 @@ export async function decideSignoff(params: SignoffParams): Promise<SignoffOutco
       );
     }
     warn(paint("bold yellow", `⚠ ${AI_ONLY_SIGNOFF_WARNING}`));
-    log({
+    await log({
       decision: "ai_only",
       warning: AI_ONLY_SIGNOFF_WARNING,
       human: false,
@@ -174,7 +174,7 @@ export async function decideSignoff(params: SignoffParams): Promise<SignoffOutco
     false,
     { timeoutMs: signoffTimeoutSeconds * 1000 },
   );
-  log({
+  await log({
     decision: accepted ? "approved" : "declined",
     human: true,
     engineer: identity?.name ?? null,
@@ -184,7 +184,7 @@ export async function decideSignoff(params: SignoffParams): Promise<SignoffOutco
   });
   if (accepted && !identity) {
     warn(paint("dim", "  no git committer identity (user.name/user.email) is set — sign-off recorded, no Signed-off-by trailer"));
-    log({ note: "signoff recorded without a git committer identity — trailer skipped" });
+    await log({ note: "signoff recorded without a git committer identity — trailer skipped" });
   }
   return { accepted, recordedYes: accepted };
 }
@@ -210,7 +210,7 @@ export async function main(ctx: ChainContext): Promise<number> {
   const baseline = run.git.rev("HEAD"); // pinned before this run commits anything
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
-    ph.log({ input: prompt, baseline: run.git.shortSha(baseline) });
+    await ph.log({ input: prompt, baseline: run.git.shortSha(baseline) });
   });
 
   const plan = await run.phase(
@@ -220,7 +220,7 @@ export async function main(ctx: ChainContext): Promise<number> {
 
   await run.phase(
     makePhaseParams({ name: "commit_plan", kind: "code", owner: "git", description: "Put the spec on record before any code exists to blur it" }),
-    async (ph) => commitEnvelope(run, ph, plan),
+    async (ph) => await commitEnvelope(run, ph, plan),
   );
 
   let build: BuildOutputT = await run.phase(
@@ -238,8 +238,8 @@ export async function main(ctx: ChainContext): Promise<number> {
         description: "Run the suite — a known command, so code runs it and no agent has to rediscover it",
       }),
       async (ph) => {
-        const result = quality.runTests(run);
-        quality.record(ph, result);
+        const result = await quality.runTests(run);
+        await quality.record(ph, result);
         return result;
       },
     );
@@ -289,8 +289,8 @@ export async function main(ctx: ChainContext): Promise<number> {
         description: "Re-run the suite — the revision changed code after the last green result",
       }),
       async (ph) => {
-        const result = quality.runTests(run);
-        quality.record(ph, result);
+        const result = await quality.runTests(run);
+        await quality.record(ph, result);
         return result;
       },
     );
@@ -351,14 +351,14 @@ export async function main(ctx: ChainContext): Promise<number> {
       // trailerFor gates the trailer on recordedYes, not just `verified` — see
       // its own comment: a Signed-off-by line must trace back to an explicit
       // "yes", never to the AI-only path (where `verified` can also be true).
-      async (ph) => commitEnvelope(run, ph, build, trailerFor({ accepted: verified, recordedYes }, identity)),
+      async (ph) => await commitEnvelope(run, ph, build, trailerFor({ accepted: verified, recordedYes }, identity)),
     );
 
     const changeset = await run.phase(
       makePhaseParams({ name: "changes", kind: "code", owner: "git", description: "Diff the whole run against its pinned baseline, for the documenter" }),
       async (ph) => {
         const result = changes.capture(run, makeChangeCapture({ base: baseline }));
-        logChangeset(ph, result);
+        await logChangeset(ph, result);
         if (result.empty) {
           throw new Error(`nothing changed since ${result.base.label} (${result.base.reason}) — there is nothing to document.`);
         }
@@ -381,9 +381,9 @@ export async function main(ctx: ChainContext): Promise<number> {
 
     await run.phase(
       makePhaseParams({ name: "commit_docs", kind: "code", owner: "git", description: "Ship the write-up in its own commit, beside the code it describes" }),
-      async (ph) => commitEnvelope(run, ph, document),
+      async (ph) => await commitEnvelope(run, ph, document),
     );
   }
 
-  return run.finish(verified, "the suite or the review never came back clean, or sign-off never came");
+  return await run.finish(verified, "the suite or the review never came back clean, or sign-off never came");
 }

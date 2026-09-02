@@ -9,8 +9,8 @@ export async function phasesCommand(argv: string[]): Promise<number> {
     return 1;
   }
   const adwId = positionals[0];
-  const { db } = openTrace(options);
-  const rows = db.phases(adwId);
+  const { db } = await openTrace(options);
+  const rows = await db.phases(adwId);
 
   if (flags["json"]) {
     console.log(JSON.stringify(rows, null, 2));

@@ -305,12 +305,15 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
   // `sessionAddUsage` ACCUMULATES onto it — so a collision would silently mix
   // the previous run's cost/tokens/gate rows into this run's selection
   // basis, and the human reading `basis:` would be told a wrong reason.
-  if (existsSync(dataPaths.db_path)) {
-    const preflight = new SfDb(dataPaths.db_path);
+  if (await SfDb.exists(dataPaths)) {
+    const preflight = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
     try {
-      const collisions = Array.from({ length: n }, (_, i) => attemptAdwId(baseAdwId, i + 1)).filter(
-        (id) => preflight.session(id) !== null,
+      const collisionChecks = await Promise.all(
+        Array.from({ length: n }, (_, i) => attemptAdwId(baseAdwId, i + 1)).map(
+          async (id) => ((await preflight.session(id)) !== null ? id : null),
+        ),
       );
+      const collisions = collisionChecks.filter((id): id is string => id !== null);
       if (collisions.length > 0) {
         console.error(
           `--adw-id ${baseAdwId} already has session rows for ${collisions.join(", ")} from a previous fanout ` +
@@ -321,7 +324,7 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
         return 1;
       }
     } finally {
-      preflight.close();
+      await preflight.close();
     }
   }
 
@@ -339,23 +342,80 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
   const linkDataDir = (worktreePath: string) => linkFanoutDataDir(worktreePath, dataPaths.data_dir);
 
   /**
-   * The shared db, opened lazily and once: it does not exist until the first
-   * attempt's tracer creates it, and `SfDb`'s constructor throws on a missing
-   * file. Readonly + WAL, so reading one finished attempt's rows while its
-   * siblings are still writing is exactly the access pattern the tracer's
-   * PRAGMAs are set up for.
+   * The shared db, opened lazily: it does not exist until the first
+   * attempt's tracer creates it, and `SfDb.open` throws on a repo whose db
+   * has never been written to. Readonly + WAL, so reading one finished
+   * attempt's rows while its siblings are still writing is exactly the
+   * access pattern the tracer's PRAGMAs are set up for.
+   *
+   * The IN-FLIGHT PROMISE is memoized, not the resolved value: `core/
+   * fanout.ts` runs `concurrency` workers in parallel, each calling
+   * `readMetrics` independently, so a bare "check `held.db`, then `await`
+   * open, then assign" would let two workers both observe `held.db` unset,
+   * both open a connection, and orphan one unclosed `SfDb` handle. Every
+   * concurrent caller instead awaits this SAME promise, so at most one
+   * `SfDb.exists`/`SfDb.open` pair ever runs at a time.
+   *
+   * Memoized ONLY while pending or successful, though — a rejected open (a
+   * transient D1 network/auth blip) clears the memo (`held.opening = null`
+   * in `ensureDb`'s `.catch()` below) rather than caching the failure
+   * forever. Without that, one blip on attempt 1 would leave every later
+   * attempt reading `ZERO_METRICS` for the rest of the run, degrading the
+   * whole fanout's ranking over a single transient error instead of just
+   * the one attempt that hit it.
+   *
+   * The same reasoning applies to `SfDb.exists` resolving `false`: "not
+   * created yet" is a snapshot, not a permanent fact — a sibling attempt
+   * still mid-`session.ensure` can create the db moments later. HEAD's
+   * `existsSync` re-checked on every call; memoizing a `false` verdict
+   * across this run's whole lifetime would silently zero out every later
+   * attempt's real metrics once the db does show up, so `ensureDb` clears
+   * the memo on a `false` verdict too, not just on rejection.
    */
-  // A holder rather than a bare `let`: assigned only inside the closure below,
-  // a plain local narrows to `null` everywhere else and the `finally`'s
-  // `close()` stops typechecking.
-  const held: { db: SfDb | null } = { db: null };
-  function readMetrics(adwId: string): AttemptMetrics {
-    if (!held.db) {
-      if (!existsSync(dataPaths.db_path)) return ZERO_METRICS;
-      held.db = new SfDb(dataPaths.db_path);
+  // A holder object rather than a bare `let`: with a bare `let db: SfDb |
+  // null = null` reassigned only inside `ensureDb`'s nested async closure,
+  // TypeScript cannot track that reassignment across the closure boundary —
+  // at the outer `finally`'s `db?.close()` read site (below), it infers
+  // `db`'s type as `never` (narrowed from the closure never having run, as
+  // far as the checker can tell at that point) and refuses to compile:
+  // "Property 'close' does not exist on type 'never'". Routing the same
+  // mutable cell through a holder object's property sidesteps that —
+  // `held.db` is never narrowed to a literal `null` the way a bare `let`
+  // is, so the read site stays typed `SfDb | null` throughout. `opening`
+  // rides the same holder for the same reason: it too is reassigned inside
+  // `ensureDb`'s `.catch()` closure (to clear the memo — see below), and a
+  // bare `let` there trips the identical `never`-narrowing bug at the
+  // outer `finally`'s own read of it.
+  const held: { db: SfDb | null; opening: Promise<void> | null } = { db: null, opening: null };
+  function ensureDb(): Promise<void> {
+    if (!held.opening) {
+      held.opening = (async () => {
+        if (await SfDb.exists(dataPaths)) {
+          held.db = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
+        } else {
+          held.opening = null;
+        }
+      })().catch((error) => {
+        // Do not let one transient failure (a D1 network/auth blip) poison
+        // every subsequent attempt's metrics for the rest of this run: clear
+        // the memo so the NEXT caller gets a fresh open attempt instead of
+        // permanently reusing this rejected promise. The rejection itself
+        // still propagates to whichever concurrent callers are already
+        // awaiting this exact promise object (reassigning `held.opening`
+        // here does not change what an already-returned promise resolves
+        // to) — `readMetrics` above (and its caller in `core/fanout.ts`)
+        // already catches that and ranks the attempt on zero metrics.
+        held.opening = null;
+        throw error;
+      });
     }
-    const gates = held.db.gates(adwId);
-    const session = held.db.session(adwId);
+    return held.opening;
+  }
+  async function readMetrics(adwId: string): Promise<AttemptMetrics> {
+    await ensureDb();
+    if (!held.db) return ZERO_METRICS;
+    const gates = await held.db.gates(adwId);
+    const session = await held.db.session(adwId);
     // `passed` is a SQLite integer boolean that CAN be NULL on a row an older
     // tracer wrote. Counted explicitly in both directions, never as
     // `!g.passed`: a NULL is unknown, and letting it read as a failure would
@@ -502,7 +562,19 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
     console.log(`The other attempts' worktrees and branches were deleted; their traces remain in the db (\`spf phases <adw_id>\`).`);
     return 0;
   } finally {
-    held.db?.close();
+    // `.catch(() => {})`, not a bare `await`: `held.opening` is a settled
+    // promise `readMetrics` (via `ensureDb`) may have already awaited and
+    // handled upstream (`core/fanout.ts` catches a `readMetrics` rejection,
+    // logs it, and ranks that attempt on zero metrics) — re-awaiting the
+    // SAME rejected promise here a second time would throw straight out of
+    // this `finally`, turning a completed, winner-printed `spf fanout` run
+    // into a nonzero exit, and would also skip `held.db?.close()` and the
+    // `process.off` calls below (a `finally` that throws never reaches its
+    // own remaining statements). Nothing here needs the resolved value or
+    // the rejection reason — only that the open attempt has settled before
+    // deciding whether there's a `held.db` to close.
+    if (held.opening) await held.opening.catch(() => {});
+    await held.db?.close();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }

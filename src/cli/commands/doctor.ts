@@ -312,7 +312,17 @@ export async function doctorCommand(argv: string[]): Promise<number> {
 
   const dataPaths = paths.resolveDataPaths(anchor, cfg.defaults.data_dir, cfg.observability.db);
   check(report, "data_dir", true, dataPaths.data_dir);
-  check(report, "db_path", true, `${dataPaths.db_path}${existsSync(dataPaths.db_path) ? "" : " (not created yet — fine before the first run)"}`);
+  // `db_path` is `null` for a `kind: "d1"` observability.db — there is no
+  // local file to check for existence; `spf doctor`'s own D1 reachability
+  // probe (account id / API token / database id) is PR 3's job (SPF #66).
+  check(
+    report,
+    "db_path",
+    true,
+    dataPaths.db_path
+      ? `${dataPaths.db_path}${existsSync(dataPaths.db_path) ? "" : " (not created yet — fine before the first run)"}`
+      : `d1 database_id=${JSON.stringify(dataPaths.db.kind === "d1" ? dataPaths.db.database_id : "")} (remote — no local file)`,
+  );
   check(report, "flue_db_path", true, path.join(dataPaths.data_dir, "flue.db"));
 
   // Validate the WHOLE roster and EVERY declared suite — doctor's job is "is

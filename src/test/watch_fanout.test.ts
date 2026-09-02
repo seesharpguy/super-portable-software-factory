@@ -224,8 +224,8 @@ function fanoutHarness(opts: {
   n: number;
   concurrency?: number;
   exitFor?: (index: number) => number;
-  metricsFor?: (index: number) => AttemptMetrics;
-  adwIdsFree?: (adwIds: string[]) => boolean;
+  metricsFor?: (index: number) => Promise<AttemptMetrics>;
+  adwIdsFree?: (adwIds: string[]) => Promise<boolean>;
   reviewFor?: WatchFanoutDeps["reviewFor"];
   watchDepsOverrides?: Partial<WatchDeps>;
 }): FanoutHarness {
@@ -238,9 +238,9 @@ function fanoutHarness(opts: {
     dispatched.push(dispatch);
     return (opts.exitFor ?? (() => 0))(dispatch.index);
   };
-  const readMetrics = (adwId: string): AttemptMetrics => {
+  const readMetrics = async (adwId: string): Promise<AttemptMetrics> => {
     const index = Number(adwId.split("-").pop());
-    return (opts.metricsFor ?? (() => ({ gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 })))(index);
+    return (opts.metricsFor ?? (async () => ({ gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 })))(index);
   };
 
   const fanout: WatchFanoutDeps = {
@@ -249,8 +249,8 @@ function fanoutHarness(opts: {
     repoRoot: "/repo",
     runAttempt,
     readMetrics,
-    adwIdsFree: opts.adwIdsFree ?? (() => true),
-    reviewFor: opts.reviewFor ?? (() => ({ reviewRequired: false, reviewSummary: undefined })),
+    adwIdsFree: opts.adwIdsFree ?? (async () => true),
+    reviewFor: opts.reviewFor ?? (async () => ({ reviewRequired: false, reviewSummary: undefined })),
   };
 
   const deps: WatchDeps = {
@@ -331,8 +331,8 @@ test("watch.fanout: n=3, the winner (fewest gate failures) is renamed, pushed, a
     provider,
     codeHost,
     n: 3,
-    metricsFor: (index) => ({ gate_passes: 1, gate_failures: index === 2 ? 0 : 1, cost: 0, tokens: 0 }),
-    reviewFor: (o) => {
+    metricsFor: async (index) => ({ gate_passes: 1, gate_failures: index === 2 ? 0 : 1, cost: 0, tokens: 0 }),
+    reviewFor: async (o) => {
       reviewForCall = { cwd: o.cwd, adwId: o.adwId };
       return { reviewRequired: true, reviewSummary: "Reviewer verdict: approved." };
     },
@@ -487,7 +487,7 @@ test("watch.fanout: the pre-sweep range follows the probed salt — bases 0..sal
     provider,
     codeHost,
     n: 2,
-    adwIdsFree: (ids) => {
+    adwIdsFree: async (ids) => {
       const base = ids[0]!.replace(/-\d+$/, "");
       return base === "issue-1-r2"; // r0 and r1 are "taken", r2 is free
     },
@@ -658,7 +658,7 @@ test("watch.fanout: the salt is probed from session rows, not from marker.attemp
     provider,
     codeHost,
     n: 3,
-    adwIdsFree: (ids) => !takenBases.has(ids[0]!.replace(/-\d+$/, "")),
+    adwIdsFree: async (ids) => !takenBases.has(ids[0]!.replace(/-\d+$/, "")),
   });
   try {
     await claimNewWork(h.deps, state);
@@ -680,7 +680,7 @@ test("watch.fanout: marker.attempt=1 (the orphan-retry path) picks the SAME salt
     provider,
     codeHost,
     n: 3,
-    adwIdsFree: (ids) => !takenBases.has(ids[0]!.replace(/-\d+$/, "")),
+    adwIdsFree: async (ids) => !takenBases.has(ids[0]!.replace(/-\d+$/, "")),
   });
   try {
     await claimNewWork(h.deps, state);
@@ -698,7 +698,7 @@ test("watch.fanout: the salt cap (8) falls back to a random base id rather than 
   provider.addIssue("1", "Add a widget");
   const codeHost = new FakeCodeHost();
   const state = createWatchState();
-  const h = fanoutHarness({ provider, codeHost, n: 2, adwIdsFree: () => false });
+  const h = fanoutHarness({ provider, codeHost, n: 2, adwIdsFree: async () => false });
   try {
     await claimNewWork(h.deps, state);
     await waitUntil(() => state.inflight.size === 0);

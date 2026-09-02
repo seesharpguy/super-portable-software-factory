@@ -45,15 +45,15 @@ export function createApp(db: SfDb, webDir: string): Hono {
     c.header("cache-control", "no-store");
   });
 
-  app.get("/api/health", (c) =>
-    c.json({ ok: true, db: db.path, journal_mode: db.journalMode, sessions: db.sessionCount() }),
+  app.get("/api/health", async (c) =>
+    c.json({ ok: true, db: db.label, journal_mode: db.journalMode, sessions: await db.sessionCount() }),
   );
 
-  app.get("/api/sessions", (c) => c.json(db.sessions(intQueryParam(c.req.query("limit"), 200))));
+  app.get("/api/sessions", async (c) => c.json(await db.sessions(intQueryParam(c.req.query("limit"), 200))));
 
-  app.get("/api/sessions/:adw_id", (c) => {
+  app.get("/api/sessions/:adw_id", async (c) => {
     const adwId = c.req.param("adw_id");
-    const detail = db.sessionDetail(adwId);
+    const detail = await db.sessionDetail(adwId);
     if (!detail) return c.json({ error: `no session ${adwId}` } satisfies ApiError, 404);
     return c.json(detail);
   });
@@ -65,27 +65,27 @@ export function createApp(db: SfDb, webDir: string): Hono {
     if (!isSafeSegment(adwId)) return c.json({ error: "invalid adw_id" } satisfies ApiError, 400);
     const body = (await c.req.json().catch(() => ({}))) as { archived?: unknown };
     const archived = body.archived === undefined ? true : Boolean(body.archived);
-    if (!db.setArchived(adwId, archived)) return c.json({ error: `no session ${adwId}` } satisfies ApiError, 404);
+    if (!(await db.setArchived(adwId, archived))) return c.json({ error: `no session ${adwId}` } satisfies ApiError, 404);
     return c.json({ adw_id: adwId, archived });
   });
 
-  app.get("/api/sessions/:adw_id/events", (c) =>
-    c.json(db.events(c.req.param("adw_id"), intQueryParam(c.req.query("after"), 0), intQueryParam(c.req.query("limit"), 500))),
+  app.get("/api/sessions/:adw_id/events", async (c) =>
+    c.json(await db.events(c.req.param("adw_id"), intQueryParam(c.req.query("after"), 0), intQueryParam(c.req.query("limit"), 500))),
   );
 
-  app.get("/api/sessions/:adw_id/envelopes", (c) => c.json(db.envelopes(c.req.param("adw_id"))));
+  app.get("/api/sessions/:adw_id/envelopes", async (c) => c.json(await db.envelopes(c.req.param("adw_id"))));
 
-  app.get("/api/sessions/:adw_id/gates", (c) => c.json(db.gates(c.req.param("adw_id"))));
+  app.get("/api/sessions/:adw_id/gates", async (c) => c.json(await db.gates(c.req.param("adw_id"))));
 
   // The exact prompts an agent was sent, read from the session dir. Files are
   // the raw record; the db has no copy of them.
-  app.get("/api/sessions/:adw_id/agents/:agent/prompts", (c) => {
+  app.get("/api/sessions/:adw_id/agents/:agent/prompts", async (c) => {
     const adwId = c.req.param("adw_id");
     const agent = c.req.param("agent");
     if (!isSafeSegment(adwId) || !isSafeSegment(agent)) {
       return c.json({ error: "invalid adw_id or agent" } satisfies ApiError, 400);
     }
-    if (!db.session(adwId)) return c.json({ error: `no session ${adwId}` } satisfies ApiError, 404);
+    if (!(await db.session(adwId))) return c.json({ error: `no session ${adwId}` } satisfies ApiError, 404);
 
     const dir = resolve(db.sessionsDir, adwId, agent, "prompts");
     // Defense in depth: the segment check already forbids traversal.

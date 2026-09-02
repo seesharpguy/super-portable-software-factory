@@ -167,7 +167,7 @@ export interface WatchFanoutDeps {
   /** One attempt's chain, in that attempt's own worktree — the same ctx `runChain` builds, per attempt. */
   runAttempt: (dispatch: AttemptDispatch) => Promise<number>;
   /** Gate/usage rows for one attempt's adw_id, from the SHARED db. Must not throw. */
-  readMetrics: (adwId: string) => AttemptMetrics;
+  readMetrics: (adwId: string) => Promise<AttemptMetrics>;
   /**
    * True when NOT ONE of these adw_ids has a session row yet — the same db,
    * the same predicate and the same reasoning as `spf fanout`'s reuse
@@ -183,9 +183,9 @@ export interface WatchFanoutDeps {
    * rather than reporting "free" and letting a previous run's rows decide
    * this run's winner.
    */
-  adwIdsFree: (adwIds: string[]) => boolean;
+  adwIdsFree: (adwIds: string[]) => Promise<boolean>;
   /** The winner's review posture, read back post-hoc — the same two fields `runChain` returns, keyed on a WINNER instead of the sole attempt. */
-  reviewFor: (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => { reviewRequired: boolean; reviewSummary?: string };
+  reviewFor: (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => Promise<{ reviewRequired: boolean; reviewSummary?: string }>;
 }
 
 export interface WatchDeps {
@@ -1166,7 +1166,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
     let salt = 0;
     for (; salt <= MAX_FANOUT_SALT; salt++) {
       const ids = Array.from({ length: n }, (_, i) => attemptAdwId(baseFor(issue, salt), i + 1));
-      if (fanout.adwIdsFree(ids)) break;
+      if (await fanout.adwIdsFree(ids)) break;
     }
     const baseAdwId = salt <= MAX_FANOUT_SALT ? baseFor(issue, salt) : `issue-${issue.id}-x${newId(4)}`;
     if (salt > MAX_FANOUT_SALT) {
@@ -1290,7 +1290,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
     won = { worktree: winner.worktree, branch };
     await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
 
-    const review = fanout.reviewFor({ cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions });
+    const review = await fanout.reviewFor({ cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions });
 
     // `won` stays set from here on — openPrForWinner catches nothing, so
     // this function's own catch (below) is the only cleanup for a throw

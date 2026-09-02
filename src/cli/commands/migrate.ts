@@ -112,7 +112,14 @@ export function migrateCommand(argv: string[]): number {
     }
   });
 
-  const oldDbPath = resolveOld(oldConfig?.observability?.db ?? "adws/adw_data/spf.db");
+  // `observability.db` predates this schema's `{kind:"sqlite"|"d1",...}`
+  // object form (SPF #66) — a stamped `adws/` tree can only ever have written
+  // a bare path here, but a `typeof` guard costs nothing and keeps a
+  // legacy-config-carrying-a-d1-shaped-object from crashing `path.resolve()`
+  // with a TypeError, same explicit non-string handling `abort.ts` gives a
+  // d1-backed repo rather than letting it fail deep inside a file op.
+  const oldDbRaw = oldConfig?.observability?.db;
+  const oldDbPath = resolveOld(typeof oldDbRaw === "string" ? oldDbRaw : "adws/adw_data/spf.db");
   const oldSessionsDir = path.join(path.dirname(oldDbPath), "sessions");
   if (existsSync(oldDbPath)) {
     actions.push({ kind: "copy-file", detail: `${path.relative(anchor.repo_root, oldDbPath)} -> ${newDbRel} (WAL-checkpointed first)` });
