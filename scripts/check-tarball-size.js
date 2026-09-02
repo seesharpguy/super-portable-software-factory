@@ -40,18 +40,26 @@
  * packed, ≤2.06 MB unpacked — ~5% headroom on the packed side, unpacked
  * unchanged (headroom there grew).
  *
- * Raised again for issue #66 PR1 (discriminated `observability.db` schema —
- * local sqlite | remote d1 — plus the resolveObservabilityDb() normalizer
- * and paths.ts/runner.ts updates, with matching test growth): re-measured
- * at 732.5kB packed / 2072.7kB unpacked, 198 files — packed still comfortably
- * under budget, only unpacked needed raising: ≤755 KB packed (unchanged),
- * ≤2.18 MB unpacked — ~5% headroom, same rationale as every prior raise.
+ * Raised again for the WebMCP + on-device AI batch (#67 WebMCP tools, #68
+ * in-browser semantic search, #69 Summarizer session summaries, #70 Prompt
+ * API Q&A): no new packaged files (still 198), but the app's shipped bundle
+ * grew by four components' worth of source plus their API shims —
+ * re-measured at 735.8kB packed / 2084.7kB unpacked, 198 files: ≤775 KB
+ * packed, ≤2.19 MB unpacked — ~5% headroom, same rationale as every prior
+ * raise.
+ *
+ * Merging in issue #66 PR1 (discriminated `observability.db` schema — local
+ * sqlite | remote d1 — plus the resolveObservabilityDb() normalizer and
+ * paths.ts/runner.ts updates, with matching test growth) on top of the
+ * WebMCP batch above re-measures at 740.9kB packed / 2099.4kB unpacked, 198
+ * files — comfortably inside the budget the WebMCP raise already set, so no
+ * further raise was needed here.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 755_000;
-const UNPACKED_BUDGET = 2_180_000;
+const PACKED_BUDGET = 775_000;
+const UNPACKED_BUDGET = 2_190_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the

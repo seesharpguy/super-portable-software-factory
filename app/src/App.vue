@@ -3,6 +3,7 @@ import { watchEffect } from 'vue'
 import { useRoute, hrefFor, phaseCrumb } from './lib/router'
 import SessionsList from './components/SessionsList.vue'
 import SessionTrace from './components/SessionTrace.vue'
+import WebMcpConfirm from './components/WebMcpConfirm.vue'
 
 const route = useRoute()
 
@@ -46,6 +47,7 @@ watchEffect(() => {
       <SessionsList v-if="!route.adwId" />
       <SessionTrace v-else :key="route.adwId" :adw-id="route.adwId" :phase-id="route.phaseId" />
     </main>
+    <WebMcpConfirm />
   </div>
 </template>
 
