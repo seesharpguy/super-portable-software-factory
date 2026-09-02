@@ -39,12 +39,20 @@
  * re-measured at 719.5kB packed / 2011.7kB unpacked, 198 files: ≤755 KB
  * packed, ≤2.06 MB unpacked — ~5% headroom on the packed side, unpacked
  * unchanged (headroom there grew).
+ *
+ * Raised again for the WebMCP + on-device AI batch (#67 WebMCP tools, #68
+ * in-browser semantic search, #69 Summarizer session summaries, #70 Prompt
+ * API Q&A): no new packaged files (still 198), but the app's shipped bundle
+ * grew by four components' worth of source plus their API shims —
+ * re-measured at 735.8kB packed / 2084.7kB unpacked, 198 files: ≤775 KB
+ * packed, ≤2.19 MB unpacked — ~5% headroom, same rationale as every prior
+ * raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 755_000;
-const UNPACKED_BUDGET = 2_060_000;
+const PACKED_BUDGET = 775_000;
+const UNPACKED_BUDGET = 2_190_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
