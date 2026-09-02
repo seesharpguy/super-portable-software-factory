@@ -54,12 +54,22 @@
  * WebMCP batch above re-measures at 740.9kB packed / 2099.4kB unpacked, 198
  * files — comfortably inside the budget the WebMCP raise already set, so no
  * further raise was needed here.
+ *
+ * Rebasing the opencode coding_agent backend (#71) onto the above (a new
+ * src/core/agent_opencode.ts (~600 lines) plus its compiled .d.ts/.js, a
+ * new ts-opencode.spf.config.yaml template, a new agent_opencode.test.ts,
+ * and README/PRODUCT.md/config.md doc growth to match the two other
+ * backends' own documentation depth, ON TOP OF the D1 trace-db adapter
+ * (#74) and its interview/doctor wiring (#75) that landed on main in the
+ * same window) re-measures at 782.7kB packed / 2228.4kB unpacked, 203
+ * files: ≤822 KB packed, ≤2.34 MB unpacked — ~5% headroom, same rationale
+ * as every prior raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 775_000;
-const UNPACKED_BUDGET = 2_190_000;
+const PACKED_BUDGET = 822_000;
+const UNPACKED_BUDGET = 2_340_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
