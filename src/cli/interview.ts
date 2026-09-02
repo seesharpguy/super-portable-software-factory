@@ -33,6 +33,7 @@ export interface DetectedContext {
   gitName?: string;
   scripts: Record<string, string>; // package.json's own scripts block
   claudeOnPath: boolean;
+  opencodeOnPath: boolean;
   /** Whatever's already in `.env` — shown masked so a re-run can offer "keep current" instead of asking blind. */
   existingEnv: Map<string, string>;
   /** The packaged roster's agent names (planner, builder, scout, reviewer, documenter today) — read from the built-in config so a 6th agent added there needs no interview change. */
@@ -80,6 +81,7 @@ export function gatherContext(repoRoot: string, existingEnv: Map<string, string>
     gitName: gitConfigValue(repoRoot, "user.name"),
     scripts: readScripts(repoRoot),
     claudeOnPath: binaryOnPath("claude"),
+    opencodeOnPath: binaryOnPath("opencode"),
     existingEnv,
     rosterNames: readRosterNames(),
   };
@@ -123,13 +125,46 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
     "Which backend runs each agent?",
     [
       { value: "claude_code", label: "claude_code — shells out to the `claude` CLI you already use", hint: "cc" },
+      { value: "opencode", label: "opencode — shells out to the `opencode` CLI, provider/model-id (anthropic, ollama, ...)", hint: "oc" },
       { value: "flue", label: "flue — in-process, provider/model-id (openai, anthropic, openrouter, ...)" },
     ],
     "claude_code",
   );
   defaults.coding_agent = codingAgent;
 
-  if (codingAgent === "claude_code") {
+  if (codingAgent === "opencode") {
+    if (!ctx.opencodeOnPath) {
+      asker.note("warning: `opencode` was not found on PATH — install it (npm install -g opencode-ai), or pick a launch command below, before running spf.");
+    }
+    const launchCommand = await asker.text("Launch command for the `opencode` CLI", { default: "opencode" });
+    if (launchCommand !== "opencode") configEnv["SPF_OPENCODE_CMD"] = launchCommand;
+
+    // opencode's own model vocabulary is "provider/model-id" — same shape
+    // Flue speaks (see agent_opencode.ts's module doc comment) — so this
+    // asks the same way the flue branch below does, minus Flue's own
+    // resolveModel() validation (that function belongs to agent_flue.ts,
+    // not opencode).
+    const model = await asker.text('Model ("provider/model-id", opencode\'s own vocabulary)', {
+      default: "anthropic/claude-sonnet-4-6",
+      validate: (val) => (val.trim() ? null : "required"),
+    });
+    defaults.model = model;
+
+    asker.note(
+      "opencode manages its own authentication (`opencode auth login`, or a provider's own env var like ANTHROPIC_API_KEY) — spf does not drive that login flow. `spf doctor` checks for ~/.local/share/opencode/auth.json (informational only).",
+    );
+
+    // Same pinned-roster fix the claude_code/ollama/cloudflare branches below
+    // already apply: the packaged roster pins planner/reviewer/documenter to
+    // their own Flue-style provider/model-id strings, which always win over
+    // defaults.model — override all three to the model chosen above.
+    for (const name of ["planner", "reviewer", "documenter"]) {
+      agentOverrides.push({ name, model: defaults.model });
+    }
+    notes.push(
+      "planner/reviewer/documenter pin their own model in the packaged roster and always win over defaults.model — overriding all three to match, since they're already valid provider/model-id strings for opencode too, but not necessarily ones you've configured auth for.",
+    );
+  } else if (codingAgent === "claude_code") {
     if (!ctx.claudeOnPath) {
       asker.note("warning: `claude` was not found on PATH — install it (or pick a launch command below) before running spf.");
     }

@@ -14,6 +14,7 @@ import { parse as parseYaml } from "yaml";
 import * as v from "valibot";
 import * as agentCc from "./agent_cc.ts";
 import * as agentFlue from "./agent_flue.ts";
+import * as agentOpencode from "./agent_opencode.ts";
 import * as paths from "./paths.ts";
 import * as permissions from "./permissions.ts";
 import * as prompts from "./prompts.ts";
@@ -342,11 +343,13 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
         problems.push(`agent ${JSON.stringify(name)}: ${label} ${(error as Error).message}`);
       }
     }
-    // Model shape depends on the backend: Flue needs provider/model-id (no
-    // catalog to check against, only the static shape); claude_code takes
-    // its own bare alias/full-name vocabulary (see agent_cc.ts), so only a
-    // non-empty check applies.
-    if (agent.coding_agent === "flue") {
+    // Model shape depends on the backend: Flue and opencode both need
+    // provider/model-id (no catalog to check against for either — opencode's
+    // own provider set differs from Flue's — only the static shape, so
+    // `agentFlue.resolveModel`'s shape-only check is reused as-is); claude_code
+    // takes its own bare alias/full-name vocabulary (see agent_cc.ts), so only
+    // a non-empty check applies.
+    if (agent.coding_agent === "flue" || agent.coding_agent === "opencode") {
       try {
         agentFlue.resolveModel(agent.model);
       } catch (error) {
@@ -366,7 +369,8 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
           `use useSubagent()/defineSkill() (flue) or an MCP server/plugin (claude_code) in a custom tool instead`,
       );
     }
-    const isKnownToolName = agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : agentFlue.isKnownToolName;
+    const isKnownToolName =
+      agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : agent.coding_agent === "opencode" ? agentOpencode.isKnownToolName : agentFlue.isKnownToolName;
     for (const toolName of agent.tools ?? []) {
       if (!isKnownToolName(toolName)) {
         problems.push(`agent ${JSON.stringify(name)}: unknown tool ${JSON.stringify(toolName)} — known: read, write, edit, bash, grep, glob, find (alias for glob), ls (dropped, covered by bash/glob)`);
@@ -393,7 +397,7 @@ export function validate(cfg: SFConfig, required: string[], requiredSuites: stri
     // declared backend — the same branch this function already runs for
     // agent.model, just keyed off the tier's coding_agent instead.
     for (const tier of cfg.tiering.tiers) {
-      if (tier.coding_agent === "flue") {
+      if (tier.coding_agent === "flue" || tier.coding_agent === "opencode") {
         try {
           agentFlue.resolveModel(tier.model);
         } catch (error) {
@@ -504,13 +508,14 @@ export function validateSandboxConfig(cfg: SFConfig, agent: AgentConfig): string
   const sb = cfg.sandbox;
   const backend = agent.sandbox ?? sb.backend;
 
-  // claude_code spawns a host process (agent_cc.ts's spawn()) with no
-  // sandbox seam at all — sandboxing it would mean running the `claude` CLI
-  // INSIDE the container, a different feature, not this config flag.
-  if (agent.coding_agent === "claude_code" && backend !== "local") {
+  // claude_code and opencode both spawn a host process (agent_cc.ts's /
+  // agent_opencode.ts's own spawn()) with no sandbox seam at all —
+  // sandboxing either would mean running the CLI INSIDE the container, a
+  // different feature, not this config flag.
+  if ((agent.coding_agent === "claude_code" || agent.coding_agent === "opencode") && backend !== "local") {
     problems.push(
-      `agent ${JSON.stringify(agent.name)}: coding_agent "claude_code" cannot use sandbox backend ${JSON.stringify(backend)} — ` +
-        `claude_code always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
+      `agent ${JSON.stringify(agent.name)}: coding_agent ${JSON.stringify(agent.coding_agent)} cannot use sandbox backend ${JSON.stringify(backend)} — ` +
+        `${agent.coding_agent} always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
     );
   }
 
@@ -880,7 +885,17 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   prompts.save(path.join(agentDir, "prompts"), "system.md", systemText);
   prompts.save(path.join(agentDir, "prompts"), "user.md", userText);
 
-  const { session_id: sessionId, is_new: isNewSession } = agentSessionId(run, agent);
+  // `sessionId` is reassigned by `send()` below (see its comment), ONLY for
+  // opencode, whenever its result carries the real captured id — its
+  // first-contact call starts from a cosmetic placeholder (see
+  // agent_opencode.ts's `pendingSessionLabel()`) and must swap in the real
+  // one before any later send() in this same phase (a JSON-repair retry, a
+  // gate correction). Deliberately scoped to opencode only, not a blanket
+  // reassignment from every backend's result — see `send()`'s comment for
+  // why that would NOT be a no-op for claude_code.
+  const initialSession = agentSessionId(run, agent);
+  const isNewSession = initialSession.is_new;
+  let sessionId = initialSession.session_id;
   await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
@@ -937,14 +952,35 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     const onSpawn = (pid: number) => void run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`).catch(() => {});
     const onExit = (pid: number) => void run.tracer.processEnd(run.adw_id, pid).catch(() => {});
     if (spec) await sandbox.reconcileWorkspace(spec);
-    const result =
-      agent.coding_agent === "claude_code"
-        ? await agentCc.run(request, forward, onSpawn, onExit)
-        : await agentFlue.run(request, forward, onSpawn, onExit);
+    let result: FlueResultLike;
+    if (agent.coding_agent === "claude_code") {
+      result = await agentCc.run(request, forward, onSpawn, onExit);
+    } else if (agent.coding_agent === "opencode") {
+      result = await agentOpencode.run(request, forward, onSpawn, onExit);
+    } else {
+      result = await agentFlue.run(request, forward, onSpawn, onExit);
+    }
     // SPEND IS RECORDED BEFORE THE EXTRACT CAN THROW: a failed extract must
     // not also lose this call's tokens/cost off the Run's ledger.
     await run.addUsage(result.tokens, result.cost);
     spent.merge(result.usage);
+    // opencode-ONLY: every subsequent send() in THIS phase (JSON-repair
+    // retries, gate corrections) must target the real captured session, not
+    // the placeholder this phase started with (see `initialSession`'s
+    // comment above and agent_opencode.ts's session-id lifecycle notes).
+    // Deliberately NOT applied to flue/claude_code — agent_cc.ts returns
+    // `final.session_id ?? request.session_id`, which PREFERS Claude Code's
+    // own reported id over the requested one when the two differ, so
+    // reassigning unconditionally here would let a claude_code run's
+    // recorded session id (agent_map.json, the agent_sessions trace table)
+    // drift from the one actually passed to `--session-id`/`--resume` —
+    // scoping this to opencode keeps flue/claude_code byte-identical to
+    // before this backend existed. `result.session_id` is also guarded
+    // against a falsy value here: a still-unresolved [SOURCE] NDJSON field
+    // name in agent_opencode.ts's `run()` should surface as a thrown error
+    // there (see its "sawStop but no captured session id" check), never as
+    // a silently-persisted empty/placeholder id.
+    if (agent.coding_agent === "opencode" && result.session_id) sessionId = result.session_id;
     latest = result;
     if (spec) await sandbox.extractWorkspace(spec);
     return result;
@@ -1086,8 +1122,27 @@ function asReport(result: GateReport | string[]): GateReport {
  */
 function agentSessionId(run: RunForAgents, agent: AgentConfig): { session_id: string; is_new: boolean } {
   const entry = run.agent_map[agent.name];
-  if (entry && entry.model === agent.model) return { session_id: entry.session_id, is_new: false }; // rejoin the existing context window
-  const session_id = agent.coding_agent === "claude_code" ? agentCc.newSessionId() : `spf-${run.adw_id}-${agent.name}-${newId(4)}`;
+  // A session handle from one backend is meaningless to another — flue and
+  // opencode share the identical provider/model-id vocabulary, so a
+  // coding_agent flip on an existing agent_map.json entry can otherwise
+  // leave `entry.model === agent.model` true while the stored session_id's
+  // SHAPE no longer matches the new backend (e.g. a flue `spf-...` id handed
+  // to opencode's `--session`, which requires its own `ses_<ULID>` shape).
+  if (entry && entry.model === agent.model && entry.coding_agent === agent.coding_agent) {
+    return { session_id: entry.session_id, is_new: false }; // rejoin the existing context window
+  }
+  // opencode assigns its OWN real session id on first contact (never
+  // client-choosable — see agent_opencode.ts's module doc comment); what's
+  // minted here is a purely cosmetic placeholder for the pre-call trace
+  // event / console log, replaced by the real captured id the moment
+  // send() gets its first result back (see execute()'s `sessionId` handling
+  // below).
+  const session_id =
+    agent.coding_agent === "claude_code"
+      ? agentCc.newSessionId()
+      : agent.coding_agent === "opencode"
+        ? agentOpencode.pendingSessionLabel()
+        : `spf-${run.adw_id}-${agent.name}-${newId(4)}`;
   return { session_id, is_new: true };
 }
 
@@ -1098,7 +1153,8 @@ function agentSessionId(run: RunForAgents, agent: AgentConfig): { session_id: st
  * this stays a plain pass-through regardless of which one it's given.
  */
 function eventForwarder(run: RunForAgents, phase: Phase, agentName: string, codingAgent: string) {
-  const tracker = codingAgent === "claude_code" ? new agentCc.CcToolCallTracker() : new agentFlue.ToolCallTracker();
+  const tracker =
+    codingAgent === "claude_code" ? new agentCc.CcToolCallTracker() : codingAgent === "opencode" ? new agentOpencode.OcToolCallTracker() : new agentFlue.ToolCallTracker();
   return (chunk: any) => {
     const record = tracker.observe(chunk);
     if (record === null) return;

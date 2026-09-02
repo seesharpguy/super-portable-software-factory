@@ -8,11 +8,13 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import path from "node:path";
 import * as agents from "../../core/agents.ts";
 import * as paths from "../../core/paths.ts";
 import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
+import * as agentOpencode from "../../core/agent_opencode.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
@@ -485,6 +487,62 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     }
   }
 
+  const usesOpencode = cfg.agents.some((a) => a.coding_agent === "opencode");
+  if (usesOpencode) {
+    // Mirrors the "claude CLI" check above — SPF_OPENCODE_CMD can point at a
+    // wrapper/launcher instead of the literal `opencode` binary (see
+    // agent_opencode.ts's module comment), so check whatever
+    // agent_opencode.ts will actually spawn: cmdSpec's first token.
+    const cmdSpec = process.env["SPF_OPENCODE_CMD"] || "opencode";
+    const cmdTokens = cmdSpec.split(/\s+/).filter(Boolean);
+    const cmdBin = cmdTokens[0] || "opencode";
+    const opencodeOnPath = binaryOnPath(cmdBin);
+    let version = "";
+    if (opencodeOnPath && cmdBin === "opencode") {
+      const result = spawnSync("opencode", ["--version"], { encoding: "utf-8" });
+      version = result.status === 0 ? result.stdout.trim() : "";
+    }
+    check(
+      report,
+      "opencode CLI",
+      opencodeOnPath,
+      opencodeOnPath
+        ? version || (cmdBin === "opencode" ? "on PATH, but --version failed" : `"${cmdBin}" on PATH (via SPF_OPENCODE_CMD) — --version not checked for a wrapper/launcher`)
+        : `"${cmdBin}" not found on PATH — required by any coding_agent: opencode agent${cmdBin !== "opencode" ? " (checked SPF_OPENCODE_CMD's first token, not the literal \"opencode\")" : ""}`,
+    );
+
+    // Auth is treated as ALREADY CONFIGURED territory here, not something
+    // doctor drives interactively (no `opencode auth login` flow) — per
+    // opencode's own docs, ~/.local/share/opencode/auth.json is the
+    // credential store and `opencode auth list` is the documented
+    // non-interactive check. Informational only (`ok: true` regardless),
+    // same "fine if authenticated another way" contract as the
+    // ANTHROPIC_API_KEY check above — and it also defends against a known
+    // upstream race condition that can write an empty (0-byte) token file,
+    // which existsSync alone would miss.
+    // `~/.local/share` is only the XDG_DATA_HOME *default* — an operator
+    // with that env var set (routine on Linux) has opencode's credential
+    // store elsewhere; honoring it here avoids a false "not authenticated"
+    // warning that `opencode auth login` (writing to the SAME XDG location)
+    // would never actually clear.
+    const dataHome = process.env["XDG_DATA_HOME"] || path.join(homedir(), ".local", "share");
+    const authPath = path.join(dataHome, "opencode", "auth.json");
+    let authDetail: string;
+    let authWarn = true;
+    if (!existsSync(authPath)) {
+      authDetail = `${authPath} not found — run \`opencode auth login\` (or set the provider's own env var) before running spf`;
+    } else {
+      const size = statSync(authPath).size;
+      if (size > 0) {
+        authDetail = `${authPath} present (${size} bytes)`;
+        authWarn = false;
+      } else {
+        authDetail = `${authPath} exists but is empty — a known opencode upstream race can write an empty token file; re-run \`opencode auth login\``;
+      }
+    }
+    check(report, "opencode auth", true, authDetail, authWarn ? "warn" : "info");
+  }
+
   // Flue agents pointed at a local Ollama server (`model: ollama/...`) have
   // no API key to check (providers.ts's PROVIDER_ENV_KEYS.ollama is `[]`,
   // handled in the per-agent loop below) but DO have a server that might
@@ -595,7 +653,8 @@ export async function doctorCommand(argv: string[]): Promise<number> {
         check(report, `${label} model`, false, (error as Error).message);
       }
     }
-    const isKnownToolName = agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : isKnownFlueToolName;
+    const isKnownToolName =
+      agent.coding_agent === "claude_code" ? agentCc.isKnownToolName : agent.coding_agent === "opencode" ? agentOpencode.isKnownToolName : isKnownFlueToolName;
     for (const toolName of agent.tools ?? []) {
       if (!isKnownToolName(toolName)) check(report, `${label} tool "${toolName}"`, false, "not a known tool name");
     }
@@ -1003,18 +1062,18 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       );
     }
 
-    // #12 — claude_code x remote backend, hard ✗, roster-wide (validate()
-    // above is chain-scoped to whatever `required` it was called with —
-    // doctor happens to pass the whole roster there too, but this is named
-    // separately so the specific rule that failed has its own line).
+    // #12 — claude_code/opencode x remote backend, hard ✗, roster-wide
+    // (validate() above is chain-scoped to whatever `required` it was called
+    // with — doctor happens to pass the whole roster there too, but this is
+    // named separately so the specific rule that failed has its own line).
     for (const agent of cfg.agents) {
       const backend = resolvedBackend(agent);
-      if (agent.coding_agent === "claude_code" && backend !== "local") {
+      if ((agent.coding_agent === "claude_code" || agent.coding_agent === "opencode") && backend !== "local") {
         check(
           report,
           `agent "${agent.name}" coding_agent x sandbox`,
           false,
-          `coding_agent "claude_code" cannot use sandbox backend ${JSON.stringify(backend)} — it always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
+          `coding_agent ${JSON.stringify(agent.coding_agent)} cannot use sandbox backend ${JSON.stringify(backend)} — it always spawns a host process with no sandbox seam; set agent.sandbox: local (or sandbox.backend: local) for this agent`,
         );
       }
     }

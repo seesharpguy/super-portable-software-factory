@@ -70,8 +70,8 @@ agents:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `coding_agent` | `"flue"` \| `"claude_code"` | Which backend runs the agent. Default `flue`. `claude_code` shells out to your own installed `claude` CLI — `spf doctor` checks it's on `PATH`. |
-| `model` | string | Vocabulary depends on `coding_agent`: Flue wants `provider/model-id`; Claude Code wants its own bare alias/full name (`sonnet`, `claude-sonnet-5`, ...). Default `google/gemini-3.6-flash`. |
+| `coding_agent` | `"flue"` \| `"claude_code"` \| `"opencode"` | Which backend runs the agent. Default `flue`. `claude_code` shells out to your own installed `claude` CLI — `spf doctor` checks it's on `PATH`. `opencode` shells out to your own installed `opencode` CLI (`npm install -g opencode-ai`) — `spf doctor` checks it's on `PATH` and that `~/.local/share/opencode/auth.json` exists. |
+| `model` | string | Vocabulary depends on `coding_agent`: Flue and opencode want `provider/model-id`; Claude Code wants its own bare alias/full name (`sonnet`, `claude-sonnet-5`, ...). Default `google/gemini-3.6-flash`. |
 | `thinking` | enum | `off\|minimal\|low\|medium\|high\|xhigh\|max`. Default `medium`. On a `claude_code` agent this maps to `--effort` (`off`/`minimal` both floor to Claude Code's own minimum — it has no true "disabled" level for a headless run). |
 | `color` | hex string | Lane color fallback for agents that don't set their own. |
 | `harness_engineering` | string[] | **Must stay `[]`** — no analogue on any current backend; a non-empty entry fails validate(). |
@@ -368,8 +368,8 @@ unordered splice of both).
 | `enabled` | bool | Default `false`. `true` turns on the ladder walk described below; `false` (or the key absent) is a total no-op, checked nowhere and dispatched nowhere. |
 | `tiers` | array, WEAKEST FIRST | The ladder. A risk level shifts every routed role UP or DOWN this list by the same step — order is the whole semantics, which is why this is a sequence and not a mapping. Default `[]`. |
 | `tiers[].name` | string | What `roles` values point at. |
-| `tiers[].coding_agent` | `"flue"` \| `"claude_code"` | Which backend's vocabulary this rung's `model` speaks. Default `flue`, same default an agent's own `coding_agent` uses. A tier changes an agent's `model` and **nothing else** — `coding_agent` always stays the agent's own — so a rung can only route roles whose backend matches (**rule T**, below). |
-| `tiers[].model` | string | Same vocabulary as an agent's own `model:` for that backend: `provider/model-id` for `flue`, Claude Code's bare alias/full name for `claude_code`. No per-provider table — for `flue` the provider is already the string's first segment. |
+| `tiers[].coding_agent` | `"flue"` \| `"claude_code"` \| `"opencode"` | Which backend's vocabulary this rung's `model` speaks. Default `flue`, same default an agent's own `coding_agent` uses. A tier changes an agent's `model` and **nothing else** — `coding_agent` always stays the agent's own — so a rung can only route roles whose backend matches (**rule T**, below). |
+| `tiers[].model` | string | Same vocabulary as an agent's own `model:` for that backend: `provider/model-id` for `flue` and `opencode`, Claude Code's bare alias/full name for `claude_code`. No per-provider table — for `flue`/`opencode` the provider is already the string's first segment. |
 | `roles` | map of agent name -> tier name | The baseline tier per **role**. Naming an agent here is the operator's statement "route this one by tier" — the resolved tier then wins over that agent's own `model:`. An agent **not** named here is never retiered; its `model:` stands, untouched. That is the whole precedence rule. Default `{}`. |
 
 ```yaml

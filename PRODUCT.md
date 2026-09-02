@@ -19,7 +19,7 @@ SPF gives repeatable structure to "agents-plus-code" workflows. Instead of handi
 
 ## Positioning
 
-**"Agent proposes, code disposes."** The mechanism competitors don't share: code — not a prompt, not agent judgment — owns sequencing, retries, and the definition of "done" (quality gates). Agents own only the reading-and-deciding work inside one bounded phase; anything with a known, mechanical invocation (`npm test`, `tsc --noEmit`) runs as a `kind: "code"` phase, never burns an agent's context rediscovering a command a subprocess already knows. `spf` ships with zero repo setup required — no framework stamped into your repo, no separate agent binary — and works with either of two coding-agent backends (Flue or a locally installed Claude Code CLI), so the same chain script isn't locked to one vendor's model.
+**"Agent proposes, code disposes."** The mechanism competitors don't share: code — not a prompt, not agent judgment — owns sequencing, retries, and the definition of "done" (quality gates). Agents own only the reading-and-deciding work inside one bounded phase; anything with a known, mechanical invocation (`npm test`, `tsc --noEmit`) runs as a `kind: "code"` phase, never burns an agent's context rediscovering a command a subprocess already knows. `spf` ships with zero repo setup required — no framework stamped into your repo, no separate agent binary — and works with any of three coding-agent backends (Flue, a locally installed Claude Code CLI, or a locally installed OpenCode CLI), so the same chain script isn't locked to one vendor's model.
 
 > *Same models. Same prompts. The difference is who owns the loop.*
 
@@ -35,7 +35,7 @@ SPF gives repeatable structure to "agents-plus-code" workflows. Instead of handi
 ## Capabilities and Constraints
 
 - Requires Node ≥ 22.19.0.
-- Two coding-agent backends: `flue` (default, provider/model-id strings like `google/gemini-3.6-flash`) and `claude_code` (drives a locally installed Claude Code CLI; also reachable through Ollama via `ANTHROPIC_BASE_URL`).
+- Three coding-agent backends: `flue` (default, provider/model-id strings like `google/gemini-3.6-flash`), `claude_code` (drives a locally installed Claude Code CLI; also reachable through Ollama via `ANTHROPIC_BASE_URL`), and `opencode` (drives a locally installed OpenCode CLI via `opencode-ai`; provider/model-id vocabulary like flue).
 - Chains are TypeScript; phases are typed `kind: "engineer" | "code" | "agent"`. Agent output crosses phase boundaries only as typed JSON envelopes.
 - `spf watch` currently dispatches exactly one configured chain (`watch.chain`) per claimed issue, plus one refine chain for spec decomposition — no per-issue/per-label chain routing yet (open design direction, not yet built).
 - The trace visualizer is explicitly read-only observability except for one write: archiving a session (a review-state flag, not run state).

@@ -717,7 +717,7 @@ export interface SandboxSpec {
 
 export const AgentConfigSchema = v.object({
   name: v.string(),
-  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code", "opencode"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
   thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""), // hex swatch for this agent's lane in the UI
@@ -754,7 +754,7 @@ export const AgentConfigSchema = v.object({
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
 export const ConfigDefaultsSchema = v.object({
-  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code", "opencode"]), "flue"),
   model: v.optional(v.string(), "google/gemini-3.6-flash"),
   thinking: v.optional(ThinkingLevelSchema, "medium"),
   color: v.optional(v.string(), ""),
@@ -1367,7 +1367,7 @@ export type ReviewConfig = v.InferOutput<typeof ReviewConfigSchema>;
  */
 export const TierSchema = v.object({
   name: v.pipe(v.string(), v.minLength(1)),
-  coding_agent: v.optional(v.picklist(["flue", "claude_code"]), "flue"),
+  coding_agent: v.optional(v.picklist(["flue", "claude_code", "opencode"]), "flue"),
   model: v.pipe(v.string(), v.minLength(1)),
 });
 export type Tier = v.InferOutput<typeof TierSchema>;

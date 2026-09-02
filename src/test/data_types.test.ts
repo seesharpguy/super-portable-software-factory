@@ -573,6 +573,18 @@ test("TieringConfigSchema defaults: enabled=false, tiers=[], roles={}; TierSchem
   assert.equal(tier.coding_agent, "flue", "same default as AgentConfigSchema's own coding_agent field");
 });
 
+test("coding_agent picklist: \"opencode\" is a third valid value alongside flue/claude_code, on TierSchema and AgentConfigSchema alike", () => {
+  const tier = v.parse(TierSchema, { name: "scout", coding_agent: "opencode", model: "anthropic/claude-sonnet-4-6" });
+  assert.equal(tier.coding_agent, "opencode");
+
+  const agent = v.parse(AgentConfigSchema, {
+    name: "builder",
+    coding_agent: "opencode",
+    prompt_engineering: { system: "s.md", user: "u.md" },
+  });
+  assert.equal(agent.coding_agent, "opencode");
+});
+
 test("tiering: survives loadConfig's merge for a single config file — not dropped by mergeRawConfig's fixed-shape literal", () => {
   const dir = mkdtempSync(join(tmpdir(), "spf-tiering-merge-test-"));
   try {

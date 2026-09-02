@@ -36,7 +36,7 @@ spf init --template ts-cc      # or start from a packaged, ready-to-run template
 spf list                       # every chain this install knows, its phases, what it needs
 ```
 
-On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code` or `flue`) and model (optionally customized per agent instead of one model for the whole roster), which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host, and whether to push notifications to Slack/Teams/a webhook — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
+On a real terminal, `spf init` asks a short interview — which coding agent (`claude_code`, `flue`, or `opencode`) and model (optionally customized per agent instead of one model for the whole roster), which quality checks to gate on, whether to turn on `spf watch` and against which tracker/code host, and whether to push notifications to Slack/Teams/a webhook — and writes `.spf/spf.config.yaml` with only what you answered differently from the packaged defaults, plus whatever secrets those answers imply appended to `.env` (already gitignored, and already auto-loaded by every command) and their key names mirrored into a committable `.env.example`. Re-running it later shows any existing `.env` value masked and keeps it on an empty answer, so rotating one secret doesn't mean re-answering everything. Piped input, `--yes`, or `--template <name>` all skip the interview and fall back to the original non-interactive behavior — a scripted `spf init` never blocks on stdin.
 
 Without an interview, `spf init` writes the same small starter `.spf/spf.config.yaml`, commented, that merges on top of the packaged built-ins field by field. `--template <name>` writes a real, filled-in config instead of the commented-out starter — every packaged template's name prints after `spf init` runs, and the same files live in [`assets/templates/`](assets/templates/) to browse directly. Nothing here needs to exist for `spf` to run; it's how you make one repo's roster diverge from the defaults.
 
@@ -174,6 +174,14 @@ env:
 ```
 
 Applied to `process.env` before any command runs. A plain value commits as literal text; `${VAR}` interpolates from whatever's already in `process.env` at that point (the real shell, or `.env`, both of which load first) — so a real secret can live in `.env` (gitignored) and be referenced here without ever being written into this file. An already-set `process.env` value always wins over `env:`'s — `spf.config.yaml` supplies the default, a real export still overrides it per machine/session. A `${VAR}` reference to something that's genuinely unset fails loudly at startup, naming the missing variable, rather than silently interpolating to an empty string.
+
+### A third backend: opencode
+
+Set `coding_agent: opencode` on any agent (or in `defaults`) to run it on your own installed [OpenCode](https://opencode.ai) CLI instead of Flue or Claude Code — install it with `npm install -g opencode-ai` (the package is `opencode-ai`; the binary it puts on `PATH` is `opencode`). `spf doctor` checks that `opencode` resolves on `PATH` and that `~/.local/share/opencode/auth.json` exists, the same informational, not-enforced posture as its `claude_code` check for `ANTHROPIC_API_KEY`. Model names follow the same `provider/model-id` shape Flue uses (e.g. `anthropic/claude-sonnet-4-20250514`, `ollama/qwen3-coder:30b`) — not Claude Code's own bare-alias vocabulary (`sonnet`, `opus`, ...); everything else — `tools`, `writes`, `thinking` — stays the same shape.
+
+Authentication is handled entirely outside spf: run `opencode auth login` once (interactive), or `opencode auth list` to check non-interactively what's already configured. spf never drives this itself.
+
+Like `claude_code`, routing the `opencode` command through a wrapper or launcher uses the equivalent `SPF_CLAUDE_CMD`-style env var for this backend, with the same `{model}` token-substitution mechanic — see [Declarative env vars](#declarative-env-vars) above and check `opencode --help` for the flags a wrapper needs to forward.
 
 ### flue + local Ollama
 

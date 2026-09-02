@@ -8,6 +8,7 @@ import path from "node:path";
 import * as agents from "../core/agents.ts";
 import * as agentCc from "../core/agent_cc.ts";
 import * as agentFlue from "../core/agent_flue.ts";
+import * as agentOpencode from "../core/agent_opencode.ts";
 import * as notify from "../core/notify/notifier.ts";
 import * as otel from "../core/otel.ts";
 import * as paths from "../core/paths.ts";
@@ -247,6 +248,7 @@ export async function main(): Promise<void> {
     // agent_cc.ts's shutdown() just kills any still-running claude children.
     await agentFlue.shutdown();
     await agentCc.shutdown();
+    await agentOpencode.shutdown();
     // Belt-and-braces alongside the per-run `sandbox.withRunScope` wraps in
     // dispatchChain/watch/fanout: catches any sandboxed run's lease this
     // process still holds when the CLI exits (a per-run wrap that itself

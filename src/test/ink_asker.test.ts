@@ -282,6 +282,7 @@ test("full sequential interview: heading, note, text, select (bare enter), selec
       "Which backend runs each agent?",
       [
         { value: "claude_code", label: "claude_code" },
+        { value: "opencode", label: "opencode" },
         { value: "flue", label: "flue" },
       ],
       "claude_code",

@@ -1,0 +1,54 @@
+# .spf/spf.config.yaml — OpenCode backend. `spf init --template ts-opencode`
+# writes this file as-is.
+#
+# `coding_agent: opencode` shells out to your own locally installed
+# `opencode` CLI — install it with:
+#   npm install -g opencode-ai
+# (the package is `opencode-ai`; the binary it puts on PATH is `opencode` —
+# a common point of confusion, so double-check `which opencode` if a run
+# can't find it.)
+#
+# model: is provider/model-id, the same free-form vocabulary shape Flue
+# uses — NOT Claude Code's own bare-alias vocabulary (sonnet/opus/...).
+# A few concrete examples:
+#   anthropic/claude-sonnet-4-20250514
+#   ollama/qwen3-coder:30b
+#   opencode/gpt-5.1-codex
+#
+# Authentication is handled entirely outside spf: run `opencode auth login`
+# (interactive) once, which writes credentials to
+# ~/.local/share/opencode/auth.json. `spf doctor` checks that `opencode` is
+# on PATH and that that auth.json file exists, but it does not drive login
+# itself and does not know whether the credentials inside are actually
+# valid — same informational, not-enforced posture as its claude_code check
+# for ANTHROPIC_API_KEY.
+quality:
+  checks:
+    - { name: typecheck, operation: typecheck, argv: ["npm", "run", "typecheck"], timeout_seconds: 60 }
+    - { name: lint, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 60 }
+    - { name: build, operation: build, argv: ["npm", "run", "build"], timeout_seconds: 300 }
+    - { name: test, operation: build, argv: ["npm", "test"], timeout_seconds: 300 }
+  suites:
+    test: [test]
+    all: [typecheck, lint, build, test]
+
+defaults:
+  coding_agent: opencode
+  model: anthropic/claude-sonnet-4-20250514
+
+# REQUIRED, not just an example: the packaged default roster pins
+# planner/reviewer/documenter to their own explicit provider/model-id
+# strings, which an agent's own model always wins over defaults.model
+# above — switching coding_agent globally does NOT reset those three, so
+# they'd run on opencode with whatever model string the packaged roster
+# happened to pin them to, which may point at a provider/model your
+# `opencode auth login` was never set up for. builder/scout/refiner have no
+# model of their own in the packaged roster, so they correctly inherit
+# defaults.model above and need no override here.
+agents:
+  - name: planner
+    model: anthropic/claude-sonnet-4-20250514
+  - name: reviewer
+    model: anthropic/claude-sonnet-4-20250514
+  - name: documenter
+    model: anthropic/claude-sonnet-4-20250514
