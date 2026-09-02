@@ -4,9 +4,9 @@ import { isInteractive } from "../ask.ts";
 
 export async function sessionsCommand(argv: string[]): Promise<number> {
   const { options, flags } = parseCli(argv, ["cwd", "config", "limit"], ["json"]);
-  const { db } = openTrace(options);
+  const { db } = await openTrace(options);
   const limit = options["limit"] ? Number.parseInt(options["limit"], 10) : 20;
-  const rows = db.sessions(limit);
+  const rows = await db.sessions(limit);
 
   if (flags["json"]) {
     console.log(JSON.stringify(rows, null, 2));

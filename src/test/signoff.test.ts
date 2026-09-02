@@ -76,7 +76,7 @@ test("decideSignoff: human yes -> accepted, recordedYes true, decision logged ag
     signoffTimeoutSeconds: 300,
     asker,
     identity: { name: "Ada Lovelace", email: "ada@example.com" },
-    log: (p) => logs.push(p),
+    log: async (p) => { logs.push(p); },
     warn: () => {},
   });
   assert.equal(outcome.accepted, true);
@@ -97,7 +97,7 @@ test("decideSignoff: human no -> not accepted, never a recorded yes", async () =
     signoffTimeoutSeconds: 300,
     asker,
     identity: { name: "Ada Lovelace", email: "ada@example.com" },
-    log: (p) => logs.push(p),
+    log: async (p) => { logs.push(p); },
     warn: () => {},
   });
   assert.equal(outcome.accepted, false);
@@ -133,7 +133,7 @@ test("decideSignoff: an expired prompt resolves to confirm()'s own default (fals
     signoffTimeoutSeconds: 1,
     asker,
     identity: undefined,
-    log: () => {},
+    log: async () => {},
     warn: () => {},
   });
   assert.equal(outcome.accepted, false);
@@ -150,7 +150,7 @@ test("decideSignoff: unattended, require_human_signoff false -> proceeds on the 
     signoffTimeoutSeconds: 300,
     asker: null,
     identity: undefined,
-    log: (p) => logs.push(p),
+    log: async (p) => { logs.push(p); },
     warn: (l) => warns.push(l),
   });
   assert.equal(outcome.accepted, true, "review.approved alone gates the commit on this default-false, unattended path");
@@ -172,7 +172,7 @@ test("decideSignoff: unattended, require_human_signoff true -> fails the phase c
         signoffTimeoutSeconds: 300,
         asker: null,
         identity: undefined,
-        log: () => {},
+        log: async () => {},
         warn: () => {},
       }),
     /unattended/,
@@ -193,7 +193,7 @@ test("decideSignoff: no TTY behaves the same as unattended, even if ctx.unattend
         signoffTimeoutSeconds: 300,
         asker: null,
         identity: undefined,
-        log: () => {},
+        log: async () => {},
         warn: () => {},
       }),
     /unattended/,
@@ -211,7 +211,7 @@ test("decideSignoff: no git committer identity -> the decision is still logged; 
     signoffTimeoutSeconds: 300,
     asker,
     identity: undefined,
-    log: (p) => logs.push(p),
+    log: async (p) => { logs.push(p); },
     warn: (l) => warns.push(l),
   });
   assert.equal(outcome.recordedYes, true, "the human said yes — a missing identity affects the trailer, never the decision itself");
@@ -256,16 +256,16 @@ function fakeCommitRun(): { run: Run; committed: string[] } {
 
 function fakePh(): PhaseHandle {
   return {
-    log: () => {},
+    log: async () => {},
     call: async () => {
       throw new Error("not used by these tests");
     },
   } as unknown as PhaseHandle;
 }
 
-test("commitEnvelope: a recorded human sign-off appends a real Signed-off-by trailer", () => {
+test("commitEnvelope: a recorded human sign-off appends a real Signed-off-by trailer", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     { status: "success", summary: "did it", artifacts: [], notes_for_next_agent: "", commit_message: "Implement the thing" },
@@ -275,9 +275,9 @@ test("commitEnvelope: a recorded human sign-off appends a real Signed-off-by tra
   assert.equal(committed[0], "Implement the thing\n\nSigned-off-by: Ada Lovelace <ada@example.com>");
 });
 
-test("commitEnvelope: no signoff argument -> no trailer, ever", () => {
+test("commitEnvelope: no signoff argument -> no trailer, ever", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(run, fakePh(), {
+  await commitEnvelope(run, fakePh(), {
     status: "success",
     summary: "did it",
     artifacts: [],
@@ -288,9 +288,9 @@ test("commitEnvelope: no signoff argument -> no trailer, ever", () => {
   assert.doesNotMatch(committed[0], /Signed-off-by/);
 });
 
-test("commitEnvelope: an explicit null signoff (identity was unset) -> no trailer, same as omitted", () => {
+test("commitEnvelope: an explicit null signoff (identity was unset) -> no trailer, same as omitted", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     { status: "success", summary: "did it", artifacts: [], notes_for_next_agent: "", commit_message: "Fixed it" },
@@ -299,13 +299,13 @@ test("commitEnvelope: an explicit null signoff (identity was unset) -> no traile
   assert.doesNotMatch(committed[0], /Signed-off-by/);
 });
 
-test("commitEnvelope: a lone conventional-commit subject is never mistaken for a trailer block", () => {
+test("commitEnvelope: a lone conventional-commit subject is never mistaken for a trailer block", async () => {
   // Regression: `feat: add X` matches TRAILER_LINE's `Key: value` shape, but
   // a single paragraph is the SUBJECT, never an existing trailer block — the
   // trailer must land after a blank line, not glued onto the subject with no
   // separator (which git would not recognize as a trailer at all).
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     { status: "success", summary: "did it", artifacts: [], notes_for_next_agent: "", commit_message: "feat: add the signoff gate" },
@@ -314,9 +314,9 @@ test("commitEnvelope: a lone conventional-commit subject is never mistaken for a
   assert.equal(committed[0], "feat: add the signoff gate\n\nSigned-off-by: Ada Lovelace <ada@example.com>");
 });
 
-test("commitEnvelope: a real body ending in a Key: value block still joins rather than growing a blank-line-separated second block", () => {
+test("commitEnvelope: a real body ending in a Key: value block still joins rather than growing a blank-line-separated second block", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     { status: "success", summary: "", artifacts: [], notes_for_next_agent: "", commit_message: "wip\n\nNote: I did stuff" },
@@ -325,9 +325,9 @@ test("commitEnvelope: a real body ending in a Key: value block still joins rathe
   assert.equal(committed[0], "wip\n\nNote: I did stuff\nSigned-off-by: Ada Lovelace <ada@example.com>");
 });
 
-test("commitEnvelope: an agent-authored message that already carries this exact Signed-off-by line is not duplicated", () => {
+test("commitEnvelope: an agent-authored message that already carries this exact Signed-off-by line is not duplicated", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     {
@@ -343,9 +343,9 @@ test("commitEnvelope: an agent-authored message that already carries this exact 
   assert.equal(committed[0].match(/Signed-off-by/g)?.length, 1);
 });
 
-test("commitEnvelope: joins an already-trailered message's block instead of starting a second one", () => {
+test("commitEnvelope: joins an already-trailered message's block instead of starting a second one", async () => {
   const { run, committed } = fakeCommitRun();
-  commitEnvelope(
+  await commitEnvelope(
     run,
     fakePh(),
     {

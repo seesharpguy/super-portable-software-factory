@@ -229,19 +229,19 @@ export async function watchInitCommand(argv: string[]): Promise<number> {
 }
 
 /** Shared by `runChain`/`runRefine`/the fan-out lane's dispatch: best-effort enrichment of a generic "didn't succeed" message with the first phase that actually failed, read back from the worktree's own (symlinked) trace db. Top-level (not a `watchCommand` local) so `makeWatchFanoutDispatch` below can share it — see that factory's own doc comment for why. */
-function detailFromFailedPhase(cfg: SFConfig, cwd: string, adwId: string, prefix: string): string {
+async function detailFromFailedPhase(cfg: SFConfig, cwd: string, adwId: string, prefix: string): Promise<string> {
   let detail = prefix;
   let db: SfDb | undefined;
   try {
     const wtAnchor = paths.resolveAnchor(cwd);
     const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-    db = new SfDb(wtDataPaths.db_path);
-    const failed = db.phases(adwId).find((p) => p.status === "fail");
+    db = await SfDb.open(wtDataPaths.db, wtDataPaths.sessions_dir);
+    const failed = (await db.phases(adwId)).find((p) => p.status === "fail");
     if (failed) detail += ` Phase "${failed.name}" failed: ${failed.error ?? "(no detail)"}`;
   } catch {
     // best-effort — the generic message above still points at where to look
   } finally {
-    db?.close();
+    await db?.close();
   }
   return detail;
 }
@@ -255,14 +255,13 @@ function detailFromFailedPhase(cfg: SFConfig, cwd: string, adwId: string, prefix
  * is a nice-to-have, not something that gets to block the PR-open flow
  * it's decorating. Top-level for the same reason as `detailFromFailedPhase`.
  */
-function reviewSummaryFor(cfg: SFConfig, cwd: string, adwId: string): string | undefined {
+async function reviewSummaryFor(cfg: SFConfig, cwd: string, adwId: string): Promise<string | undefined> {
   let db: SfDb | undefined;
   try {
     const wtAnchor = paths.resolveAnchor(cwd);
     const wtDataPaths = paths.resolveDataPaths(wtAnchor, cfg.defaults.data_dir, cfg.observability.db);
-    db = new SfDb(wtDataPaths.db_path);
-    const envelope = db
-      .envelopes(adwId)
+    db = await SfDb.open(wtDataPaths.db, wtDataPaths.sessions_dir);
+    const envelope = (await db.envelopes(adwId))
       .filter((e) => e.output_type === ReviewOutput.name)
       .at(-1); // the LATEST verdict — a revise loop can produce several
     if (!envelope?.payload_json) return undefined;
@@ -271,7 +270,7 @@ function reviewSummaryFor(cfg: SFConfig, cwd: string, adwId: string): string | u
   } catch {
     return undefined; // best-effort — see the doc comment above
   } finally {
-    db?.close();
+    await db?.close();
   }
 }
 
@@ -323,13 +322,13 @@ export function makeWatchFanoutDispatch(
    * a shared handle in — the same per-call shape `detailFromFailedPhase`/
    * `reviewSummaryFor` above already use against the same WAL db.
    */
-  const readMetrics = (adwId: string): AttemptMetrics => {
-    if (!existsSync(dataPaths.db_path)) return { gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 };
+  const readMetrics = async (adwId: string): Promise<AttemptMetrics> => {
     let db: SfDb | undefined;
     try {
-      db = new SfDb(dataPaths.db_path);
-      const gates = db.gates(adwId);
-      const session = db.session(adwId);
+      if (!(await SfDb.exists(dataPaths))) return { gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 };
+      db = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
+      const gates = await db.gates(adwId);
+      const session = await db.session(adwId);
       // `passed` is a SQLite integer boolean that CAN be NULL on a row an
       // older tracer wrote. Counted explicitly in both directions, never as
       // `!g.passed`: a NULL is unknown, and letting it read as a failure
@@ -343,7 +342,7 @@ export function makeWatchFanoutDispatch(
     } catch {
       return { gate_passes: 0, gate_failures: 0, cost: 0, tokens: 0 };
     } finally {
-      db?.close();
+      await db?.close();
     }
   };
 
@@ -353,22 +352,23 @@ export function makeWatchFanoutDispatch(
    * candidate id. Safe direction is FALSE (see `WatchFanoutDeps.adwIdsFree`'s
    * own doc comment): an unreadable db reports "taken" rather than "free".
    */
-  const adwIdsFree = (adwIds: string[]): boolean => {
-    if (!existsSync(dataPaths.db_path)) return true; // no db yet — nothing to collide with
+  const adwIdsFree = async (adwIds: string[]): Promise<boolean> => {
     let db: SfDb | undefined;
     try {
-      db = new SfDb(dataPaths.db_path);
-      return adwIds.every((id) => db!.session(id) === null);
+      if (!(await SfDb.exists(dataPaths))) return true; // no db yet — nothing to collide with
+      db = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
+      const results = await Promise.all(adwIds.map((id) => db!.session(id)));
+      return results.every((session) => session === null);
     } catch {
       return false;
     } finally {
-      db?.close();
+      await db?.close();
     }
   };
 
-  const reviewFor = (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => ({
+  const reviewFor = async (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => ({
     reviewRequired: resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer"),
-    reviewSummary: reviewSummaryFor(cfg, opts.cwd, opts.adwId),
+    reviewSummary: await reviewSummaryFor(cfg, opts.cwd, opts.adwId),
   });
 
   return { runAttempt, readMetrics, adwIdsFree, reviewFor };
@@ -610,9 +610,9 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // is reflected here too, not just each chain's static/YAML default.
     const reviewRequired = resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer");
     if (code === 0) {
-      return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: reviewSummaryFor(cfg, opts.cwd, opts.adwId) };
+      return { accepted: true, adwId: opts.adwId, detail: "", reviewRequired, reviewSummary: await reviewSummaryFor(cfg, opts.cwd, opts.adwId) };
     }
-    const detail = detailFromFailedPhase(
+    const detail = await detailFromFailedPhase(
       cfg,
       opts.cwd,
       opts.adwId,
@@ -650,7 +650,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // comment for the KNOWN LIMITATION this fixes.
     const code = await withRunScope(opts.adwId, () => runChainDef(chainDef, ctx, opts.chainOptions));
     if (code !== 0) {
-      const detail = detailFromFailedPhase(
+      const detail = await detailFromFailedPhase(
         cfg,
         opts.cwd,
         opts.adwId,

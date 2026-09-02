@@ -670,21 +670,21 @@ interface RunForAgents {
    */
   tiering?: TierResolution | null;
   tracer: {
-    event: (record: ReturnType<typeof makeEventRecord>) => string;
-    processStart: (adwId: string, kind: string, name: string, pid: number, command: string) => void;
-    processEnd: (adwId: string, pid: number) => void;
-    envelopeRow: (phase: Phase, agent: string, outputType: string, payloadJson: string, valid: boolean, attempt: number) => void;
-    gateRow: (phase: Phase, gate: string, report: GateReport, attempt: number) => void;
-    agentSessionRow: (adwId: string, agent: AgentConfig, sessionId: string, contextTokens?: number, contextWindow?: number) => void;
+    event: (record: ReturnType<typeof makeEventRecord>) => Promise<string>;
+    processStart: (adwId: string, kind: string, name: string, pid: number, command: string) => Promise<void>;
+    processEnd: (adwId: string, pid: number) => Promise<void>;
+    envelopeRow: (phase: Phase, agent: string, outputType: string, payloadJson: string, valid: boolean, attempt: number) => Promise<void>;
+    gateRow: (phase: Phase, gate: string, report: GateReport, attempt: number) => Promise<void>;
+    agentSessionRow: (adwId: string, agent: AgentConfig, sessionId: string, contextTokens?: number, contextWindow?: number) => Promise<void>;
   };
   console: {
-    agentStarted: (name: string, model: string, sessionId: string) => void;
-    gateResult: (name: string, report: GateReport) => void;
-    retry: (name: string, attempt: number, limit: number, reason: string) => void;
-    envelopeSummary: (envelope: EnvelopeBase, typeName: string) => void;
-    agentFinished: (name: string, tokens: number, cost: number) => void;
+    agentStarted: (name: string, model: string, sessionId: string) => Promise<void>;
+    gateResult: (name: string, report: GateReport) => Promise<void>;
+    retry: (name: string, attempt: number, limit: number, reason: string) => Promise<void>;
+    envelopeSummary: (envelope: EnvelopeBase, typeName: string) => Promise<void>;
+    agentFinished: (name: string, tokens: number, cost: number) => Promise<void>;
   };
-  addUsage: (tokens: number, cost: number) => void;
+  addUsage: (tokens: number, cost: number) => Promise<void>;
   saveAgentMap: (agent: string, entry: { session_id: string; model: string; coding_agent: string }) => void;
 }
 
@@ -849,15 +849,17 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   const spec = sandboxSpecFor(run, agent);
   if (spec) {
     sandbox.registerRunLog(spec.adw_id, (e) =>
-      run.tracer.event(
-        makeEventRecord({
-          adw_id: run.adw_id,
-          phase_id: phase.phase_id,
-          type: "log",
-          name: "sandbox",
-          payload: { level: e.level, msg: e.msg, ...(e.data ? { data: e.data } : {}) },
-        }),
-      ),
+      void run.tracer
+        .event(
+          makeEventRecord({
+            adw_id: run.adw_id,
+            phase_id: phase.phase_id,
+            type: "log",
+            name: "sandbox",
+            payload: { level: e.level, msg: e.msg, ...(e.data ? { data: e.data } : {}) },
+          }),
+        )
+        .catch(() => {}),
     );
   }
 
@@ -879,7 +881,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   prompts.save(path.join(agentDir, "prompts"), "user.md", userText);
 
   const { session_id: sessionId, is_new: isNewSession } = agentSessionId(run, agent);
-  run.tracer.event(
+  await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
       phase_id: phase.phase_id,
@@ -897,7 +899,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       },
     }),
   );
-  run.console.agentStarted(agent.name, agent.model, sessionId);
+  await run.console.agentStarted(agent.name, agent.model, sessionId);
 
   // Parse retries and gate corrections re-enter the SAME Flue conversation,
   // so the last send is the one whose context occupancy is current — while
@@ -928,8 +930,12 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       sandbox: spec,
     };
     const forward = eventForwarder(run, phase, agent.name, agent.coding_agent);
-    const onSpawn = (pid: number) => run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`);
-    const onExit = (pid: number) => run.tracer.processEnd(run.adw_id, pid);
+    // Best-effort, fire-and-forget: these fire from a plain process-lifecycle
+    // callback (agent_cc.ts/agent_flue.ts's onSpawn/onExit hooks), not from
+    // this function's own async control flow, so there is nothing useful to
+    // await here — same swallow-and-log discipline as tracer.ts's otel fanOut.
+    const onSpawn = (pid: number) => void run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`).catch(() => {});
+    const onExit = (pid: number) => void run.tracer.processEnd(run.adw_id, pid).catch(() => {});
     if (spec) await sandbox.reconcileWorkspace(spec);
     const result =
       agent.coding_agent === "claude_code"
@@ -937,7 +943,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
         : await agentFlue.run(request, forward, onSpawn, onExit);
     // SPEND IS RECORDED BEFORE THE EXTRACT CAN THROW: a failed extract must
     // not also lose this call's tokens/cost off the Run's ledger.
-    run.addUsage(result.tokens, result.cost);
+    await run.addUsage(result.tokens, result.cost);
     spent.merge(result.usage);
     latest = result;
     if (spec) await sandbox.extractWorkspace(spec);
@@ -959,8 +965,8 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     for (const gate of call.gates || []) {
       const report = asReport(gate(envelope, run));
       const found = report.violations;
-      run.tracer.gateRow(phase, gate.name, report, gateAttempt);
-      run.tracer.event(
+      await run.tracer.gateRow(phase, gate.name, report, gateAttempt);
+      await run.tracer.event(
         makeEventRecord({
           adw_id: run.adw_id,
           phase_id: phase.phase_id,
@@ -969,7 +975,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
           payload: { attempt: gateAttempt, violations: found, checks: report.checks },
         }),
       );
-      run.console.gateResult(gate.name, report);
+      await run.console.gateResult(gate.name, report);
       violations.push(...found);
     }
     if (violations.length === 0) break;
@@ -977,7 +983,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       throw new GateFailure(`${agent.name} failed gates after ${gateAttempt} attempt(s):\n- ` + violations.join("\n- "));
     }
     phase.attempt = gateAttempt;
-    run.console.retry(agent.name, gateAttempt, phase.params.retries, `${violations.length} gate violation(s)`);
+    await run.console.retry(agent.name, gateAttempt, phase.params.retries, `${violations.length} gate violation(s)`);
     const correction =
       "Your previous response failed validation:\n- " +
       violations.join("\n- ") +
@@ -994,7 +1000,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   try {
     touched = permissions.enforce(run, phase, agent, treeBefore);
   } catch (breach) {
-    run.tracer.event(
+    await run.tracer.event(
       makeEventRecord({
         adw_id: run.adw_id,
         phase_id: phase.phase_id,
@@ -1011,7 +1017,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     throw breach;
   }
   if (touched.length > 0) {
-    run.tracer.event(
+    await run.tracer.event(
       makeEventRecord({
         adw_id: run.adw_id,
         phase_id: phase.phase_id,
@@ -1022,12 +1028,12 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     );
   }
 
-  persistEnvelope(run, phase, agent.name, call, envelope, parsed.attempt, true);
-  run.console.envelopeSummary(envelope, call.output_type.name);
+  await persistEnvelope(run, phase, agent.name, call, envelope, parsed.attempt, true);
+  await run.console.envelopeSummary(envelope, call.output_type.name);
   const context = latest ?? result;
-  run.tracer.agentSessionRow(run.adw_id, agent, sessionId, context.context_tokens, context.context_window);
+  await run.tracer.agentSessionRow(run.adw_id, agent, sessionId, context.context_tokens, context.context_window);
   run.saveAgentMap(agent.name, { session_id: sessionId, model: agent.model, coding_agent: agent.coding_agent });
-  run.tracer.event(
+  await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
       phase_id: phase.phase_id,
@@ -1036,7 +1042,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       payload: { artifacts: envelope.artifacts, summary: envelope.summary },
     }),
   );
-  run.tracer.event(
+  await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
       phase_id: phase.phase_id,
@@ -1052,7 +1058,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       },
     }),
   );
-  run.console.agentFinished(agent.name, spent.total_tokens, spent.total_cost);
+  await run.console.agentFinished(agent.name, spent.total_tokens, spent.total_cost);
   if (envelope.status !== "success") {
     throw new Error(`${agent.name} reported status=${JSON.stringify(envelope.status)}: ${envelope.summary}`);
   }
@@ -1097,19 +1103,24 @@ function eventForwarder(run: RunForAgents, phase: Phase, agentName: string, codi
     const record = tracker.observe(chunk);
     if (record === null) return;
     // The call's span rides the columns; duration_ms stays in the payload as
-    // Flue's own authoritative number.
+    // Flue's own authoritative number. Fire-and-forget, same reasoning as
+    // onSpawn/onExit above: this callback fires from a synchronous stream
+    // event handler (agent_cc.ts's readline `line` event / agent_flue.ts's
+    // chunk stream), never from this function's own async control flow.
     const { label, started_at, ended_at, ...rest } = record;
-    run.tracer.event(
-      makeEventRecord({
-        adw_id: run.adw_id,
-        phase_id: phase.phase_id,
-        type: "tool_call",
-        name: label,
-        started_at: started_at ?? null,
-        ended_at: ended_at ?? null,
-        payload: { ...rest, agent: agentName },
-      }),
-    );
+    void run.tracer
+      .event(
+        makeEventRecord({
+          adw_id: run.adw_id,
+          phase_id: phase.phase_id,
+          type: "tool_call",
+          name: label,
+          started_at: started_at ?? null,
+          ended_at: ended_at ?? null,
+          payload: { ...rest, agent: agentName },
+        }),
+      )
+      .catch(() => {});
   };
 }
 
@@ -1159,11 +1170,11 @@ async function parseWithRetries(
       return { envelope, attempt };
     } catch (error) {
       const message = describeParseError(error);
-      persistEnvelope(run, phase, phase.params.owner, call, null, attempt, false, current.text);
+      await persistEnvelope(run, phase, phase.params.owner, call, null, attempt, false, current.text);
       if (attempt > JSON_FIX_ATTEMPTS) {
         throw new Error(`${phase.params.owner} never produced valid ${call.output_type.name} JSON: ${message}`);
       }
-      run.console.retry(phase.params.owner, attempt, JSON_FIX_ATTEMPTS, `invalid ${call.output_type.name} JSON: ${message}`);
+      await run.console.retry(phase.params.owner, attempt, JSON_FIX_ATTEMPTS, `invalid ${call.output_type.name} JSON: ${message}`);
       const fields = call.output_type.fields.join(", ");
       current = await send(
         `Your response was not valid JSON for the required structure ` +
@@ -1175,7 +1186,7 @@ async function parseWithRetries(
   throw new Error("unreachable");
 }
 
-function persistEnvelope(
+async function persistEnvelope(
   run: RunForAgents,
   phase: Phase,
   agentName: string,
@@ -1184,9 +1195,9 @@ function persistEnvelope(
   attempt: number,
   valid: boolean,
   raw: string = "",
-): void {
+): Promise<void> {
   const payloadJson = envelope ? JSON.stringify(envelope, null, 2) : JSON.stringify({ raw: raw.slice(-2000) });
-  run.tracer.envelopeRow(phase, agentName, call.output_type.name, payloadJson, valid, attempt);
+  await run.tracer.envelopeRow(phase, agentName, call.output_type.name, payloadJson, valid, attempt);
   if (envelope) {
     const record = {
       agent_name: agentName,

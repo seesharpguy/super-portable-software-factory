@@ -6,12 +6,31 @@ always: **agents → sqlite → CLI / web UI.**
 ## Two stores, one truth
 
 **Files are the raw record** (`envelope.json`, `agent_map.json`, Flue's own
-`.spf/data/flue.db` conversation store); **SQLite (`.spf/data/spf.db`, via
-`node:sqlite`) is the queryable mirror** the CLI and UI read. `tracer.ts`
-writes both. Losing the db loses nothing that can't be rebuilt from files.
+`.spf/data/flue.db` conversation store); **the trace db is the queryable
+mirror** the CLI and UI read. `tracer.ts` writes both. Losing the trace db
+loses nothing that can't be rebuilt from files.
 
-Location comes from `observability.db` in `spf.config.yaml`, default
-`.spf/data/spf.db` — inside the target repo, always gitignored.
+`observability.db` in `spf.config.yaml` names WHICH trace db backend and
+where — a bare string (a local sqlite path, default `.spf/data/spf.db`,
+inside the target repo, always gitignored), `{kind: sqlite, path?}` spelled
+out the same way, or `{kind: d1, database_id, account_id_env?,
+api_token_env?}` for a remote Cloudflare D1 database instead of a local
+file. `core/trace_db.ts`'s `TraceDb` interface is the one seam both `Tracer`
+(writes) and `SfDb` (reads) go through — `createTraceDb()` picks
+`LocalTraceDb` or `D1TraceDb` from the resolved kind. See `config.md`'s
+`observability.db` rows for the full field reference.
+
+**The WAL live-read guarantee is LOCAL-ONLY.** The rest of this doc's "WAL
+pragmas" section describes a guarantee specific to the local sqlite
+backend — `spf ui` reading while a chain writes, through one shared file.
+A D1-backed repo has no such file to share: `spf ui` and a running chain
+each speak to D1 over independent HTTP calls, and D1's own consistency
+model (sequential consistency, with a Sessions-API "bookmark" for
+read-your-own-writes that this adapter does not use — see
+`D1TraceDb`'s own doc comment in `core/trace_db.ts`) does not promise the
+same instant. This is a deliberate, documented trade-off (SPF #66), not a
+gap: no phase/gate/run OUTCOME depends on it — only how quickly `spf ui`
+can catch up to a chain still writing.
 
 ## Event schema
 
@@ -86,6 +105,16 @@ up through `agents.execute`, `run.phase`, and every chain's `main()` is
 
 ## Tables
 
+No `REFERENCES` / foreign keys on `adw_id` or `phase_id` anywhere below — a
+deliberate change for the D1 backend (SPF #66), not an oversight: Cloudflare
+D1 enforces FKs unconditionally with no way to disable them, and a session's
+very first write (e.g. its first `events` row) can otherwise land before its
+own `sessions` row has committed, throwing `FOREIGN KEY constraint failed` on
+a perfectly ordinary run. The relationships still hold logically (every
+`adw_id` should resolve to a `sessions` row eventually) — they are just no
+longer enforced by the schema on either backend, so local sqlite and D1
+behave identically.
+
 ```sql
 sessions (
   adw_id TEXT PRIMARY KEY, adw_name TEXT, request TEXT, status TEXT, engineer TEXT,
@@ -93,37 +122,37 @@ sessions (
   archived INTEGER DEFAULT 0            -- review triage, set by the UI; never by a run
 );
 phases (
-  phase_id TEXT PRIMARY KEY, adw_id TEXT REFERENCES sessions, seq INTEGER,
+  phase_id TEXT PRIMARY KEY, adw_id TEXT, seq INTEGER,
   name TEXT, kind TEXT, owner TEXT, description TEXT,
   status TEXT DEFAULT 'fail',           -- success must be earned
   attempt INTEGER DEFAULT 0, retries INTEGER DEFAULT 0, error TEXT,
   started_at TEXT, ended_at TEXT
 );
 events (
-  event_id TEXT PRIMARY KEY, adw_id TEXT REFERENCES sessions, phase_id TEXT REFERENCES phases,
+  event_id TEXT PRIMARY KEY, adw_id TEXT, phase_id TEXT,
   parent_id TEXT, type TEXT, name TEXT, payload_json TEXT, tokens INTEGER,
   started_at TEXT, ended_at TEXT        -- ended_at set only on events that span time
 );
 envelopes (
-  envelope_id TEXT PRIMARY KEY, adw_id TEXT REFERENCES sessions, phase_id TEXT REFERENCES phases,
+  envelope_id TEXT PRIMARY KEY, adw_id TEXT, phase_id TEXT,
   agent TEXT, output_type TEXT, payload_json TEXT, valid INTEGER, attempt INTEGER, created_at TEXT
 );
 gate_results (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT REFERENCES sessions, phase_id TEXT REFERENCES phases,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT, phase_id TEXT,
   attempt INTEGER, gate TEXT, passed INTEGER,
   violations_json TEXT,                 -- derived: the failed checks, as "item: note"
   checks_json TEXT,                     -- [{item, ok, note}] — everything the gate looked at
   created_at TEXT
 );
 processes (                             -- adw_id -> pid, so a stuck run can be stopped
-  id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT REFERENCES sessions,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT,
   kind TEXT,                            -- 'adw' (the chain process) | 'agent' (a real child pid for claude_code; same as the chain's own pid for Flue, which is in-process)
   name TEXT, pid INTEGER,
   command TEXT,                         -- what the pid WAS; pids get recycled, verify before killing
   started_at TEXT, ended_at TEXT        -- ended_at NULL = believed alive
 );
 agent_sessions (                        -- the queryable mirror of agent_map.json
-  adw_id TEXT REFERENCES sessions, agent TEXT,
+  adw_id TEXT, agent TEXT,
   coding_agent TEXT, model TEXT, color TEXT, session_id TEXT,
   context_tokens INTEGER,               -- window occupancy after the agent's last turn
   context_window INTEGER,               -- backend-dependent; 0 = unknown — see "Context is occupancy" above

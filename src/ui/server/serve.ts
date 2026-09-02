@@ -9,11 +9,15 @@
 import { spawn } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
+import type { NormalizedObservabilityDb } from "../../core/data_types.ts";
 import { createApp } from "./app.ts";
 import { SfDb } from "./db.ts";
 
 export interface UiOptions {
-  dbPath: string;
+  /** Bare local sqlite path (sugar for `{kind:"sqlite",path}`), or a normalized `observability.db` descriptor. */
+  db: NormalizedObservabilityDb | string;
+  /** `paths.resolveDataPaths(...).sessions_dir` — required whenever `db` is `kind:"d1"`; see `SfDb.open`'s doc comment. */
+  sessionsDir?: string;
   webDir: string;
   /** Explicit port. Omit to try the default and probe upward on collision. */
   port?: number;
@@ -54,7 +58,7 @@ function openUrl(url: string): void {
 }
 
 export async function runUi(options: UiOptions): Promise<UiHandle> {
-  const db = new SfDb(options.dbPath);
+  const db = await SfDb.open(options.db, options.sessionsDir);
   const app = createApp(db, options.webDir);
 
   const explicit = options.port !== undefined;
@@ -71,7 +75,7 @@ export async function runUi(options: UiOptions): Promise<UiHandle> {
     } catch (error) {
       if (!isAddrInUse(error)) throw error;
       if (i === attempts - 1) {
-        db.close();
+        await db.close();
         throw new Error(
           explicit
             ? `port ${port} is already in use — pick another with --port`
@@ -89,10 +93,9 @@ export async function runUi(options: UiOptions): Promise<UiHandle> {
   if (shouldOpen) openUrl(url);
 
   const close = (): Promise<void> =>
-    new Promise((resolvePromise) => {
+    new Promise((resolvePromise, reject) => {
       server!.close(() => {
-        db.close();
-        resolvePromise();
+        db.close().then(resolvePromise, reject);
       });
     });
 

@@ -218,7 +218,7 @@ export async function main(): Promise<void> {
         process.exitCode = await eventsCommand(rest);
         return;
       case "abort":
-        process.exitCode = abortCommand(rest);
+        process.exitCode = await abortCommand(rest);
         return;
       default: {
         const chain = findChain(cmd);

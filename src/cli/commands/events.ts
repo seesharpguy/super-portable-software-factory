@@ -22,10 +22,10 @@ export async function eventsCommand(argv: string[]): Promise<number> {
     return 1;
   }
   const adwId = positionals[0];
-  const { db } = openTrace(options);
+  const { db } = await openTrace(options);
   let after = options["after"] ? Number.parseInt(options["after"], 10) : 0;
 
-  const page = db.events(adwId, after, options["limit"] ? Number.parseInt(options["limit"], 10) : 500);
+  const page = await db.events(adwId, after, options["limit"] ? Number.parseInt(options["limit"], 10) : 500);
   if (flags["json"] && !flags["follow"]) {
     console.log(JSON.stringify(page.events, null, 2));
     return 0;
@@ -38,8 +38,8 @@ export async function eventsCommand(argv: string[]): Promise<number> {
   console.error(`-- following ${adwId}; ^C to stop --`);
   for (;;) {
     await sleep(500);
-    const session = db.session(adwId);
-    const next = db.events(adwId, after, 500);
+    const session = await db.session(adwId);
+    const next = await db.events(adwId, after, 500);
     for (const e of next.events) printEvent(e);
     if (next.events.length > 0) after = next.cursor;
     if (session && session.status !== "running" && next.events.length === 0) {

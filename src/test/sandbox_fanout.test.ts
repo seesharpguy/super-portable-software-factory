@@ -35,7 +35,6 @@ import * as v from "valibot";
 import { sandboxSpecFor } from "../core/agents.js";
 import { attemptAdwId } from "../core/fanout.js";
 import { linkFanoutDataDir } from "../cli/commands/fanout.js";
-import type { FanoutDeps } from "../core/fanout.js";
 import * as sandbox from "../core/sandbox.js";
 import type { SandboxTransport } from "../core/sandbox.js";
 
@@ -199,33 +198,37 @@ test("sandboxSpecFor: env_allowlist: [] still yields {} for a fan-out-derived <b
   }
 });
 
-// ── compile-time (not just runtime): linkDataDir / readMetrics stay sync ───
+// ── compile-time (not just runtime): linkDataDir stays sync ────────────────
 
 /**
- * `runBestOf` (design §5.5) is load-bearing on NEITHER of these two
- * `FanoutDeps` callbacks ever growing an `await` — provisioning happens
- * lazily inside `createSandbox`, never inside these. `readMetrics`'s
- * contract (`AttemptMetrics`, not `Promise<AttemptMetrics>`) already fails a
- * real assignment at `cli/commands/fanout.ts`'s own `runBestOf({...
- * readMetrics ...})` call site if the concrete function ever turns async —
- * TypeScript does NOT extend that same protection to `void`-returning
- * `linkDataDir` (a `() => Promise<void>` is structurally assignable to a
- * `() => void` — the "void return is special" compatibility rule), so THAT
- * half is pinned explicitly here, against the real exported
- * `linkFanoutDataDir` (not just the interface), so a regression fails `tsc`
- * rather than being caught only by someone reading a diff.
+ * `runBestOf` (design §5.5) is load-bearing on `linkDataDir` never growing
+ * an `await` — provisioning happens lazily inside `createSandbox`, never
+ * inside it. TypeScript does not catch a regression here on its own: a
+ * `void`-returning `linkDataDir` accepts `() => Promise<void>` structurally
+ * (the "void return is special" compatibility rule), so this is pinned
+ * explicitly against the real exported `linkFanoutDataDir` (not just the
+ * interface), so a regression fails `tsc` rather than being caught only by
+ * someone reading a diff.
+ *
+ * `readMetrics` USED to carry the same pin (`AttemptMetrics`, not
+ * `Promise<AttemptMetrics>`) — TypeScript's own structural check on that
+ * return type made the assertion redundant with the real interface, so it
+ * doubled as a second guard. SPF #66 (the D1 trace-db adapter) deliberately
+ * removes that invariant: `readMetrics` reads the SHARED trace db
+ * (`SfDb`/`Tracer`), which is now async for BOTH backends — see
+ * `core/trace_db.ts`'s header for why even the local sqlite path pays that
+ * cost. `readMetrics` growing an `await` is not a regression any more; it is
+ * the whole point.
  */
 type AssertSyncReturn<F extends (...args: never[]) => unknown> = ReturnType<F> extends Promise<unknown> ? never : true;
 const linkFanoutDataDirStaysSync: AssertSyncReturn<typeof linkFanoutDataDir> = true;
-const readMetricsContractStaysSync: AssertSyncReturn<FanoutDeps["readMetrics"]> = true;
 
-test("compile-time sync assertions above did not silently no-op — linkFanoutDataDir really is a plain sync function at runtime too", () => {
-  // Referencing the two `const`s above is the point: `tsc` fails THIS FILE
+test("compile-time sync assertion above did not silently no-op — linkFanoutDataDir really is a plain sync function at runtime too", () => {
+  // Referencing the `const` above is the point: `tsc` fails THIS FILE
   // (TS2322, "type Promise<...> is not assignable to type never") the moment
-  // either callback's real return type ever grows an `await` — a much
+  // this callback's real return type ever grows an `await` — a much
   // earlier, much louder failure than a runtime test noticing a hang.
   assert.equal(linkFanoutDataDirStaysSync, true);
-  assert.equal(readMetricsContractStaysSync, true);
 
   const worktree = mkdtempSync(path.join(tmpdir(), "spf-sync-check-wt-"));
   const dataParent = mkdtempSync(path.join(tmpdir(), "spf-sync-check-data-"));

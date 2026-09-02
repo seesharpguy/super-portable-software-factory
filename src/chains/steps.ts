@@ -146,7 +146,7 @@ function makeStep(
 export async function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Promise<Run> {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
-  const run = session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name, ctx.render_hooks);
+  const run = await session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name, ctx.render_hooks);
   // Provenance, once per run, before any phase opens: a repo-local chain
   // (.spf/chains/*.yaml) records the file it came from. `chain_name` alone
   // stops being enough to reconstruct a run the moment a target repo can
@@ -161,7 +161,7 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
   // it is a note. Adding a picklist member would force a UI change for a
   // payload the UI already renders generically.
   if (ctx.chain_source) {
-    run.tracer.event(
+    await run.tracer.event(
       makeEventRecord({ adw_id: run.adw_id, type: "log", name: "chain_source", payload: { source: ctx.chain_source } }),
     );
   }
@@ -179,7 +179,7 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
     servedOllamaTags,
     required: requiredAgents,
   });
-  run.tracer.event(
+  await run.tracer.event(
     makeEventRecord({
       adw_id: run.adw_id,
       type: "log",
@@ -201,7 +201,7 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
   // reading the console when the two disagree.
   for (const [agentName, effective] of Object.entries(tiering.changedModels(run.tiering))) {
     const route = run.tiering.routing[agentName]!;
-    run.console.note(`[spf] tiering ${agentName} ${route.tier} (${route.configured} -> ${effective}) risk=${run.tiering.risk}`);
+    await run.console.note(`[spf] tiering ${agentName} ${route.tier} (${route.configured} -> ${effective}) risk=${run.tiering.risk}`);
   }
 
   return run;
@@ -257,12 +257,12 @@ function appendTrailer(message: string, trailer: string): string {
  * -> no trailer, ever: a trailer that lies launders an AI verdict into a git
  * attestation.
  */
-export function commitEnvelope(
+export async function commitEnvelope(
   run: Run,
   ph: PhaseHandle,
   envelope: EnvelopeBase & { commit_message?: string },
   signoff?: CommitterIdentity | null,
-): void {
+): Promise<void> {
   let message = envelope.commit_message || `spf(${run.adw_id}): ${envelope.summary}`;
   if (signoff) {
     const trailerLine = `Signed-off-by: ${signoff.name} <${signoff.email}>`;
@@ -271,12 +271,12 @@ export function commitEnvelope(
     const alreadyPresent = message.split("\n").some((line) => line.trim() === trailerLine);
     if (!alreadyPresent) message = appendTrailer(message, trailerLine);
   }
-  ph.log({ sha: run.git.commitAll(message), message });
+  await ph.log({ sha: run.git.commitAll(message), message });
 }
 
 /** Log a change-capture result the same way every chain that captures one did. */
-export function logChangeset(ph: PhaseHandle, result: ChangeSet): void {
-  ph.log({
+export async function logChangeset(ph: PhaseHandle, result: ChangeSet): Promise<void> {
+  await ph.log({
     base: `${result.base.label} @ ${result.base.commit.slice(0, 7)}`,
     reason: result.base.reason,
     files: result.files.length + result.untracked.length,
@@ -421,7 +421,7 @@ export function request(opts: { description?: string; logBaseline?: boolean } = 
       async (ph) => {
         const payload: Record<string, unknown> = { input: state.prompt };
         if (opts.logBaseline) payload.baseline = run.git.shortSha(state.baseline);
-        ph.log(payload);
+        await ph.log(payload);
       },
     );
   };
@@ -574,8 +574,8 @@ export function qualityCheck(opts: { suite: string; description?: string } = { s
           (suiteName === "all" ? "Run the deterministic quality blocks" : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
       }),
       async (ph) => {
-        const result = quality.runSuite(run, suiteName);
-        quality.record(ph, result);
+        const result = await quality.runSuite(run, suiteName);
+        await quality.record(ph, result);
         state.quality = result;
         state.accepted = result.passed;
         state.reason = result.passed ? "" : `quality failed: ${result.failures.join("; ")}`;
@@ -635,8 +635,8 @@ export function fixLoop(
               : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
         }),
         async (ph) => {
-          const r = quality.runSuite(run, suiteName);
-          quality.record(ph, r);
+          const r = await quality.runSuite(run, suiteName);
+          await quality.record(ph, r);
           return r;
         },
       );
@@ -765,7 +765,7 @@ export function commit(opts: { onlyIfAccepted?: boolean; description?: string } 
           opts.description ??
           (opts.onlyIfAccepted ? "Land the code only after the suite came back green" : "Land the builder's changes, using the message it wrote"),
       }),
-      async (ph) => commitEnvelope(run, ph, state.previous as EnvelopeBase & { commit_message?: string }),
+      async (ph) => await commitEnvelope(run, ph, state.previous as EnvelopeBase & { commit_message?: string }),
     );
   };
   return makeStep(fn, { label: "git(commit)" });
@@ -788,7 +788,7 @@ export function changes(opts: { base?: string; description?: string } = {}): Ste
       }),
       async (ph) => {
         const result = changesLib.capture(run, makeChangeCapture({ base }));
-        logChangeset(ph, result);
+        await logChangeset(ph, result);
         if (result.empty) {
           throw new Error(
             `nothing changed since ${result.base.label} (${result.base.reason}) — documenting runs after a build. ` +
@@ -956,7 +956,7 @@ export function publishIssues(opts: { description?: string } = {}): Step {
         clearStaleRefineOutputFiles(run.context_handoff_dir);
         if (questions.length > 0) {
           writeFileSync(path.join(run.context_handoff_dir, "refine_questions.json"), JSON.stringify(questions, null, 2));
-          ph.log({ escalated: questions.length });
+          await ph.log({ escalated: questions.length });
           return;
         }
         if (split.length > 0) {
@@ -967,7 +967,7 @@ export function publishIssues(opts: { description?: string } = {}): Step {
           // `proposeSpecSplit`, same division of labor as the `questions`
           // branch above (this writes, `runSpec` posts/transitions).
           writeFileSync(path.join(run.context_handoff_dir, "refine_split.json"), JSON.stringify(split, null, 2));
-          ph.log({ split_proposed: split.length });
+          await ph.log({ split_proposed: split.length });
           return;
         }
         const tracker = refineLib.resolveAuthoringProvider(run.cfg);
@@ -980,7 +980,7 @@ export function publishIssues(opts: { description?: string } = {}): Step {
           path.join(run.context_handoff_dir, "refine_publish.json"),
           JSON.stringify(created.map((c) => ({ id: c.issue.id, title: c.issue.title, kind: c.kind, isLeaf: c.isLeaf })), null, 2),
         );
-        ph.log({ created: created.length, leaves: created.filter((c) => c.isLeaf).length, priority_ceiling: priorityCeiling });
+        await ph.log({ created: created.length, leaves: created.filter((c) => c.isLeaf).length, priority_ceiling: priorityCeiling });
       },
     );
   };
@@ -1037,5 +1037,5 @@ export async function runSteps(
   for (const step of steps) {
     await step(run, state);
   }
-  return run.finish(state.accepted, state.reason);
+  return await run.finish(state.accepted, state.reason);
 }

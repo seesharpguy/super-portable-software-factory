@@ -120,7 +120,7 @@ function harness(opts: {
   concurrency?: number;
   firstSuccess?: boolean;
   exitFor: (dispatch: AttemptDispatch) => Promise<number>;
-  metricsFor?: (adwId: string) => AttemptMetrics;
+  metricsFor?: (adwId: string) => Promise<AttemptMetrics>;
 }): Harness {
   const dir = mkdtempSync(path.join(tmpdir(), "spf-fanout-test-"));
   const calls: GitCalls = { fetches: [], adds: [], removes: [], deletedBranches: [] };
@@ -142,7 +142,7 @@ function harness(opts: {
       dispatched.push(dispatch);
       return opts.exitFor(dispatch);
     },
-    readMetrics: opts.metricsFor ?? (() => NO_METRICS),
+    readMetrics: opts.metricsFor ?? (async () => NO_METRICS),
     log: (message) => void logs.push(message),
   };
   return { deps, calls, dispatched, logs, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
@@ -349,7 +349,7 @@ test("runBestOf: the winner's branch AND worktree survive; the losing successes 
     exitFor: async () => 0,
     // Attempt 2 is the only clean one, so the basis is gate failures — not a
     // tiebreak — which is what makes the kept/deleted split unambiguous here.
-    metricsFor: (adwId) =>
+    metricsFor: async (adwId) =>
       adwId === "base1234-2"
         ? { gate_passes: 5, gate_failures: 0, cost: 0.2, tokens: 100 }
         : { gate_passes: 5, gate_failures: 1, cost: 0.1, tokens: 100 },
@@ -484,7 +484,7 @@ test("runBestOf: metrics come from the shared db per adw_id, and a failing read 
   const h = harness({
     n: 2,
     exitFor: async () => 0,
-    metricsFor: (adwId) => {
+    metricsFor: async (adwId) => {
       asked.push(adwId);
       if (adwId === "base1234-1") throw new Error("db locked");
       return { gate_passes: 2, gate_failures: 0, cost: 0.3, tokens: 42 };
@@ -548,7 +548,7 @@ test("runBestOf: a local-only repo (no remote base ref) branches off the local b
       }),
       linkDataDir: () => {},
       runAttempt: async () => 0,
-      readMetrics: () => NO_METRICS,
+      readMetrics: async () => NO_METRICS,
       log: () => {},
     };
     const result = await runBestOf(deps);

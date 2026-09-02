@@ -486,7 +486,7 @@ test("8 / 8b: startRun traces exactly one `tiering` log event per call and one c
       assert.deepEqual(run.tiering!.routing.scout, { tier: "cheap", configured: "openai/small", effective: "openai/small" });
       assert.deepEqual(run.tiering!.routing.builder, { tier: "cheap", configured: "openai/big", effective: "openai/small" });
 
-      const tieringEvents = run.tracer.db.query("SELECT payload_json FROM events WHERE adw_id=? AND type='log' AND name='tiering'").all(adwId) as Array<{
+      const tieringEvents = (await run.tracer.db.query("SELECT payload_json FROM events WHERE adw_id=? AND type='log' AND name='tiering'").all(adwId)) as Array<{
         payload_json: string;
       }>;
       assert.equal(tieringEvents.length, 1, "exactly one `tiering` log event for this startRun call");
@@ -511,9 +511,9 @@ test("8 / 8b: startRun traces exactly one `tiering` log event per call and one c
       ]);
 
       // console note: one line for `builder` (retiered), none for `scout` (unchanged)
-      const consoleLines = run.tracer.db
+      const consoleLines = (await run.tracer.db
         .query("SELECT payload_json FROM events WHERE adw_id=? AND type='log' AND name='console'")
-        .all(adwId) as Array<{ payload_json: string }>;
+        .all(adwId)) as Array<{ payload_json: string }>;
       const messages = consoleLines.map((r) => (JSON.parse(r.payload_json) as { message: string }).message);
       const builderLine = messages.find((m) => m.includes("builder"));
       assert.ok(builderLine, "a console note names the retiered agent");
@@ -525,13 +525,13 @@ test("8 / 8b: startRun traces exactly one `tiering` log event per call and one c
       const ctx2 = baseCtx(dir, { config_paths: [configPath], adw_id: adwId, chain_name: "scout", prompt: words(100) });
       const run2 = await startRun(ctx2, ["scout"], []);
       try {
-        const tieringEventsAfter = run.tracer.db.query("SELECT payload_json FROM events WHERE adw_id=? AND type='log' AND name='tiering'").all(adwId);
+        const tieringEventsAfter = await run.tracer.db.query("SELECT payload_json FROM events WHERE adw_id=? AND type='log' AND name='tiering'").all(adwId);
         assert.equal(tieringEventsAfter.length, 2, "a joined session's second startRun call adds a second tiering event");
       } finally {
-        run2.tracer.db.close();
+        await run2.tracer.db.close();
       }
     } finally {
-      run.tracer.db.close();
+      await run.tracer.db.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

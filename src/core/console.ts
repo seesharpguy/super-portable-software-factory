@@ -55,7 +55,7 @@ function panel(lines: string[], title: string, borderColor: "green" | "red"): st
 }
 
 interface Tracer {
-  event(record: EventRecord): string;
+  event(record: EventRecord): Promise<string>;
 }
 
 /**
@@ -102,9 +102,9 @@ export class Console {
   ) {}
 
   // ── the one helper: print AND trace, always together ────────────────────
-  private emit(line: string, level: string = "info"): void {
+  private async emit(line: string, level: string = "info"): Promise<void> {
     this.sink(line);
-    this.tracer.event(
+    await this.tracer.event(
       makeEventRecord({
         adw_id: this.adwId,
         phase_id: this.phaseId,
@@ -116,8 +116,8 @@ export class Console {
   }
 
   // ── session ─────────────────────────────────────────────────────────────
-  sessionStarted(adwId: string, engineer: string): void {
-    this.emit(`${paint("bold cyan", "adw_id:")} ${paint("bold", adwId)}   ${paint("dim", "engineer")} ${engineer}`);
+  async sessionStarted(adwId: string, engineer: string): Promise<void> {
+    await this.emit(`${paint("bold cyan", "adw_id:")} ${paint("bold", adwId)}   ${paint("dim", "engineer")} ${engineer}`);
     this.notifier?.send({
       kind: "run_started",
       level: "info",
@@ -129,7 +129,7 @@ export class Console {
     });
   }
 
-  sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string): void {
+  async sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string): Promise<void> {
     if (this.finished) return;
     this.finished = true;
     const passed = this.results.filter((r) => r === "success").length;
@@ -147,7 +147,7 @@ export class Console {
     this.sink(rendered);
     this.observer?.onSessionEnd?.(ok);
     const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`;
-    this.tracer.event(
+    await this.tracer.event(
       makeEventRecord({
         adw_id: this.adwId,
         phase_id: this.phaseId,
@@ -170,7 +170,7 @@ export class Console {
   }
 
   // ── phases ──────────────────────────────────────────────────────────────
-  phaseStarted(phase: Phase): void {
+  async phaseStarted(phase: Phase): Promise<void> {
     this.phaseId = phase.phase_id;
     this.phaseName = phase.params.name;
     const p = phase.params;
@@ -179,17 +179,17 @@ export class Console {
       paint(`bold ${color}`, `▶ ${String(phase.seq).padStart(2, "0")} ${p.name}`) +
       `  ${paint(color, p.kind)} ${paint("dim", `· ${p.owner}`)}`;
     if (p.description) line += `  ${paint("dim", clip(p.description))}`;
-    this.emit(line);
+    await this.emit(line);
     this.observer?.onPhaseStart?.(phase);
   }
 
-  phaseEnded(phase: Phase, seconds: number): void {
+  async phaseEnded(phase: Phase, seconds: number): Promise<void> {
     const ok = phase.status === "success";
     this.results.push(phase.status);
     this.observer?.onPhaseEnd?.(phase, seconds);
     let line = `  ${ok ? paint("green", "✓") : paint("red", "✗")} ${phase.params.name} ${paint("dim", `${seconds.toFixed(1)}s`)}`;
     if (!ok && phase.error) line += `  ${paint("red", clip(phase.error))}`;
-    this.emit(line, ok ? "info" : "error");
+    await this.emit(line, ok ? "info" : "error");
     if (!ok) {
       this.notifier?.send({
         kind: "phase_failed",
@@ -208,26 +208,26 @@ export class Console {
   }
 
   /** Free-form detail inside the current phase — what `ph.log()` recorded. */
-  note(message: string): void {
-    this.emit(`  ${paint("dim", `· ${clip(message)}`)}`);
+  async note(message: string): Promise<void> {
+    await this.emit(`  ${paint("dim", `· ${clip(message)}`)}`);
   }
 
   /** `Run.addUsage()`'s only hook into `Console` — the running total lives on `Run`, not here, so this just forwards it to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. */
-  notifyUsage(tokens: number, cost: number): void {
+  async notifyUsage(tokens: number, cost: number): Promise<void> {
     this.observer?.onUsage?.(tokens, cost);
   }
 
   // ── agents ──────────────────────────────────────────────────────────────
-  agentStarted(name: string, model: string, sessionId: string): void {
-    this.emit(`  ${paint("magenta", "▸")} ${name} ${paint("dim", model)}  ${paint("dim", `session ${sessionId}`)}`);
+  async agentStarted(name: string, model: string, sessionId: string): Promise<void> {
+    await this.emit(`  ${paint("magenta", "▸")} ${name} ${paint("dim", model)}  ${paint("dim", `session ${sessionId}`)}`);
   }
 
-  agentFinished(name: string, tokens: number, cost: number): void {
-    this.emit(`  ${paint("dim", `└ ${name} used ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`)}`);
+  async agentFinished(name: string, tokens: number, cost: number): Promise<void> {
+    await this.emit(`  ${paint("dim", `└ ${name} used ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`)}`);
   }
 
-  retry(name: string, attempt: number, limit: number, reason: string): void {
-    this.emit(
+  async retry(name: string, attempt: number, limit: number, reason: string): Promise<void> {
+    await this.emit(
       `  ${paint("yellow", "⟳")} ${name} retry ${attempt}/${limit} ${paint("dim", `— same session · ${clip(reason)}`)}`,
       "warn",
     );
@@ -244,26 +244,26 @@ export class Console {
 
   // ── verification ────────────────────────────────────────────────────────
   /** A gate reports WHAT it checked, not just whether it passed. */
-  gateResult(name: string, report: GateReport): void {
+  async gateResult(name: string, report: GateReport): Promise<void> {
     const ok = report.passed;
     const mark = ok ? paint("green", "✓") : paint("red", "✗");
     const summary = ok
       ? `${report.checks.length} checked`
       : paint("red", `${report.violations.length} of ${report.checks.length} failed`);
-    this.emit(`  ${mark} gate ${paint("dim", name)} ${paint("dim", summary)}`, ok ? "info" : "error");
+    await this.emit(`  ${mark} gate ${paint("dim", name)} ${paint("dim", summary)}`, ok ? "info" : "error");
     for (const check of report.checks) {
       const style = check.ok ? "dim" : "dim red";
       const detail = check.note ? ` — ${clip(check.note)}` : "";
-      this.emit(`    ${paint(style, `${check.ok ? "·" : "✗"} ${clip(check.item)}${detail}`)}`, check.ok ? "info" : "error");
+      await this.emit(`    ${paint(style, `${check.ok ? "·" : "✗"} ${clip(check.item)}${detail}`)}`, check.ok ? "info" : "error");
     }
   }
 
-  envelopeSummary(envelope: EnvelopeBase, typeName: string): void {
+  async envelopeSummary(envelope: EnvelopeBase, typeName: string): Promise<void> {
     const ok = envelope.status === "success";
     const line = `  ${ok ? paint("green", "✓") : paint("red", "✗")} ${typeName} ${paint("dim", clip(envelope.summary))}`;
-    this.emit(line, ok ? "info" : "error");
+    await this.emit(line, ok ? "info" : "error");
     if (envelope.artifacts.length > 0) {
-      this.emit(`    ${paint("dim", `artifacts: ${clip(envelope.artifacts.join(", "))}`)}`);
+      await this.emit(`    ${paint("dim", `artifacts: ${clip(envelope.artifacts.join(", "))}`)}`);
     }
   }
 }

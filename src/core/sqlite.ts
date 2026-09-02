@@ -25,13 +25,20 @@
  *    come back with a null prototype. Both are normalized below so existing
  *    `?? null` / `Object.assign(row, ...)` call sites stay honest.
  *  - node:sqlite defaults `enableForeignKeyConstraints: true` — unlike plain
- *    SQLite and bun:sqlite, which both default FK enforcement OFF. The
- *    tracer's schema uses `REFERENCES` purely as documentation (rows are not
- *    always inserted parent-before-child — e.g. the very first `events` row
- *    for a session lands before that session's own `sessions` row commits),
- *    so this is disabled explicitly to restore the behavior the rest of the
- *    codebase was written against. Confirmed by reproduction: enabling it
- *    throws `FOREIGN KEY constraint failed` on session start.
+ *    SQLite and bun:sqlite, which both default FK enforcement OFF — so this
+ *    is disabled explicitly to restore the behavior the rest of the
+ *    codebase was written against. `tracer.ts`'s SCHEMA carries no
+ *    `REFERENCES` clauses at all (removed for SPF #66: rows are not always
+ *    inserted parent-before-child — e.g. the very first `events` row for a
+ *    session lands before that session's own `sessions` row commits, and an
+ *    event recorded outside any phase carries `phase_id: ""`, never NULL —
+ *    and Cloudflare D1 enforces FKs UNCONDITIONALLY with no way to disable
+ *    them, so a clause that was already only decorative on local sqlite
+ *    would crash every D1 session outright). This setting is now a no-op
+ *    for `tracer.ts`'s own tables specifically, but is kept here as this
+ *    wrapper's general default — `cli/commands/abort.ts` and `migrate.ts`
+ *    also open a plain `Database` against the same db file for their own
+ *    ad-hoc queries, and neither has any reason to want FK enforcement on.
  */
 
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";

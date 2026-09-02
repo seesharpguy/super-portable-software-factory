@@ -40,15 +40,15 @@ function describeObservabilityDb(db: SFConfig["observability"]["db"]): string {
 }
 
 export interface PhaseHandle {
-  log(payload: Record<string, unknown>): void;
+  log(payload: Record<string, unknown>): Promise<void>;
   call<T extends EnvelopeBase>(call: AgentCall<T>): Promise<T>;
 }
 
 class PhaseHandleImpl implements PhaseHandle {
   constructor(private run: Run, private phase: Phase) {}
 
-  log(payload: Record<string, unknown>): void {
-    this.run.tracer.event(
+  async log(payload: Record<string, unknown>): Promise<void> {
+    await this.run.tracer.event(
       makeEventRecord({
         adw_id: this.run.adw_id,
         phase_id: this.phase.phase_id,
@@ -57,9 +57,9 @@ class PhaseHandleImpl implements PhaseHandle {
         payload,
       }),
     );
-    this.run.console.note(Object.entries(payload).map(([k, v]) => `${k}: ${v}`).join(", "));
+    await this.run.console.note(Object.entries(payload).map(([k, v]) => `${k}: ${v}`).join(", "));
     if (this.phase.params.kind === "engineer" && "input" in payload) {
-      this.run.tracer.sessionRequest(this.run.adw_id, String(payload.input));
+      await this.run.tracer.sessionRequest(this.run.adw_id, String(payload.input));
     }
   }
 
@@ -75,6 +75,12 @@ export interface RunInit {
   cfg: SFConfig;
   adwId: string;
   tracer: Tracer;
+  /**
+   * `tracer.maxPhaseSeq(adwId)`, resolved by the caller BEFORE constructing
+   * `Run` — a real trace-db read now (a network call for a D1-backed repo),
+   * and `Run`'s own constructor cannot be async. See `session.ts`'s `ensure()`.
+   */
+  startSeq: number;
   engineer: string;
   /** Absolute. Resolved once, upstream, by paths.resolveAnchor(). */
   repoRoot: string;
@@ -130,7 +136,7 @@ export class Run {
     this.notify = init.notifier ?? null;
     this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw", init.sink, init.observer);
     this.engineer = init.engineer;
-    this.seq = init.tracer.maxPhaseSeq(init.adwId);
+    this.seq = init.startSeq;
     this.repo_root = init.repoRoot;
     this.spf_dir = init.sfDir;
     this.git = makeGit(init.repoRoot);
@@ -147,12 +153,12 @@ export class Run {
     writeFileSync(this.agentMapPath, JSON.stringify(this.agent_map, null, 2));
   }
 
-  // ── usage (run totals mirror what the tracer accumulates in sqlite) ─────
-  addUsage(tokens: number, cost: number): void {
+  // ── usage (run totals mirror what the tracer accumulates in the trace db) ─
+  async addUsage(tokens: number, cost: number): Promise<void> {
     this.tokens += tokens;
     this.cost += cost;
-    this.tracer.sessionAddUsage(this.adw_id, tokens, cost);
-    this.console.notifyUsage(this.tokens, this.cost);
+    await this.tracer.sessionAddUsage(this.adw_id, tokens, cost);
+    await this.console.notifyUsage(this.tokens, this.cost);
   }
 
   // ── the phase primitive ─────────────────────────────────────────────────
@@ -170,8 +176,8 @@ export class Run {
       ended_at: null,
     };
     this.phases.push(phase);
-    this.tracer.phaseUpsert(phase);
-    this.tracer.event(
+    await this.tracer.phaseUpsert(phase);
+    await this.tracer.event(
       makeEventRecord({
         adw_id: this.adw_id,
         phase_id: phase.phase_id,
@@ -180,32 +186,32 @@ export class Run {
         payload: { kind: params.kind, owner: params.owner, description: params.description },
       }),
     );
-    this.console.phaseStarted(phase);
+    await this.console.phaseStarted(phase);
     const clock = performance.now();
     try {
       const result = await fn(new PhaseHandleImpl(this, phase));
       phase.status = "success";
       phase.ended_at = nowIso();
-      this.tracer.event(
+      await this.tracer.event(
         makeEventRecord({ adw_id: this.adw_id, phase_id: phase.phase_id, type: "phase_end", name: params.name, payload: { status: "success" } }),
       );
-      this.tracer.phaseUpsert(phase);
-      this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
+      await this.tracer.phaseUpsert(phase);
+      await this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
       return result;
     } catch (error) {
       phase.status = "fail"; // success must be earned
       phase.error = String((error as Error)?.message ?? error).slice(0, 1000);
       phase.ended_at = nowIso();
-      this.tracer.event(
+      await this.tracer.event(
         makeEventRecord({ adw_id: this.adw_id, phase_id: phase.phase_id, type: "error", name: params.name, payload: { error: phase.error } }),
       );
-      this.tracer.event(
+      await this.tracer.event(
         makeEventRecord({ adw_id: this.adw_id, phase_id: phase.phase_id, type: "phase_end", name: params.name, payload: { status: "fail" } }),
       );
-      this.tracer.phaseUpsert(phase);
-      this.tracer.sessionFinish(this.adw_id, false);
-      this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
-      this.console.sessionFinished(false, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
+      await this.tracer.phaseUpsert(phase);
+      await this.tracer.sessionFinish(this.adw_id, false);
+      await this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
+      await this.console.sessionFinished(false, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
       throw error;
     }
   }
@@ -219,12 +225,12 @@ export class Run {
    * so the exit code, the session status, and the banner are decided
    * together and cannot disagree.
    */
-  finish(accepted: boolean = true, reason: string = ""): number {
+  async finish(accepted: boolean = true, reason: string = ""): Promise<number> {
     const phasesOk = this.phases.length > 0 && this.phases.every((p) => p.status === "success");
     const ok = phasesOk && accepted;
     if (phasesOk && !accepted) {
       const note = reason || "the run's acceptance criterion was not met";
-      this.tracer.event(
+      await this.tracer.event(
         makeEventRecord({
           adw_id: this.adw_id,
           phase_id: this.phases.length > 0 ? this.phases[this.phases.length - 1].phase_id : "",
@@ -233,10 +239,10 @@ export class Run {
           payload: { reason: note },
         }),
       );
-      this.console.note(`not accepted: ${note}`);
+      await this.console.note(`not accepted: ${note}`);
     }
-    this.tracer.sessionFinish(this.adw_id, ok);
-    this.console.sessionFinished(ok, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
+    await this.tracer.sessionFinish(this.adw_id, ok);
+    await this.console.sessionFinished(ok, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
     return ok ? 0 : 1;
   }
 }

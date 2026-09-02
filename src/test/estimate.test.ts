@@ -75,16 +75,16 @@ interface SeedPhase {
 }
 
 /** One synthetic session: a real `sessions` row + real `phases` rows + a real `agent_end` event per phase (tokens on each), all through the real `Tracer`. */
-function seedSession(
+async function seedSession(
   tracer: Tracer,
   adwId: string,
   chainName: string,
   status: "success" | "fail",
   phases: SeedPhase[],
   totals: { tokens: number; cost: number },
-): void {
-  tracer.sessionStart(adwId, "tester", chainName);
-  phases.forEach((p, i) => {
+): Promise<void> {
+  await tracer.sessionStart(adwId, "tester", chainName);
+  for (const [i, p] of phases.entries()) {
     const seq = i + 1;
     const phase = {
       phase_id: `${adwId}_${String(seq).padStart(2, "0")}_${p.name}`,
@@ -97,11 +97,11 @@ function seedSession(
       started_at: null,
       ended_at: null,
     };
-    tracer.phaseUpsert(phase);
-    tracer.event(makeEventRecord({ adw_id: adwId, phase_id: phase.phase_id, type: "agent_end", name: p.owner, tokens: p.tokens, payload: { cost: 0 } }));
-  });
-  tracer.sessionAddUsage(adwId, totals.tokens, totals.cost);
-  tracer.sessionFinish(adwId, status === "success");
+    await tracer.phaseUpsert(phase);
+    await tracer.event(makeEventRecord({ adw_id: adwId, phase_id: phase.phase_id, type: "agent_end", name: p.owner, tokens: p.tokens, payload: { cost: 0 } }));
+  }
+  await tracer.sessionAddUsage(adwId, totals.tokens, totals.cost);
+  await tracer.sessionFinish(adwId, status === "success");
 }
 
 function fakeAgentConfig(name: string, model: string): AgentConfig {
@@ -150,11 +150,11 @@ test("18: per-phase median over 3 runs is not moved by an outlier that would mov
   const dir = tmpRepo("spf-estimate-median-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "r2", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "r3", "scout", "success", [{ name: "scout", owner: "scout", tokens: 900 }], { tokens: 900, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "r2", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "r3", "scout", "success", [{ name: "scout", owner: "scout", tokens: 900 }], { tokens: 900, cost: 0 });
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0);
@@ -175,8 +175,8 @@ test("19: fix_1+fix_2 sum as ONE observation of 'fix'; verify_1 and test_1 stay 
   const dir = tmpRepo("spf-estimate-loop-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(
       tracer,
       "r1",
       "scout",
@@ -189,7 +189,7 @@ test("19: fix_1+fix_2 sum as ONE observation of 'fix'; verify_1 and test_1 stay 
       ],
       { tokens: 190, cost: 0 },
     );
-    tracer.close();
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0);
@@ -209,14 +209,14 @@ test("20: a joined session's adw_name does not enter either chain's sample, and 
   const dir = tmpRepo("spf-estimate-joined-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
     // The REAL join mechanism: two sessionStart() calls on the SAME adw_id
     // with different chain names concatenate adw_name, exactly as
     // tracer.ts:215 does for a real joined run.
-    tracer.sessionStart("joined-1", "tester", "scout");
-    tracer.sessionStart("joined-1", "tester", "document");
-    tracer.sessionFinish("joined-1", true);
-    tracer.close();
+    await tracer.sessionStart("joined-1", "tester", "scout");
+    await tracer.sessionStart("joined-1", "tester", "document");
+    await tracer.sessionFinish("joined-1", true);
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 3, "no EXACT-match session for 'scout' exists — this is cold start, not a sample of one");
@@ -234,15 +234,15 @@ test("21: five fanout siblings of one base contribute ONE observation, and the o
   const dir = tmpRepo("spf-estimate-fanout-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
     // A realistic fanout base: `newId(8)` (fanout.ts:277) is 8 lowercase hex
     // chars, and each attempt's adw_id is `${base}-${index}` (attemptAdwId,
     // fanout.ts:129-131) — the exact shape `fanoutBaseOf` now requires.
     const base = "cafef00d";
     for (let i = 1; i <= 5; i++) {
-      seedSession(tracer, `${base}-${i}`, "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 * i }], { tokens: 100 * i, cost: 0 });
+      await seedSession(tracer, `${base}-${i}`, "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 * i }], { tokens: 100 * i, cost: 0 });
     }
-    tracer.close();
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0);
@@ -257,16 +257,16 @@ test("21b: spf watch's issue-41/issue-42/issue-43 are NOT fanout siblings — no
   const dir = tmpRepo("spf-estimate-watch-ids-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
     // `spf watch` mints `adw_id = issue-${issue.id}` (watch.ts:357) with
     // `Issue.id` a decimal string — every one of these ends in `-<digits>`
     // despite never having gone through `spf fanout`. A loose "any
     // dash-then-digits" heuristic would misread all three as siblings of one
     // shared "issue" base and collapse two of them away.
-    seedSession(tracer, "issue-41", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "issue-42", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "issue-43", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    tracer.close();
+    await seedSession(tracer, "issue-41", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "issue-42", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "issue-43", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0);
@@ -283,13 +283,13 @@ test("22a: failed sessions are excluded once 3+ successes exist", async () => {
   const dir = tmpRepo("spf-estimate-failed-a-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "s1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "s2", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "s3", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "f1", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
-    seedSession(tracer, "f2", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "s1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "s2", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "s3", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "f1", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
+    await seedSession(tracer, "f2", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
+    await tracer.close();
 
     const { report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(report.sample.status, "success");
@@ -303,11 +303,11 @@ test("22b: failed sessions are included, with the caveat, when fewer than 3 succ
   const dir = tmpRepo("spf-estimate-failed-b-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "s1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
-    seedSession(tracer, "f1", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
-    seedSession(tracer, "f2", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "s1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 100 }], { tokens: 100, cost: 0 });
+    await seedSession(tracer, "f1", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
+    await seedSession(tracer, "f2", "scout", "fail", [{ name: "scout", owner: "scout", tokens: 5 }], { tokens: 5, cost: 0 });
+    await tracer.close();
 
     const { report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(report.sample.status, "any");
@@ -343,8 +343,8 @@ test("23b: db exists but is empty — same exit 3, same no-'spf ui' behavior", a
   const dir = tmpRepo("spf-estimate-cold-b-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    tracer.close(); // schema created, nothing written
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await tracer.close(); // schema created, nothing written
 
     const { result: code, logs } = await captureConsole(() =>
       estimateCommand(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]),
@@ -398,10 +398,10 @@ test("24: historical model differs from the currently-resolved effective model �
         "  roles:\n" +
         "    scout: cheap\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 1000 }], { tokens: 1000, cost: 0 });
-    tracer.agentSessionRow("r1", fakeAgentConfig("scout", "ollama/granite4.1:8b"), "sess-1");
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 1000 }], { tokens: 1000, cost: 0 });
+    await tracer.agentSessionRow("r1", fakeAgentConfig("scout", "ollama/granite4.1:8b"), "sess-1");
+    await tracer.close();
 
     // scout has chainWeight -1; a >=400-word prompt forces promptWeight +1 ->
     // risk "high" unconditionally (classifyRisk's own documented cell) -> the
@@ -425,9 +425,9 @@ test("25: --n 3 multiplies the projected headline and names the fanout case", as
   const dir = tmpRepo("spf-estimate-n-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"));
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 1000 }], { tokens: 1000, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 1000 }], { tokens: 1000, cost: 0 });
+    await tracer.close();
 
     const { report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe", "--n", "3"]);
     assert.equal(report.projected?.p50, 3000);
@@ -448,8 +448,8 @@ test("26: max_run_tokens below the projection names the cut-off phase; exit code
   const dir = tmpRepo("spf-estimate-budget-");
   try {
     const configPath = writeConfig(dir, agentYaml("scout"), "defaults:\n  max_run_tokens: 150\n");
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(
       tracer,
       "r1",
       "scout",
@@ -460,7 +460,7 @@ test("26: max_run_tokens below the projection names the cut-off phase; exit code
       ],
       { tokens: 200, cost: 0 },
     );
-    tracer.close();
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0, "estimate reports, it does not gate — exit 3 is reserved for 'no history'");
@@ -481,9 +481,9 @@ test("27: reported {risk, signals, routing} deep-equals resolveTiering's own out
       agentYaml("scout", { model: "ollama/granite4.1:8b" }),
       "tiering:\n  enabled: true\n  tiers:\n    - { name: only, coding_agent: flue, model: ollama/granite4.1:8b }\n  roles:\n    scout: only\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
+    await tracer.close();
 
     const { report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.ok(Object.keys(report.routing).length > 0, "fixture must exercise non-empty routing");
@@ -509,9 +509,9 @@ test("27b: --agent is forwarded by conditional insertion, not a `?? \"\"` sentin
       agentYaml("scout") + agentYaml("builder"),
       "tiering:\n  enabled: true\n  tiers:\n    - { name: t, coding_agent: flue, model: test/model-a }\n  roles:\n    scout: t\n    builder: t\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "prompt", "success", [{ name: "builder", owner: "builder", tokens: 10 }], { tokens: 10, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "prompt", "success", [{ name: "builder", owner: "builder", tokens: 10 }], { tokens: 10, cost: 0 });
+    await tracer.close();
 
     const withAgent = await runJson(["prompt", "hi", "--config", configPath, "--cwd", dir, "--no-probe", "--agent", "scout"]);
     assert.deepEqual(Object.keys(withAgent.report.routing), ["scout"], "--agent scout must route 'scout', not fall back to 'builder'");
@@ -535,11 +535,11 @@ test("27c: a rule-T backend mismatch is reported, not thrown — exit 0, the rol
       agentYaml("scout", { coding_agent: "claude_code", model: "sonnet" }),
       "tiering:\n  enabled: true\n  tiers:\n    - { name: t, coding_agent: flue, model: ollama/granite4.1:8b }\n  roles:\n    scout: t\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
     // At least one history row so this test isolates the rule-T behavior
     // from the separate "no history -> exit 3" case (test 23).
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
-    tracer.close();
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
+    await tracer.close();
 
     const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     assert.equal(code, 0, "a config error is reported, never thrown — estimate gates on nothing but missing history");
@@ -562,9 +562,9 @@ test("28: --no-probe never calls fetch, and drops no ollama rung (servedOllamaTa
       agentYaml("scout", { model: "ollama/granite4.1:8b" }),
       "tiering:\n  enabled: true\n  tiers:\n    - { name: only, coding_agent: flue, model: ollama/granite4.1:8b }\n  roles:\n    scout: only\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
+    await tracer.close();
 
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (() => {
@@ -591,9 +591,9 @@ test("29: --json is a stable shape carrying the FULL routing map, not a diff", a
       agentYaml("scout", { model: "ollama/granite4.1:8b" }),
       "tiering:\n  enabled: true\n  tiers:\n    - { name: only, coding_agent: flue, model: ollama/granite4.1:8b }\n  roles:\n    scout: only\n",
     );
-    const tracer = new Tracer(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
-    seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
-    tracer.close();
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    await seedSession(tracer, "r1", "scout", "success", [{ name: "scout", owner: "scout", tokens: 10 }], { tokens: 10, cost: 0 });
+    await tracer.close();
 
     const { report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
     for (const key of ["chain", "risk", "signals", "routing", "notes", "sample", "phases", "projected", "ceilings"]) {

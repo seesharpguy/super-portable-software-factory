@@ -836,21 +836,23 @@ export const OTelConfigSchema = v.object({
 export type OTelConfig = v.InferOutput<typeof OTelConfigSchema>;
 
 /**
- * MIGRATION NOTE (BT-issue #66, PR 1 of 3): `observability.db` used to be
- * ONLY a bare string (a local sqlite path, defaulting to
- * ".spf/data/spf.db"). This is now a discriminated shape that additionally
- * accepts an explicit `{ kind: "sqlite", path? }` object (equivalent to the
- * string form, just spelled out) and a new `{ kind: "d1", database_id, ... }`
- * object that names a remote Cloudflare D1 database instead of a local
- * file. The bare-string form is unchanged and remains the default for every
- * existing config — nothing in the wild needs to change. `resolveObservabilityDb`
- * below normalizes all three accepted forms to one shape; PR 2 builds the
- * actual D1 `Database` adapter against that normalized shape, and PR 3 wires
- * `spf doctor`/`spf init`'s interview flow to the new option. This PR only
- * adds the schema + normalizer + `paths.resolveDataPaths` plumbing — no D1
- * adapter exists yet, so a `kind: "d1"` config parses and normalizes fine
- * but `resolveDataPaths` itself still refuses to resolve a usable local
- * `db_path` for it (see that function's doc comment in `core/paths.ts`).
+ * MIGRATION NOTE (BT-issue #66, 3 PRs): `observability.db` used to be ONLY a
+ * bare string (a local sqlite path, defaulting to ".spf/data/spf.db"). This
+ * is now a discriminated shape that additionally accepts an explicit
+ * `{ kind: "sqlite", path? }` object (equivalent to the string form, just
+ * spelled out) and a `{ kind: "d1", database_id, ... }` object that names a
+ * remote Cloudflare D1 database instead of a local file. The bare-string
+ * form is unchanged and remains the default for every existing config —
+ * nothing in the wild needs to change. `resolveObservabilityDb` below
+ * normalizes all three accepted forms to one shape.
+ *
+ * PR 1 (this schema + normalizer + `paths.resolveDataPaths` plumbing) left
+ * `resolveDataPaths` refusing a `kind: "d1"` config outright — no adapter
+ * existed yet. PR 2 (`core/trace_db.ts`'s `TraceDb` interface, `LocalTraceDb`,
+ * `D1TraceDb`, and `createTraceDb()`, wired through `Tracer`/`SfDb`) removes
+ * that refusal: `resolveDataPaths` now returns a usable descriptor for
+ * either kind, and both backends are real. PR 3 wires `spf doctor`/`spf
+ * init`'s interview flow to the new option.
  */
 export const SqliteDbConfigSchema = v.object({
   kind: v.literal("sqlite"),

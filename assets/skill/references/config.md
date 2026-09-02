@@ -108,7 +108,7 @@ the two runs' cost/tokens/gates together.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `db` | path | The trace sqlite db. Default `.spf/data/spf.db`. |
+| `db` | path \| `{kind: sqlite, path?}` \| `{kind: d1, database_id, account_id_env?, api_token_env?}` | Where the trace db lives. A bare string (or the equivalent spelled-out `{kind: sqlite, ...}`) is a repo-relative local sqlite path, default `.spf/data/spf.db`. `{kind: d1, ...}` points at a remote Cloudflare D1 database instead — `database_id` is required; `account_id_env`/`api_token_env` default to `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN` (the same env vars the `cloudflare` model provider reads), naming the env vars to read the credentials from, never the credentials themselves. See `observability.md`'s "Two stores, one truth" section for what changes (and what deliberately doesn't) with a D1-backed trace db — notably, the local backend's WAL live-read guarantee does not hold for D1. |
 | `poll_ms` | int | UI live-poll cadence. Default `500`. |
 | `otel.endpoint` | string | OTLP/HTTP collector endpoint (e.g., `https://your-host/v1/traces`). Omit to disable OTel export. |
 | `otel.headers` | object | Optional HTTP headers (e.g., auth tokens). Each value is a string. |
