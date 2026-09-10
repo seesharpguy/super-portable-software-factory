@@ -98,7 +98,7 @@ ts`'s own header for why that matters under `spf watch`'s daemon loop.
 **Outbound trace-context propagation.** When otel is configured, SPF also
 tries to carry `traceparent` onto the OUTBOUND model calls each agent makes,
 so this run's spans join whatever trace the model-serving stack itself
-produces (see "Tracing across the inference stack" below). The two coding
+produces (see "Tracing across the inference stack" below). The three coding
 agent backends get different-confidence treatment:
   - `coding_agent: claude_code` — a real, verified guarantee.
     `agent_cc.ts`'s single `spawn()` choke point sets `TRACEPARENT` and
@@ -106,6 +106,18 @@ agent backends get different-confidence treatment:
     separated `Name: Value` pairs — the CLI's own documented format,
     requires `claude` CLI >= 2.1.227) on the `claude` subprocess's
     environment for every call.
+  - `coding_agent: opencode` — config-verified, behavior best-effort.
+    `agent_opencode.ts` injects `TRACEPARENT` onto the subprocess env
+    (parity with `claude_code`; unverified whether the opencode CLI itself
+    reads it) AND writes `traceparent`/`x-request-id` as static
+    `provider.<id>.options.headers` into the temp `opencode.json` —
+    opencode's documented per-provider options surface, honored by the AI
+    SDK on that provider's requests. Static is correct because one
+    `opencode run` subprocess is exactly one agent call. Two caveats,
+    documented in the module's own doc comment: a bare model id with no
+    `provider/` prefix skips the headers (SPF never guesses a provider id),
+    and a target repo's own `opencode.json` merges at higher precedence and
+    can override them.
   - `coding_agent: flue` — best-effort. `@flue/opentelemetry`'s own docs say
     plainly that `dispatch()` "does not propagate trace context" on its own,
     so SPF additionally registers `@opentelemetry/instrumentation-http` +

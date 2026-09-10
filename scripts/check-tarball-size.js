@@ -64,12 +64,18 @@
  * same window) re-measures at 782.7kB packed / 2228.4kB unpacked, 203
  * files: ≤822 KB packed, ≤2.34 MB unpacked — ~5% headroom, same rationale
  * as every prior raise.
+ *
+ * Raised again for the otel-sdk batch (#78 OTLP SDK exporter, process
+ * metrics, outbound propagation) plus its opencode-propagation follow-up
+ * (#79): the real OTel SDK deps and the per-backend propagation code/docs
+ * grew the tarball to 823.1kB packed / 2348.3kB unpacked, 209 files:
+ * ≤865 KB packed, ≤2.47 MB unpacked — ~5% headroom, same rationale.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 822_000;
-const UNPACKED_BUDGET = 2_340_000;
+const PACKED_BUDGET = 865_000;
+const UNPACKED_BUDGET = 2_470_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
