@@ -11,6 +11,7 @@ import * as agentFlue from "../core/agent_flue.ts";
 import * as agentOpencode from "../core/agent_opencode.ts";
 import * as notify from "../core/notify/notifier.ts";
 import * as otel from "../core/otel.ts";
+import * as otelMetrics from "../core/otel_metrics.ts";
 import * as paths from "../core/paths.ts";
 import * as sandbox from "../core/sandbox.ts";
 import { findChain, registerRepoChains, repoChainProblems } from "../chains/index.ts";
@@ -265,5 +266,10 @@ export async function main(): Promise<void> {
     // deadline, so a fast-exiting command neither drops spans mid-flight nor
     // waits on an unreachable collector. Never throws (core/otel.ts).
     await otel.flushAll();
+    // Shuts down the process-scoped OTel MeterProvider (a no-op if metrics
+    // were never configured/resolved this process) — see otel_metrics.ts's
+    // own module header for why this is process-scoped rather than per-run
+    // like the span exporter above. Never throws.
+    await otelMetrics.shutdownOtelMetrics();
   }
 }

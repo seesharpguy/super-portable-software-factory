@@ -750,6 +750,13 @@ export const AgentConfigSchema = v.object({
   //   "local" -> force local for this agent
   //   null    -> same as unset (the writes/env_allowlist spelling)
   sandbox: v.optional(v.nullable(SandboxBackendSchema)),
+  // Explicit override for `otel.ts`'s `spf.lora_adapter` span attribute —
+  // the unambiguous source of truth when set. Unset (the common case) falls
+  // back to parsing `model` itself; see `loraAdapterFor()`'s own doc comment
+  // in `core/otel.ts` for the two zero-config conventions it recognizes.
+  // Purely descriptive: it does not change routing, dispatch, or which
+  // model actually serves the call — only what an OTel backend sees.
+  lora_adapter: v.optional(v.string()),
 });
 export type AgentConfig = v.InferOutput<typeof AgentConfigSchema>;
 
@@ -827,13 +834,72 @@ export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
  * (`https://collector:4318/v1/traces`) or a bare origin (`/v1/traces` is
  * appended — see `resolveTracesUrl`). `headers` is where a collector's auth
  * token goes; its VALUES are treated as secrets and never logged.
+ *
+ * `metrics` (default `true`) additionally gates `otel_metrics.ts`'s
+ * process-scoped meter — set `false` to keep trace export on while opting
+ * out of the metrics pipeline entirely. It has no effect on activation
+ * either way: `endpoint`'s presence is still the sole switch for BOTH
+ * signals, this field only narrows what a configured block sends.
+ *
+ * `allow_env` (default `false`) is a narrow, opt-in exception to EXPLICIT
+ * CONFIG ONLY (see `core/otel.ts`'s header): when `true` AND this block is
+ * ALREADY active (`endpoint` set here, in the file), the standard
+ * `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` env vars may
+ * SUPPLEMENT it — e.g. a CI-injected collector token added to `headers`
+ * without checking it into the repo. It can NEVER activate export from
+ * nothing (there is no `endpoint` to fall back to when this block is absent
+ * at all — that case is unaffected by this flag either way) and a
+ * config-declared value always wins over the env on conflict. Defaults to
+ * `false` because this is still a deliberate loosening of an adversarially-
+ * reviewed, test-pinned invariant — an operator opts in per-repo.
  */
 export const OTelConfigSchema = v.object({
   endpoint: v.pipe(v.string(), v.url()),
   headers: v.optional(v.record(v.string(), v.string()), undefined),
   service_name: v.optional(v.string(), "spf"),
+  metrics: v.optional(v.boolean(), true),
+  allow_env: v.optional(v.boolean(), false),
 });
 export type OTelConfig = v.InferOutput<typeof OTelConfigSchema>;
+
+/**
+ * `allow_env`'s narrow env-supplement path (see `OTelConfigSchema`'s doc
+ * comment above): called ONLY when `cfg.observability.otel` already exists
+ * with a real `endpoint` — this function never activates anything on its
+ * own and is never called when the block is absent. `OTEL_EXPORTER_OTLP_
+ * HEADERS` follows the OTel spec's env-var shape (comma-separated
+ * `key=value` pairs, URL-decoded); config-declared headers win over the env
+ * on a key collision. `OTEL_EXPORTER_OTLP_ENDPOINT`, when set, overrides
+ * `endpoint` itself — the one field this can change, since a CI runner
+ * commonly injects a different collector per job/environment.
+ */
+export function applyOtelEnvSupplement(otel: OTelConfig, env: NodeJS.ProcessEnv = process.env): OTelConfig {
+  if (!otel.allow_env) return otel;
+  const envEndpoint = env["OTEL_EXPORTER_OTLP_ENDPOINT"];
+  const envHeadersRaw = env["OTEL_EXPORTER_OTLP_HEADERS"];
+  const envHeaders: Record<string, string> = {};
+  if (envHeadersRaw) {
+    for (const pair of envHeadersRaw.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const key = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      if (key) {
+        try {
+          envHeaders[key] = decodeURIComponent(value);
+        } catch {
+          envHeaders[key] = value;
+        }
+      }
+    }
+  }
+  if (!envEndpoint && Object.keys(envHeaders).length === 0) return otel;
+  return {
+    ...otel,
+    endpoint: envEndpoint || otel.endpoint,
+    headers: { ...envHeaders, ...(otel.headers ?? {}) }, // config wins on conflict
+  };
+}
 
 /**
  * MIGRATION NOTE (BT-issue #66, 3 PRs): `observability.db` used to be ONLY a
@@ -1522,6 +1588,26 @@ export interface AgentRequest {
   env?: Record<string, string>;
   /** Absent (the default) => local(), byte-identical to before this field existed. See sandbox.ts. */
   sandbox?: SandboxSpec;
+  /**
+   * Outbound OTel trace-context propagation — set by `agents.ts`'s `send()`
+   * from `otel.ts`'s `OtelExporter.agentCallTraceContext()` ONLY when
+   * `observability.otel` is configured for this run; absent otherwise, and
+   * every backend that ignores it (`opencode` today) is byte-identical to
+   * before this field existed. `traceparent`/`x_request_id` are this call's
+   * own span context (`agent_cc.ts`'s single `spawn()` choke point turns
+   * them into `TRACEPARENT`/`ANTHROPIC_CUSTOM_HEADERS`); `endpoint`/
+   * `headers`/`service_name` are the SAME `observability.otel` block,
+   * carried through so `agent_flue.ts` can install its own (separate,
+   * process-scoped — see `otel_propagation.ts`) global http/undici
+   * propagation without needing the full `SFConfig`.
+   */
+  otel?: {
+    traceparent: string;
+    x_request_id: string;
+    endpoint: string;
+    headers?: Record<string, string>;
+    service_name: string;
+  };
 }
 
 /**

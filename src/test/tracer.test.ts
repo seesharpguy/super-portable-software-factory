@@ -59,7 +59,7 @@ test("sessionFinish fires the otel verdict synchronously — a SIGINT-timed drai
   const recv = await receiver();
   try {
     const otel = new OtelExporter({
-      cfg: { endpoint: recv.url, service_name: "spf", headers: undefined },
+      cfg: { endpoint: recv.url, service_name: "spf", headers: undefined, metrics: true, allow_env: false },
       adwId: "adw_otel_sync",
       chainName: "plan",
       env: {}, // hermetic: never inherit the developer's own TRACEPARENT

@@ -33,6 +33,7 @@ import {
   endpointLabel,
   flushAll,
   inboundTraceparent,
+  loraAdapterFor,
   nanosFromIso,
   parseTraceparent,
   redact,
@@ -44,10 +45,12 @@ import {
   toolSpanName,
   traceIdFor,
 } from "../core/otel.js";
+import { resetOtelMetricsForTest, resolveOtelMetrics } from "../core/otel_metrics.js";
 import * as v from "valibot";
 import {
   AgentConfigSchema,
   GateReport,
+  applyOtelEnvSupplement,
   makeEventRecord,
   makePhaseParams,
   SFConfigSchema,
@@ -61,7 +64,7 @@ const HEX16 = /^[0-9a-f]{16}$/;
 
 function exporter(endpoint: string, log: (m: string) => void = () => {}): OtelExporter {
   return new OtelExporter({
-    cfg: { endpoint, service_name: "spf", headers: undefined },
+    cfg: { endpoint, service_name: "spf", headers: undefined, metrics: true, allow_env: false },
     adwId: "adw_test",
     chainName: "plan-build-test",
     log,
@@ -179,7 +182,7 @@ test("an inbound traceparent adopts its trace-id and parents the run's root span
   const sink = await receiver();
   try {
     const exp = new OtelExporter({
-      cfg: { endpoint: sink.url, service_name: "spf", headers: undefined },
+      cfg: { endpoint: sink.url, service_name: "spf", headers: undefined, metrics: true, allow_env: false },
       adwId: "adw_test",
       chainName: "plan",
       log: () => {},
@@ -320,7 +323,13 @@ test("allowlist: nothing from EventRecord.payload reaches the wire", () => {
   const agentSpan = JSON.parse(json).resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "agent builder");
   const totals = agentSpan.attributes.filter((a: any) => a.key === "spf.tokens.total");
   assert.equal(totals.length, 1);
-  assert.deepEqual(totals[0].value, { intValue: "1234" }, "the number rode; the string did not");
+  // The real OTLP/HTTP-JSON exporter's `intValue` is a JSON NUMBER, not a
+  // stringified one (verified against `@opentelemetry/otlp-transformer`'s
+  // own `toAnyValue()` — see otel.ts's header, "VERIFIED WIRE-SHAPE
+  // DIFFERENCES"). The point of this assertion is still intact either way:
+  // the STRING marker under `usage.total_tokens` must never appear, and the
+  // real number from `record.tokens` must.
+  assert.deepEqual(totals[0].value, { intValue: 1234 }, "the number rode; the string did not");
 });
 
 test("allowlist: agent model/coding_agent come from the typed AgentConfig, never the payload", () => {
@@ -500,7 +509,10 @@ test("OTLP/HTTP-JSON shape: resourceSpans -> scopeSpans -> spans, hex ids, strin
     const toolSpan = spans.find((s: any) => s.name === "bash");
     assert.ok(root && phaseSpan && agentSpan && toolSpan, "every level of the span model is present");
 
-    assert.equal(root.parentSpanId, "", "no inbound traceparent -> the run is the root");
+    // The real exporter OMITS `parentSpanId` entirely for a root span (no
+    // key at all) rather than v1's explicit `""` — both spellings mean "no
+    // parent" per the OTLP proto3-JSON mapping; see otel.ts's header.
+    assert.equal(root.parentSpanId, undefined, "no inbound traceparent -> the run is the root");
     assert.equal(root.spanId, spanIdFor("run:adw_test"));
     assert.equal(phaseSpan.parentSpanId, root.spanId, "phases hang off the run");
     assert.equal(phaseSpan.spanId, spanIdFor("adw_test_01_build"), "a phase span's id is sha256(phase_id)");
@@ -512,7 +524,10 @@ test("OTLP/HTTP-JSON shape: resourceSpans -> scopeSpans -> spans, hex ids, strin
     assert.equal(toolSpan.startTimeUnixNano, nanosFromIso("2026-01-01T00:00:02.000Z"), "tool spans carry real elapsed time");
 
     const tokens = agentSpan.attributes.find((a: any) => a.key === "spf.tokens.total");
-    assert.deepEqual(tokens.value, { intValue: "999" }, "token counts are intValue STRINGS");
+    // intValue is a JSON NUMBER on the real exporter (see otel.ts's header,
+    // "VERIFIED WIRE-SHAPE DIFFERENCES") — v1's hand-rolled encoder
+    // stringified it; the real SDK's `toAnyValue()` does not.
+    assert.deepEqual(tokens.value, { intValue: 999 }, "token counts are intValue numbers, not stringified");
     const cost = agentSpan.attributes.find((a: any) => a.key === "spf.cost.total");
     assert.deepEqual(cost.value, { doubleValue: 1.5 }, "cost is a double");
   } finally {
@@ -552,18 +567,25 @@ test("gate events land on the phase span as span EVENTS, with the count and not 
     const byKey = Object.fromEntries(span.events[0].attributes.map((a: any) => [a.key, a.value]));
     assert.deepEqual(byKey["spf.gate.name"], { stringValue: "plan_gate" });
     assert.deepEqual(byKey["spf.gate.passed"], { boolValue: false });
-    assert.deepEqual(byKey["spf.gate.violation_count"], { intValue: "2" });
-    assert.deepEqual(byKey["spf.gate.attempt"], { intValue: "2" });
+    // intValue is a JSON NUMBER on the real exporter, not a string — see
+    // otel.ts's header, "VERIFIED WIRE-SHAPE DIFFERENCES".
+    assert.deepEqual(byKey["spf.gate.violation_count"], { intValue: 2 });
+    assert.deepEqual(byKey["spf.gate.attempt"], { intValue: 2 });
     assert.ok(!(await sink.body).raw.includes("src/app.ts"), "violation text stays in SQLite");
   } finally {
     await sink.close();
   }
 });
 
-test("the final flush carries the drop counter as a resource attribute", async () => {
+test("the final flush warns about dropped spans exactly once — the count no longer rides a resource attribute (v1's hack; see otel_metrics.test.ts for its real replacement)", async () => {
   const sink = await receiver();
   const lines: string[] = [];
   try {
+    // No `metrics` handle wired here (this exporter is built via the plain
+    // `exporter()` test helper, with no OtelMetrics instance) — a `Resource`
+    // is immutable per exporter instance in the real SDK, so there is no
+    // longer a home for a value that changes after construction; the warn
+    // log is what a metrics-less setup still gets, unchanged from v1.
     const exp = exporter(sink.url, (m) => lines.push(m));
     for (let i = 0; i < 2100; i++) {
       exp.recordEvent(
@@ -574,10 +596,10 @@ test("the final flush carries the drop counter as a resource attribute", async (
     }
     await exp.flush(true);
     const resource = JSON.parse((await sink.body).raw).resourceSpans[0].resource;
-    assert.deepEqual(
+    assert.equal(
       resource.attributes.find((a: any) => a.key === "spf.otel.dropped_spans"),
-      { key: "spf.otel.dropped_spans", value: { intValue: "52" } },
-      "the gap is visible in the backend, not only in a log nobody kept",
+      undefined,
+      "the drop count is no longer a resource attribute — see otel_metrics.test.ts for the real Counter that replaced it",
     );
     assert.equal(lines.length, 1, "exactly one warn line, not one per drop");
     assert.match(lines[0]!, /dropped 52 span\(s\)/);
@@ -598,7 +620,7 @@ test("a rejecting collector logs once, redacted, and never throws", async () => 
   const port = (server.address() as AddressInfo).port;
   try {
     const exp = new OtelExporter({
-      cfg: { endpoint: `http://127.0.0.1:${port}/v1/traces`, service_name: "spf", headers: { authorization: "Bearer sk-topsecret" } },
+      cfg: { endpoint: `http://127.0.0.1:${port}/v1/traces`, service_name: "spf", headers: { authorization: "Bearer sk-topsecret" }, metrics: true, allow_env: false },
       adwId: "adw_test",
       chainName: "plan",
       log: (m) => lines.push(m),
@@ -730,5 +752,189 @@ test("flushAll() drains every exporter still registered, and only those", async 
   } finally {
     await recvA.close();
     await recvB.close();
+  }
+});
+
+// ── 8. THE ROUND TRIP — closes the spike's #1 unverified item ──────────────
+//
+// A real fake run, through the real @opentelemetry SDK encoder, landing on
+// an in-process OTLP/HTTP receiver: proves the deterministic sha256 ids
+// survive the SDK swap byte-for-byte, and that phase/agent/gate attributes
+// (allowlisted ones) are readable on the wire exactly where the span model
+// says they should be.
+
+test("ROUND TRIP: a fake run's deterministic ids and attributes survive the real OTLP/HTTP-JSON exporter, end to end", async () => {
+  const sink = await receiver();
+  try {
+    const adwId = "adw_roundtrip_001";
+    const exp2 = new OtelExporter({ cfg: { endpoint: sink.url, service_name: "spf", headers: undefined, metrics: true, allow_env: false }, adwId, chainName: "plan-build-test", env: {} });
+
+    exp2.recordAgentSession(
+      v.parse(AgentConfigSchema, { name: "builder", model: "vllm/nemotron-lora-placeholder", prompt_engineering: { system: "s.md", user: "u.md" } }),
+    );
+    const phaseId = `${adwId}_01_build`;
+    exp2.recordEvent(makeEventRecord({ adw_id: adwId, phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-02-01T00:00:01.000Z");
+    exp2.recordEvent(
+      makeEventRecord({
+        adw_id: adwId,
+        phase_id: phaseId,
+        type: "agent_end",
+        name: "builder",
+        tokens: 500,
+        payload: { cost: 0.07, usage: { input_tokens: 400, output_tokens: 100, cache_read_tokens: 64, total_tokens: 500 } },
+      }),
+      "evt_2",
+      "2026-02-01T00:00:05.000Z",
+    );
+    const gate = new GateReport();
+    gate.check("plan.md exists", true, "");
+    exp2.recordGate(phase({ phase_id: phaseId, adw_id: adwId }), "plan_gate", gate, 1);
+    exp2.recordPhase(phase({ phase_id: phaseId, adw_id: adwId, started_at: "2026-02-01T00:00:00.000Z", ended_at: "2026-02-01T00:00:06.000Z" }));
+    exp2.recordSessionFinish(true);
+    await exp2.flush(true);
+
+    const payload = JSON.parse((await sink.body).raw);
+    const spans = payload.resourceSpans[0].scopeSpans[0].spans;
+    const root = spans.find((s: any) => s.name === "spf run plan-build-test");
+    const phaseSpan = spans.find((s: any) => s.name === "phase build");
+    const agentSpan = spans.find((s: any) => s.name === "agent builder");
+
+    // Deterministic ids — the EXACT bespoke sha256 values, not "a hex string".
+    assert.equal(root.traceId, traceIdFor(adwId));
+    assert.equal(root.spanId, spanIdFor(`run:${adwId}`));
+    assert.equal(phaseSpan.spanId, spanIdFor(phaseId));
+    assert.equal(phaseSpan.parentSpanId, root.spanId);
+    assert.equal(agentSpan.parentSpanId, phaseSpan.spanId);
+
+    const attrs = (span: any) => Object.fromEntries(span.attributes.map((a: any) => [a.key, a.value]));
+    const agentAttrs = attrs(agentSpan);
+    assert.deepEqual(agentAttrs["gen_ai.request.model"], { stringValue: "vllm/nemotron-lora-placeholder" });
+    assert.deepEqual(agentAttrs["spf.lora_adapter"], { stringValue: "nemotron-lora-placeholder" }, "the org's -lora- naming convention resolves on the real wire");
+    assert.deepEqual(agentAttrs["spf.tokens.total"], { intValue: 500 });
+    assert.deepEqual(agentAttrs["gen_ai.usage.cache_read.input_tokens"], { intValue: 64 }, "the vLLM/OpenAI-compatible cache-read pass-through, under its GenAI semconv name");
+    assert.deepEqual(agentAttrs["spf.cost.total"], { doubleValue: 0.07 });
+
+    const phaseAttrs = attrs(phaseSpan);
+    assert.deepEqual(phaseAttrs["spf.phase.name"], { stringValue: "build" });
+    assert.equal(phaseSpan.events.length, 1, "the gate landed as a span event on the phase");
+    const gateEventAttrs = Object.fromEntries(phaseSpan.events[0].attributes.map((a: any) => [a.key, a.value]));
+    assert.deepEqual(gateEventAttrs["spf.gate.passed"], { boolValue: true });
+  } finally {
+    await sink.close();
+  }
+});
+
+// ── 9. spf.lora_adapter ─────────────────────────────────────────────────────
+
+test("loraAdapterFor: explicit config wins over any parsing", () => {
+  assert.equal(loraAdapterFor({ model: "vllm/nemotron-base:some-lora", lora_adapter: "explicit-name" }), "explicit-name");
+});
+
+test("loraAdapterFor: provider/base:adapter — the suffix after the LAST colon", () => {
+  assert.equal(loraAdapterFor({ model: "vllm/nemotron-base:my-lora" }), "my-lora");
+});
+
+test("loraAdapterFor: provider/adapter-name — this org's -lora- served-model convention, whole id", () => {
+  assert.equal(loraAdapterFor({ model: "vllm/nemotron-lora-placeholder" }), "nemotron-lora-placeholder");
+  assert.equal(loraAdapterFor({ model: "vllm/NEMOTRON-LORA-PLACEHOLDER" }), "NEMOTRON-LORA-PLACEHOLDER", "case-insensitive match");
+});
+
+test("loraAdapterFor: no match on any convention -> null, never a blind copy of the model id", () => {
+  assert.equal(loraAdapterFor({ model: "google/gemini-3.6-flash" }), null);
+  assert.equal(loraAdapterFor({ model: "anthropic/claude-opus-4" }), null);
+});
+
+// ── 10. outbound propagation seam: agentCallTraceContext ────────────────────
+
+test("agentCallTraceContext: null when no agent call is open for that phase+agent", () => {
+  const exp = exporter("http://127.0.0.1:1/v1/traces");
+  assert.equal(exp.agentCallTraceContext("adw_test_01_build", "builder"), null);
+});
+
+test("agentCallTraceContext: the OPEN agent call's own deterministic span id, as a real W3C traceparent", () => {
+  const exp = exporter("http://127.0.0.1:1/v1/traces");
+  const phaseId = "adw_test_01_build";
+  exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+  const ctx = exp.agentCallTraceContext(phaseId, "builder");
+  assert.ok(ctx);
+  assert.equal(ctx!.spanId, spanIdFor(`agent:${phaseId}:builder:1`));
+  assert.equal(ctx!.traceparent, `00-${traceIdFor("adw_test")}-${ctx!.spanId}-01`);
+});
+
+test("agentCallTraceContext: null again once the call has closed", () => {
+  const exp = exporter("http://127.0.0.1:1/v1/traces");
+  const phaseId = "adw_test_01_build";
+  exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+  exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_end", name: "builder", tokens: 1, payload: {} }), "evt_2", "2026-01-01T00:00:01.000Z");
+  assert.equal(exp.agentCallTraceContext(phaseId, "builder"), null);
+});
+
+// ── 11. observability.otel.allow_env (config, data_types.ts) ────────────────
+
+test("applyOtelEnvSupplement: a no-op when allow_env is false (the default) — env is never consulted", () => {
+  const otel = { endpoint: "https://collector.example.com/v1/traces", service_name: "spf", metrics: true, allow_env: false } as const;
+  const result = applyOtelEnvSupplement(otel, { OTEL_EXPORTER_OTLP_ENDPOINT: "http://evil:4318", OTEL_EXPORTER_OTLP_HEADERS: "authorization=stolen" });
+  assert.deepEqual(result, otel);
+});
+
+test("applyOtelEnvSupplement: allow_env true — OTEL_EXPORTER_OTLP_HEADERS supplements headers, config wins on conflict", () => {
+  const otel = { endpoint: "https://collector.example.com/v1/traces", service_name: "spf", metrics: true, allow_env: true, headers: { authorization: "Bearer configured" } };
+  const result = applyOtelEnvSupplement(otel, { OTEL_EXPORTER_OTLP_HEADERS: "authorization=from-env,x-extra=added" });
+  assert.deepEqual(result.headers, { authorization: "Bearer configured", "x-extra": "added" }, "config's own value survives; the env only fills a NEW key");
+  assert.equal(result.endpoint, otel.endpoint, "no OTEL_EXPORTER_OTLP_ENDPOINT given -> endpoint unchanged");
+});
+
+test("applyOtelEnvSupplement: allow_env true — OTEL_EXPORTER_OTLP_ENDPOINT may redirect an ALREADY-active block, never activate one from nothing", () => {
+  const otel = { endpoint: "https://collector.example.com/v1/traces", service_name: "spf", metrics: true, allow_env: true };
+  const result = applyOtelEnvSupplement(otel, { OTEL_EXPORTER_OTLP_ENDPOINT: "https://ci-collector.example.com/v1/traces" });
+  assert.equal(result.endpoint, "https://ci-collector.example.com/v1/traces");
+});
+
+// ── 12. metrics fan-out (otel_metrics.ts, wired through resolveOtelExporter) ─
+
+test("metrics fan-out: recordPhase/recordGate/closeAgentCall reach a real OTLP metrics receiver when observability.otel.metrics is on", async () => {
+  resetOtelMetricsForTest();
+  resetLiveForTest();
+  const recv = await receiver();
+  try {
+    const cfg = v.parse(SFConfigSchema, { observability: { otel: { endpoint: recv.url, service_name: "spf" } } }) as SFConfig;
+    // Resolve the shared metrics singleton directly so this test can
+    // force-flush it on demand — `resolveOtelExporter` below resolves and
+    // fans out to the SAME process-scoped instance internally, exactly as
+    // it does in real dispatch (see otel.ts's `resolveOtelExporter`).
+    const metrics = resolveOtelMetrics(cfg);
+    assert.ok(metrics, "otel is configured — a real metrics handle must come back");
+    const exp = resolveOtelExporter(cfg, { adwId: "adw_metrics_fanout", chainName: "plan-build-test" })!;
+    assert.ok(exp);
+
+    exp.recordAgentSession(v.parse(AgentConfigSchema, { name: "builder", model: "google/gemini-3.6-flash", prompt_engineering: { system: "s.md", user: "u.md" } }));
+    const phaseId = "adw_metrics_fanout_01_build";
+    exp.recordEvent(makeEventRecord({ adw_id: "adw_metrics_fanout", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "e1", "2026-01-01T00:00:00.000Z");
+    exp.recordEvent(
+      makeEventRecord({
+        adw_id: "adw_metrics_fanout",
+        phase_id: phaseId,
+        type: "agent_end",
+        name: "builder",
+        tokens: 10,
+        payload: { cost: 0.01, usage: { input_tokens: 8, output_tokens: 2 } },
+      }),
+      "e2",
+      "2026-01-01T00:00:01.000Z",
+    );
+    const gate = new GateReport();
+    gate.check("ok", true, "");
+    exp.recordGate(phase({ phase_id: phaseId, adw_id: "adw_metrics_fanout" }), "a_gate", gate, 1);
+    exp.recordPhase(phase({ phase_id: phaseId, adw_id: "adw_metrics_fanout" }));
+
+    await metrics!.forceFlush();
+    const sent = await recv.body;
+    const json = sent.raw;
+    for (const name of ["spf.agent.calls", "spf.gate.result", "spf.phase.duration", "spf.tokens", "spf.cost_usd"]) {
+      assert.ok(json.includes(`"name":"${name}"`), `${name} must reach the metrics receiver from the SAME record*() calls that queue spans`);
+    }
+  } finally {
+    await recv.close();
+    resetOtelMetricsForTest();
   }
 });
