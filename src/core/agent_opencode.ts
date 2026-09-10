@@ -65,9 +65,48 @@
  * docs, a target repo's OWN project-level `opencode.json` (if one exists)
  * merges at HIGHER precedence than the file `OPENCODE_CONFIG` points at.
  * That means a repo carrying its own `opencode.json` can silently override
- * (widen or narrow) the restriction this module writes — a real, documented
- * gap in this backend's tool-restriction guarantee, not a bug this module
- * can paper over from the outside.
+ * (widen or narrow) the restriction this module writes, and likewise
+ * override the OTel propagation headers described below — a real,
+ * documented gap in both guarantees, not a bug this module can paper over
+ * from the outside.
+ *
+ * OUTBOUND OTEL PROPAGATION [OFFICIAL config surface; best-effort
+ * behavior]: when `request.otel` is present (`agents.ts`'s `send()` threads
+ * it only when `observability.otel` is configured — absent otherwise, and
+ * this whole path is byte-identical to before), this module propagates
+ * trace context two ways:
+ *
+ *   1. `TRACEPARENT` on the child's env — the standard W3C env var, same
+ *      shape `agent_cc.ts` sets. No published statement confirms the
+ *      opencode CLI itself reads it (UNVERIFIED either way; set for parity
+ *      and for any opencode-spawned subprocess telemetry, at zero cost).
+ *   2. `traceparent` + `x-request-id` as STATIC provider headers in the
+ *      temp `opencode.json` (`provider.<id>.options.headers` — opencode's
+ *      documented per-provider options surface;
+ *      https://opencode.ai/docs/providers/). Static values are CORRECT
+ *      here, unlike the general case, because one `opencode run` subprocess
+ *      IS exactly one SPF agent call — the traceparent can never go stale
+ *      mid-run. This is the header that actually reaches the wire:
+ *      opencode's provider requests flow through the AI SDK, which honors
+ *      `options.headers` for that provider's requests. Subject to the
+ *      CONFIG PRECEDENCE limitation above: a repo's own `opencode.json` can
+ *      override these headers.
+ *
+ * `injectOtelEnv()` / `otelProviderHeaders()` / `tempConfigContents()` are
+ * exported pure functions so every fragment is unit-testable without
+ * spawning a real subprocess — same discipline as the rest of this module.
+ *
+ * OPERATOR-CONFIG MERGE: when a caller-provided `OPENCODE_CONFIG` already
+ * exists in the base env (operatorEnv() passthrough or an agent's
+ * env_allowlist) AND this module needs a temp config of its own (a tools:
+ * restriction or the propagation headers), the operator's file is READ and
+ * its contents MERGED into the temp file (SPF's own blocks win on
+ * conflict — see `mergeOperatorConfig()`), rather than the pre-existing
+ * replace-it-outright behavior. This closes a real regression class:
+ * enabling OTel or a tools: list on an already-configured workflow used to
+ * silently drop the operator's provider routing/credentials config. An
+ * unreadable or unparseable operator file falls back to the old replace
+ * behavior (and is left untouched on disk) rather than failing the run.
  *
  * `write`/`apply_patch` ARE GATED THROUGH `edit` [OFFICIAL]: opencode's own
  * docs say these two are not independent permission keys — both ride the
@@ -183,7 +222,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AgentRequest, AgentResult, ThinkingLevel } from "./data_types.ts";
@@ -381,16 +420,123 @@ function permissionMapFor(toolNames: string[]): Record<string, "allow" | "deny">
 }
 
 /**
- * `request.tools` is `null`/`undefined` -> no config file at all, `--auto`
- * alone (every tool usable, mirroring CC's `"default"`). An array (including
- * `[]`) -> a real temp `opencode.json` restricting to exactly what was
- * asked for. Caller is responsible for `rmSync`-ing `dir` when done — see
- * `run()`'s `finally`.
+ * Merges `TRACEPARENT` into `baseEnv` for outbound OTel propagation, or
+ * returns `baseEnv` UNCHANGED when `otel` is absent (the common case —
+ * `observability.otel` not configured). See the module doc comment's
+ * OUTBOUND OTEL PROPAGATION section: unlike `agent_cc.ts`'s sibling, no
+ * published statement confirms the opencode CLI itself reads this var, so
+ * the REAL propagation path is the temp-config headers below; this env var
+ * is set for parity at zero cost.
  */
-function writeTempPermissionConfig(toolNames: string[]): { dir: string; configPath: string } {
+export function injectOtelEnv(
+  baseEnv: Record<string, string>,
+  otel: AgentRequest["otel"] | undefined,
+): Record<string, string> {
+  if (!otel) return baseEnv;
+  return { ...baseEnv, TRACEPARENT: otel.traceparent };
+}
+
+export interface OpencodeOtelHeaders {
+  provider: string;
+  headers: { traceparent: string; "x-request-id": string };
+}
+
+/**
+ * Builds the `provider.<id>.options.headers` fragment for a temp
+ * `opencode.json` (see the module doc comment's OUTBOUND OTEL PROPAGATION
+ * section for why static values are correct here). Returns `null` when
+ * `otel` is absent, or when the model id carries no `provider/` prefix —
+ * opencode's own `--model` vocabulary is documented as `provider/model-id`,
+ * but a bare model name has no provider id this module could key headers
+ * under, and guessing the wrong provider id would write a config block
+ * opencode merges onto a DIFFERENT provider than the one being called.
+ */
+export function otelProviderHeaders(model: string, otel: AgentRequest["otel"] | undefined): OpencodeOtelHeaders | null {
+  if (!otel) return null;
+  const slash = model.indexOf("/");
+  if (slash <= 0) return null;
+  return { provider: model.slice(0, slash), headers: { traceparent: otel.traceparent, "x-request-id": otel.x_request_id } };
+}
+
+/**
+ * Builds the JSON CONTENT of the temp `opencode.json`: a `permission` map
+ * when `toolNames` is an array (including `[]` — restrict to exactly those,
+ * mirroring CC's `--tools`), a `provider` block when `otelHeaders` is
+ * present, both when both apply. `null` when NEITHER applies — no config
+ * file needed at all, `--auto` alone (every tool usable, mirroring CC's
+ * `"default"`). Exported as its own pure function, same reasoning as
+ * `resolveOpencodeCmdSpec`: this shape is unit-testable without touching
+ * the filesystem or spawning a subprocess.
+ */
+export function tempConfigContents(
+  toolNames: string[] | null | undefined,
+  otelHeaders: OpencodeOtelHeaders | null,
+): Record<string, unknown> | null {
+  const contents: Record<string, unknown> = {};
+  if (toolNames != null) contents.permission = permissionMapFor(toolNames);
+  if (otelHeaders) contents.provider = { [otelHeaders.provider]: { options: { headers: otelHeaders.headers } } };
+  return Object.keys(contents).length === 0 ? null : contents;
+}
+
+/**
+ * Recursive plain-object merge of SPF's own temp-config blocks ONTO the
+ * operator's existing `OPENCODE_CONFIG` contents — SPF's values win on
+ * conflicting plain-object leaves/deeper keys (a `tools:` restriction is a
+ * safety gate and the propagation headers are this call's own, so neither
+ * may be silently watered down), while every key the operator set and SPF
+ * never touches (provider `baseURL`/`apiKey`/model routing, MCP servers,
+ * agents) passes through intact. Arrays are replaced, not concatenated:
+ * this module never writes arrays itself, so a replaced array is always
+ * one of the OPERATOR's own values being deliberately overridden by an
+ * SPF block — the same "SPF wins on conflict" rule.
+ */
+export function mergeOperatorConfig(base: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(overlay)) {
+    const existing = out[key];
+    out[key] =
+      existing && typeof existing === "object" && !Array.isArray(existing) && value && typeof value === "object" && !Array.isArray(value)
+        ? mergeOperatorConfig(existing as Record<string, unknown>, value as Record<string, unknown>)
+        : value;
+  }
+  return out;
+}
+
+/**
+ * Reads the operator's existing `OPENCODE_CONFIG` file for merging, or
+ * returns `null` when there is nothing usable to merge with — file missing
+ * / unreadable / not valid JSON with a plain-object root. JSON.parse is
+ * deliberately used as-is: opencode's own docs advertise plain-JSON config,
+ * and silently treating a JSONC file (comments) as replaceable would repeat
+ * the pre-existing clobber the merge exists to fix — so an unparseable file
+ * simply falls through to the pre-existing replace behavior, with the
+ * operator's own file untouched on disk.
+ */
+export function readOperatorConfig(configPath: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Writes `contents` (see `tempConfigContents`) to a temp `opencode.json`.
+ * Caller is responsible for `rmSync`-ing `dir` when done — see `run()`'s
+ * `finally`.
+ */
+function writeTempConfig(contents: Record<string, unknown>): { dir: string; configPath: string } {
   const dir = mkdtempSync(path.join(os.tmpdir(), "spf-opencode-"));
   const configPath = path.join(dir, "opencode.json");
-  writeFileSync(configPath, JSON.stringify({ permission: permissionMapFor(toolNames) }, null, 2));
+  try {
+    writeFileSync(configPath, JSON.stringify(contents, null, 2));
+  } catch (err) {
+    // This runs BEFORE run()'s try/finally — a failed write would otherwise
+    // leak the just-minted temp dir with nobody responsible for it.
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
+  }
   return { dir, configPath };
 }
 
@@ -504,12 +650,26 @@ export async function run(
   const fullArgs = [...cmdArgs, ...args];
 
   const baseEnv = request.env ?? operatorEnv();
-  // `request.tools` null/undefined -> every tool, no config file written at
-  // all (see writeTempPermissionConfig's own doc comment). An array
-  // (including []) -> a real temp opencode.json, pointed at via
-  // OPENCODE_CONFIG on the CHILD's env only — never mutates process.env.
-  const tempConfig = request.tools != null ? writeTempPermissionConfig(request.tools) : null;
-  const childEnv = tempConfig ? { ...baseEnv, OPENCODE_CONFIG: tempConfig.configPath } : baseEnv;
+  // `request.tools` null/undefined AND no otel config -> every tool, no
+  // config file written at all (see tempConfigContents' own doc comment).
+  // Otherwise -> a real temp opencode.json (tool restriction, OTel provider
+  // headers, or both), pointed at via OPENCODE_CONFIG on the CHILD's env
+  // only — never mutates process.env.
+  const otelHeaders = otelProviderHeaders(request.model, request.otel);
+  let configContents = tempConfigContents(request.tools, otelHeaders);
+  // A caller-provided OPENCODE_CONFIG (operatorEnv() passthrough or an
+  // agent's env_allowlist) is MERGED into the temp file, never replaced —
+  // SPF's own blocks win on conflict (see mergeOperatorConfig), but
+  // everything else the operator configured (provider baseURL/apiKey/model
+  // routing, MCP servers) survives. Without this, enabling OTel or a tools:
+  // list on an already-configured workflow would silently re-route or break
+  // agent calls.
+  if (configContents && baseEnv.OPENCODE_CONFIG) {
+    const operatorCfg = readOperatorConfig(baseEnv.OPENCODE_CONFIG);
+    if (operatorCfg) configContents = mergeOperatorConfig(operatorCfg, configContents);
+  }
+  const tempConfig = configContents ? writeTempConfig(configContents) : null;
+  const childEnv = injectOtelEnv(tempConfig ? { ...baseEnv, OPENCODE_CONFIG: tempConfig.configPath } : baseEnv, request.otel);
 
   try {
     const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: childEnv });

@@ -42,6 +42,22 @@ record independent of the commit log.
   the `flue` path above). `ANTHROPIC_CUSTOM_HEADERS`'s format (newline-
   separated `Name: Value` pairs) is verified against Claude Code's own docs
   (https://code.claude.com/docs/en/env-vars).
+- **`agent_opencode.ts`**: outbound trace-context propagation for
+  `coding_agent: opencode`, when `observability.otel` is configured —
+  `TRACEPARENT` on the subprocess env (parity with `claude_code`;
+  unverified whether the opencode CLI reads it) plus static
+  `traceparent`/`x-request-id` provider headers
+  (`provider.<id>.options.headers`, opencode's documented config surface)
+  in the temp `opencode.json` this module already writes. Static is correct
+  because one `opencode run` subprocess is exactly one agent call. A
+  caller-provided `OPENCODE_CONFIG` is now MERGED into the temp config
+  (SPF's own blocks win on conflict) instead of replaced outright —
+  closing a regression class where enabling OTel or a `tools:` list on an
+  already-configured workflow silently dropped the operator's provider
+  routing/credentials config. Caveats (documented in the module's doc
+  comment): a bare model id with no `provider/` prefix skips the headers,
+  and a repo's own `opencode.json` merges at higher precedence and can
+  override them.
 - **`spf.lora_adapter`** span attribute (new): resolved from an explicit
   `agents[].lora_adapter` config override, else parsed from the model id
   (`provider/base:adapter`, or this org's `provider/adapter-name` `-lora-`
