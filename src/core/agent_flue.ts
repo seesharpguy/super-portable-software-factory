@@ -54,7 +54,7 @@ import { registerOllamaModel } from "./ollama_provider.ts";
 import { registerCloudflareModel } from "./cloudflare_provider.ts";
 import * as sandbox from "./sandbox.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
-import { installFluePropagation } from "./otel_propagation.ts";
+import { installFluePropagation, registerFlueSessionTrace, unregisterFlueSessionTrace } from "./otel_propagation.ts";
 
 const RESULT_SNIPPET_CHARS = 20_000; // tool output rides along whole; clip only guards pathological cases
 const ARG_VALUE_CHARS = 20_000; // args too — the UI scrolls, it must not be handed cut-off data
@@ -507,6 +507,18 @@ export async function run(
   onSpawn?.(pid);
 
   const handle = init(SfAgent, { id: request.session_id });
+  // Join this session's flue spans to SPF's deterministic trace: the session
+  // id (== flue's instance id, which every flue observability event's ctx.id
+  // carries — see otel_propagation.ts's header) is registered against this
+  // call's traceparent, and the installed instrumentation resolves root
+  // spans through that map per span. WRAPPING dispatch() in a context here
+  // would be WRONG, not just redundant (verified against @flue/runtime's
+  // node dist): execution runs in ONE process-lifetime claim loop whose
+  // async context is captured by the first dispatch that started it, so a
+  // dispatch-time context wrap would silently mis-attribute every later
+  // agent's spans into the FIRST agent's trace. No-op when otel is
+  // unconfigured.
+  if (request.otel) registerFlueSessionTrace(request.session_id, request.otel.traceparent);
   const receipt = await handle.dispatch(request.prompt);
   const slot: UsageSlot = { usage: new UsageBreakdown(), context_tokens: 0 };
   pendingUsage.set(receipt.submissionId, slot);
@@ -544,6 +556,10 @@ export async function run(
     throw error;
   } finally {
     pendingUsage.delete(receipt.submissionId);
+    // Post-settlement bookkeeping spans flue mints after this point resolve
+    // to an unparented root (separate trace) — by design; see
+    // otel_propagation.ts's unregisterFlueSessionTrace.
+    unregisterFlueSessionTrace(request.session_id);
     onExit?.(pid);
   }
 }

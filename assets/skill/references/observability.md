@@ -127,9 +127,21 @@ agent backends get different-confidence treatment:
     — it does NOT reach a provider transport that bypasses both (unverified
     for the Anthropic/Google/Mistral SDKs' internal transports specifically;
     flagged, not assumed). See `core/otel_propagation.ts`'s header for the
-    full mechanism, including why this is a SEPARATE trace from SPF's own
-    (correlated by time window and `spf.adw_id`/`gen_ai.*` attributes, not by
-    a shared trace id).
+    full mechanism. Since #80, flue's spans additionally JOIN SPF's
+    deterministic trace: `agent_flue.ts` registers each run's session id
+    (== flue's instance id) against that call's traceparent, and the
+    installed instrumentation's `resolveRootContext` option — consulted per
+    root span, keyed on the event context's instance id — roots each
+    session's spans under the right agent-call span. This is done per-span
+    rather than by wrapping `dispatch()` in a context because flue's node
+    runtime executes all submissions in one process-lifetime claim loop
+    whose async context is captured once — a dispatch-time wrap would
+    mis-attribute every agent after the first into the first agent's trace
+    (verified against `@flue/runtime`'s dist; see `core/otel_propagation
+    .ts`'s header). Unmapped sessions (backlog restarts, post-settlement
+    stragglers) degrade to the old separate-trace behavior — never
+    mis-attributed, never an error; correlate those by `x-request-id`/
+    `spf.adw_id`/time window.
 
 ## Tracing across the inference stack
 
@@ -153,14 +165,19 @@ routing hop, and vLLM's own serving span can ALL be emitted to the same Tempo
     CHILDREN of SPF's own deterministic trace id, not the other way around —
     a Tempo query for `sha256(adw_id)` finds the whole cross-service picture
     for that run, agent call down through the model server.
-  - **The `flue` backend's propagation is best-effort** (see above) and uses
-    its OWN separate trace (a real, SDK-minted random trace id) for Flue's
-    own spans (`invoke_agent`, `chat <model>`, `execute_tool`) — it does
-    NOT currently unify with SPF's deterministic trace id the way
-    `claude_code`'s does. Correlate the two by `spf.adw_id` (present on
-    SPF's own spans) and time window, or by the `x-request-id` header this
-    module also injects, until a future pass threads a shared trace id
-    through both paths.
+  - **The `flue` backend joins the same trace** (since #80): Flue's own
+    spans (`flue.coordinator`, `invoke_agent`, `chat <model>`,
+    `execute_tool`) inherit SPF's deterministic trace id (SDK-random span
+    ids underneath) via the instrumentation's per-span `resolveRootContext`
+    rooted on the run's registered session-id -> traceparent map, and the
+    `traceparent` the http/undici instrumentations inject onto Flue's
+    provider requests carries it too — downstream Switchyard/vLLM spans
+    land in the same trace, exactly as the `claude_code` path described
+    above. Unmapped submissions (a restarted process draining a durable
+    backlog, post-settlement bookkeeping) fall back to a separate trace —
+    never MIS-attributed into another agent's trace — correlatable by
+    `x-request-id`/`spf.adw_id`/time window; see the "Outbound
+    trace-context propagation" section above.
   - **`x-request-id`** rides alongside `traceparent` specifically so a
     collector/log pipeline that correlates by individual REQUEST (rather
     than by trace) has a stable id to key on — it is this call's own

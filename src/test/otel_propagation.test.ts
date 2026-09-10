@@ -27,7 +27,7 @@ import { injectOtelEnv as injectOtelEnvOc, mergeOperatorConfig, otelProviderHead
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { installFluePropagation, resetFluePropagationForTest, X_REQUEST_ID_HEADER, XRequestIdPropagator } from "../core/otel_propagation.js";
+import { installFluePropagation, registerFlueSessionTrace, resetFluePropagationForTest, resolveFlueRootContext, unregisterFlueSessionTrace, X_REQUEST_ID_HEADER, XRequestIdPropagator } from "../core/otel_propagation.js";
 
 // ── 1. claude_code: injectOtelEnv (agent_cc.ts) ─────────────────────────────
 
@@ -246,4 +246,70 @@ test("readOperatorConfig: null for a missing file, a non-object root, or unparse
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 4. flue trace unification (#80): register/resolve/unregister ─────────
+// The claim-loop-safe mechanism: flue's runtime executes submissions in one
+// process-lifetime claim loop, so a dispatch-time context wrap would
+// mis-attribute every agent after the first (documented in
+// otel_propagation.ts's header). Instead the instrumentation's own
+// resolveRootContext option is consulted PER root span; these tests
+// exercise SPF's resolver against the really-registered global propagator
+// (installed by section 2 above — same one-process ordering discipline).
+
+const FLUE_TP = "00-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-ffffffffffffffff-01";
+
+test("resolveFlueRootContext: an unmapped session id resolves to undefined (flue roots its own separate trace — never MIS-attributed)", () => {
+  assert.equal(resolveFlueRootContext({}, { id: "ses_unknown_session" }), undefined);
+  assert.equal(resolveFlueRootContext({}, undefined), undefined, "absent ctx is a clean miss, not a throw");
+  assert.equal(resolveFlueRootContext({}, {}), undefined, "ctx without an id is a clean miss");
+});
+
+test("register/resolve: a registered session's root spans extract SPF's deterministic agent-call span as the remote parent", () => {
+  registerFlueSessionTrace("ses_agent_a", FLUE_TP);
+  const resolved = resolveFlueRootContext({}, { id: "ses_agent_a" });
+  assert.ok(resolved, "resolver returned a context");
+  const sc = trace.getSpanContext(resolved);
+  assert.ok(sc);
+  assert.equal(sc.traceId, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "SPF's deterministic trace id");
+  assert.equal(sc.spanId, "ffffffffffffffff", "the agent-call span id is the parent");
+  assert.equal(sc.isRemote, true, "arrived as a remote parent, as a real cross-process extraction would");
+  // A span started under the resolved context (flue's startSpan does exactly
+  // this when its parentContext comes from resolveRootContext) lands in
+  // SPF's trace, through the really-registered global provider.
+  const span = context.with(resolved, () => trace.getTracer("otel-propagation-test-root").startSpan("chat some-model"));
+  assert.equal(span.spanContext().traceId, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  span.end();
+});
+
+test("resolveFlueRootContext: extraction is ROOT-based — an ambient active span (a leaked loop context) cannot poison the resolution", () => {
+  registerFlueSessionTrace("ses_agent_b", FLUE_TP);
+  const ambientTracer = trace.getTracer("otel-propagation-test-ambient");
+  const ambientSpan = ambientTracer.startSpan("someone-else's-span");
+  context.with(trace.setSpan(context.active(), ambientSpan), () => {
+    const resolved = resolveFlueRootContext({}, { id: "ses_agent_b" });
+    assert.ok(resolved);
+    assert.equal(trace.getSpanContext(resolved)?.traceId, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "the REGISTERED traceparent wins, not the ambient span");
+    assert.equal(trace.getSpanContext(resolved)?.spanId, "ffffffffffffffff");
+  });
+  ambientSpan.end();
+});
+
+test("resolveFlueRootContext: two concurrent sessions resolve to their OWN traceparents (per-session attribution, the fix the claim loop breaks for context-with)", () => {
+  registerFlueSessionTrace("ses_agent_c1", "00-11111111111111111111111111111111-2222222222222222-01");
+  registerFlueSessionTrace("ses_agent_c2", "00-33333333333333333333333333333333-4444444444444444-01");
+  assert.equal(trace.getSpanContext(resolveFlueRootContext({}, { id: "ses_agent_c1" })!)?.traceId, "11111111111111111111111111111111");
+  assert.equal(trace.getSpanContext(resolveFlueRootContext({}, { id: "ses_agent_c2" })!)?.traceId, "33333333333333333333333333333333");
+  unregisterFlueSessionTrace("ses_agent_c1");
+  unregisterFlueSessionTrace("ses_agent_c2");
+});
+
+test("resolveFlueRootContext: malformed traceparent → undefined (degraded join, never an error); unregister stops resolution", () => {
+  registerFlueSessionTrace("ses_agent_d", "00-junk-junk-01");
+  assert.equal(resolveFlueRootContext({}, { id: "ses_agent_d" }), undefined);
+  unregisterFlueSessionTrace("ses_agent_d");
+
+  registerFlueSessionTrace("ses_agent_e", FLUE_TP);
+  unregisterFlueSessionTrace("ses_agent_e");
+  assert.equal(resolveFlueRootContext({}, { id: "ses_agent_e" }), undefined, "finally-side unregister takes effect immediately");
 });

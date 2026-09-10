@@ -36,6 +36,24 @@ record independent of the commit log.
   a `CompositePropagator` (W3C TraceContext + a custom `x-request-id`
   propagator). Best-effort by design and documented as such — reaches any
   provider whose Node SDK issues requests through `http`/`undici`.
+  **Update (#80):** flue's spans now JOIN SPF's deterministic trace instead
+  of forming a separate one — via the instrumentation's per-span
+  `resolveRootContext` option, backed by a session-id -> traceparent map
+  `agent_flue.ts` registers around each run (`ctx.id` is flue's documented
+  stable instance id, which SPF mints). This is per-span rather than a
+  dispatch-time context wrap because flue's node runtime executes all
+  submissions in ONE process-lifetime claim loop whose async context is
+  captured once — a context wrap would silently mis-attribute every agent
+  after the first into the first agent's trace (verified against
+  `@flue/runtime`'s dist). Flue spans inherit the sha256 trace id per
+  session, and the provider requests' wire `traceparent` carries it too —
+  parity with the `claude_code` path. Unmapped sessions (backlog restarts,
+  post-settlement stragglers) degrade to the old separate-trace behavior,
+  never mis-attributed; the internal `executionContext.traceCarrier`
+  escape hatch stays unused (not on the public dispatch surface).
+  `installFluePropagation` also no longer latches `installed` before its
+  fallible registrations, so a constructor-time failure is retried on the
+  next call instead of permanently disabling the process.
 - **`agent_cc.ts`**: `TRACEPARENT`/`ANTHROPIC_CUSTOM_HEADERS` are injected at
   the single `spawn()` choke point for `coding_agent: claude_code`, when
   `observability.otel` is configured — a real, verified guarantee (unlike
