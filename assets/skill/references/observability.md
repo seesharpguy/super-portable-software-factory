@@ -75,8 +75,93 @@ reading `parent_id`.
 `spf.config.yaml`, a lossy, allowlisted projection of phase/agent/tool spans
 (status, model, token/cost counts, gate results — never prompts, envelopes,
 tool arguments, or source code) is also pushed to an OTLP/HTTP collector,
-fire-and-forget. SQLite remains the source of truth regardless; see
+fire-and-forget, via the real `@opentelemetry/sdk-trace-base` +
+`exporter-trace-otlp-http` packages (SPF's own bespoke sha256 trace/span-id
+scheme and attribute allowlist ride on top of the real SDK's encoder, not a
+hand-rolled one — see `core/otel.ts`'s header for exactly what that means for
+the wire bytes). SQLite remains the source of truth regardless; see
 `config.md`'s `observability.otel.*` rows for the field reference.
+
+**Optional OTel metrics.** The same `observability.otel.endpoint` also gates
+a second, PROCESS-scoped pipeline (`core/otel_metrics.ts`, built on
+`@opentelemetry/sdk-metrics` + `exporter-metrics-otlp-http`) — set
+`observability.otel.metrics: false` to keep trace export on while opting out
+of metrics specifically. Five instruments: `spf.tokens` (counter; attrs
+`kind` — input/output/cache_read/cache_write — `agent`, `model`),
+`spf.cost_usd` (counter; `agent`, `model`), `spf.phase.duration` (histogram,
+seconds; `kind`, `owner`, `status`), `spf.gate.result` (counter; `gate`,
+`result` — pass/fail), and `spf.agent.calls` (counter; `agent`, `model`,
+`coding_agent`). Unlike the span exporter (one per run), there is exactly
+one `MeterProvider` for the life of the `spf` process — see `otel_metrics.
+ts`'s own header for why that matters under `spf watch`'s daemon loop.
+
+**Outbound trace-context propagation.** When otel is configured, SPF also
+tries to carry `traceparent` onto the OUTBOUND model calls each agent makes,
+so this run's spans join whatever trace the model-serving stack itself
+produces (see "Tracing across the inference stack" below). The two coding
+agent backends get different-confidence treatment:
+  - `coding_agent: claude_code` — a real, verified guarantee.
+    `agent_cc.ts`'s single `spawn()` choke point sets `TRACEPARENT` and
+    `ANTHROPIC_CUSTOM_HEADERS` (`traceparent`/`x-request-id`, newline-
+    separated `Name: Value` pairs — the CLI's own documented format,
+    requires `claude` CLI >= 2.1.227) on the `claude` subprocess's
+    environment for every call.
+  - `coding_agent: flue` — best-effort. `@flue/opentelemetry`'s own docs say
+    plainly that `dispatch()` "does not propagate trace context" on its own,
+    so SPF additionally registers `@opentelemetry/instrumentation-http` +
+    `-undici` globally, with a propagator that carries both the standard W3C
+    `traceparent` and a custom `x-request-id`. This reaches any provider
+    whose Node SDK issues requests through `http`/`https`/`undici` (verified)
+    — it does NOT reach a provider transport that bypasses both (unverified
+    for the Anthropic/Google/Mistral SDKs' internal transports specifically;
+    flagged, not assumed). See `core/otel_propagation.ts`'s header for the
+    full mechanism, including why this is a SEPARATE trace from SPF's own
+    (correlated by time window and `spf.adw_id`/`gen_ai.*` attributes, not by
+    a shared trace id).
+
+## Tracing across the inference stack
+
+A run's SPF spans are not the only spans in play once a `claude_code` agent
+is pointed at a self-hosted model through Switchyard/vLLM (this repo's own
+inference-platform-aws stack): the `claude` CLI's own request, Switchyard's
+routing hop, and vLLM's own serving span can ALL be emitted to the same Tempo
+(or any OTLP-compatible) backend. What joins them:
+
+  - **The `traceparent` SPF injects** (see above) is a real W3C header on the
+    actual HTTP request `claude` makes to `ANTHROPIC_BASE_URL` — whatever
+    receives that request (Switchyard, vLLM directly, an Envoy AI Gateway
+    hop) that is ALSO instrumented with OTel and honors an inbound
+    `traceparent` will parent its own span under SPF's agent-call span,
+    landing in the SAME trace.
+  - **SPF's OWN span export is a separate, deterministic trace** — one
+    `adw_id` = one trace id (`sha256(adw_id)`), independent of whatever trace
+    id the model-serving hop's own OTel SDK would otherwise mint. Since SPF
+    controls the OUTBOUND `traceparent` it sends (not merely observes one),
+    a `claude_code` call's downstream spans (Switchyard, vLLM) land as
+    CHILDREN of SPF's own deterministic trace id, not the other way around —
+    a Tempo query for `sha256(adw_id)` finds the whole cross-service picture
+    for that run, agent call down through the model server.
+  - **The `flue` backend's propagation is best-effort** (see above) and uses
+    its OWN separate trace (a real, SDK-minted random trace id) for Flue's
+    own spans (`invoke_agent`, `chat <model>`, `execute_tool`) — it does
+    NOT currently unify with SPF's deterministic trace id the way
+    `claude_code`'s does. Correlate the two by `spf.adw_id` (present on
+    SPF's own spans) and time window, or by the `x-request-id` header this
+    module also injects, until a future pass threads a shared trace id
+    through both paths.
+  - **`x-request-id`** rides alongside `traceparent` specifically so a
+    collector/log pipeline that correlates by individual REQUEST (rather
+    than by trace) has a stable id to key on — it is this call's own
+    (SPF-side) span id for `claude_code`, and the currently-active span's id
+    for `flue`.
+  - **vLLM's own cache-read pass-through**
+    (`usage.prompt_tokens_details.cached_tokens`, surfaced here as both
+    `spf.tokens.cache_read` and `gen_ai.usage.cache_read.input_tokens`)
+    requires the upstream vLLM server to be started with
+    `--enable-prompt-tokens-details` (off by default) — SPF has no way to
+    detect this at config-validation time; a correctly-wired pipeline reads
+    `0` forever against a server that hasn't set the flag, with no bug
+    anywhere in SPF's own code.
 
 **Spend is itemized per phase.** `agent_end.usage` carries tokens *and*
 dollars for each component Flue reports (matching pi-ai's field names
