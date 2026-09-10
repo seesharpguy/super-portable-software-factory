@@ -54,6 +54,7 @@ import { registerOllamaModel } from "./ollama_provider.ts";
 import { registerCloudflareModel } from "./cloudflare_provider.ts";
 import * as sandbox from "./sandbox.ts";
 import { nowIso, operatorEnv } from "./utils.ts";
+import { installFluePropagation } from "./otel_propagation.ts";
 
 const RESULT_SNIPPET_CHARS = 20_000; // tool output rides along whole; clip only guards pathological cases
 const ARG_VALUE_CHARS = 20_000; // args too — the UI scrolls, it must not be handed cut-off data
@@ -478,6 +479,15 @@ export async function run(
   // compatible endpoint, the slashed `@cf/...` model-id handling, and the
   // real-Bearer-token (not dummy-key) auth.
   if (provider === "cloudflare") await registerCloudflareModel(modelId);
+
+  // Outbound OTel propagation (SPF's otel-sdk extension) — see
+  // `otel_propagation.ts`'s own header for what this does and does not
+  // guarantee. `request.otel` is set only when `observability.otel` is
+  // configured for this run (see `agents.ts`'s `send()`); the installer is
+  // itself a no-op on `undefined` AND idempotent across every later call in
+  // this same process, so this costs nothing for a repo that hasn't
+  // configured otel and installs at most once for one that has.
+  installFluePropagation(request.otel);
 
   await ensureRuntime(request.flue_db_path);
 

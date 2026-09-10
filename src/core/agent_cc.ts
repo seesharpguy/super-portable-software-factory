@@ -269,6 +269,30 @@ const EFFORT_MAP: Record<ThinkingLevel, string> = {
 };
 
 /**
+ * Merges `TRACEPARENT`/`ANTHROPIC_CUSTOM_HEADERS` into `baseEnv` for
+ * outbound OTel propagation, or returns `baseEnv` UNCHANGED when
+ * `otel` is absent (the common case — `observability.otel` not configured).
+ * `ANTHROPIC_CUSTOM_HEADERS`'s verified format is newline-separated
+ * `Name: Value` pairs (see this module's own header for the citation); an
+ * operator-supplied value already present in `baseEnv` is kept and appended
+ * to, not overwritten — a real header injected via config/settings must
+ * still reach the wire alongside this module's own.
+ */
+export function injectOtelEnv(
+  baseEnv: Record<string, string>,
+  otel: AgentRequest["otel"] | undefined,
+): Record<string, string> {
+  if (!otel) return baseEnv;
+  const ownHeaders = [`traceparent: ${otel.traceparent}`, `x-request-id: ${otel.x_request_id}`].join("\n");
+  const existing = baseEnv.ANTHROPIC_CUSTOM_HEADERS;
+  return {
+    ...baseEnv,
+    TRACEPARENT: otel.traceparent,
+    ANTHROPIC_CUSTOM_HEADERS: existing ? `${existing}\n${ownHeaders}` : ownHeaders,
+  };
+}
+
+/**
  * Resolve `SPF_CLAUDE_CMD` for THIS call, substituting a literal `{model}`
  * token with `model` — see the module doc comment for why a fixed tag baked
  * into the wrapper string can't give per-agent model choice under a
@@ -367,7 +391,24 @@ export async function run(
   const isOllamaLaunch = isOllamaLaunchCmd(cmdSpec);
   const needsOllamaLaunchSeparator = isOllamaLaunch && !cmdArgs.includes("--");
   const fullArgs = needsOllamaLaunchSeparator ? [...cmdArgs, "--", ...args] : [...cmdArgs, ...args];
-  const child = spawn(cmd, fullArgs, { cwd: request.cwd, env: request.env ?? operatorEnv() });
+  // Outbound OTel propagation (SPF's otel-sdk extension): `request.otel` is
+  // set only when `observability.otel` is configured for this run (see
+  // `agents.ts`'s `send()`) — absent otherwise, so `env` below is
+  // byte-identical to before this existed for every repo that hasn't
+  // configured otel. `TRACEPARENT` is the standard W3C env var the `claude`
+  // CLI's own subprocesses/telemetry already look for; `ANTHROPIC_CUSTOM_
+  // HEADERS` additionally puts `traceparent` (redundant with the env var,
+  // but this is the only way to reach the ACTUAL outbound HTTP request the
+  // CLI itself makes to its configured `ANTHROPIC_BASE_URL`) and
+  // `x-request-id` (this agent call's own span id) onto that request's
+  // headers. Format verified against Claude Code's own docs (https://
+  // code.claude.com/docs/en/env-vars, fetched live for this feature —
+  // requires CLI >= 2.1.227): "Custom headers to add to requests (`Name:
+  // Value` format, newline-separated for multiple headers)". An
+  // operator-supplied `ANTHROPIC_CUSTOM_HEADERS` already present in
+  // `request.env` is PRESERVED, not clobbered — this appends to it.
+  const env = injectOtelEnv(request.env ?? operatorEnv(), request.otel);
+  const child = spawn(cmd, fullArgs, { cwd: request.cwd, env });
   // The prompt travels as a positional argv element, not stdin — closing it
   // immediately avoids a real, observed ~3s "no stdin data received" stall
   // where `claude` otherwise waits to see whether anything is piped in.

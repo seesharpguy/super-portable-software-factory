@@ -681,6 +681,9 @@ interface RunForAgents {
     envelopeRow: (phase: Phase, agent: string, outputType: string, payloadJson: string, valid: boolean, attempt: number) => Promise<void>;
     gateRow: (phase: Phase, gate: string, report: GateReport, attempt: number) => Promise<void>;
     agentSessionRow: (adwId: string, agent: AgentConfig, sessionId: string, contextTokens?: number, contextWindow?: number) => Promise<void>;
+    // `null` unless `observability.otel` is configured (see `tracer.ts`'s own `otel` field) — narrowed to just the
+    // one method `send()` below needs, so this module doesn't have to import `OtelExporter` for a structural type.
+    otel?: { agentCallTraceContext: (phaseId: string, agentName: string) => { traceparent: string; spanId: string } | null } | null;
   };
   console: {
     agentStarted: (name: string, model: string, sessionId: string) => Promise<void>;
@@ -929,6 +932,19 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     // WHOLE run rather than on the first call of each phase. See
     // `assertRunBudget` for why it is checked before, not after.
     assertRunBudget(run);
+    // Outbound OTel propagation (SPF's otel-sdk extension): the CURRENTLY
+    // OPEN agent-call span's own trace context, when one exists — `null`
+    // whenever `observability.otel` is unconfigured for this run (the
+    // common case, and byte-identical to before this field existed) or the
+    // exporter has no agent call open (shouldn't happen here — agent_start
+    // fires before `send()` is ever reached — but a `null` is a silent
+    // no-op either way, never an error). `otelBlock` threads the SAME
+    // endpoint/headers/service_name through so `agent_flue.ts` can install
+    // its own (separate, process-scoped) http/undici propagation without
+    // needing the whole `SFConfig` — see `data_types.ts`'s `AgentRequest.
+    // otel` doc comment.
+    const otelBlock = run.cfg.observability.otel;
+    const otelCtx = otelBlock ? (run.tracer.otel?.agentCallTraceContext(phase.phase_id, agent.name) ?? null) : null;
     const request: AgentRequest = {
       prompt: promptText,
       system_prompt: systemText,
@@ -943,6 +959,16 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       flue_db_path: path.join(run.data_dir, "flue.db"),
       env: agentEnv(agent),
       sandbox: spec,
+      otel:
+        otelCtx && otelBlock
+          ? {
+              traceparent: otelCtx.traceparent,
+              x_request_id: otelCtx.spanId,
+              endpoint: otelBlock.endpoint,
+              headers: otelBlock.headers,
+              service_name: otelBlock.service_name,
+            }
+          : undefined,
     };
     const forward = eventForwarder(run, phase, agent.name, agent.coding_agent);
     // Best-effort, fire-and-forget: these fire from a plain process-lifecycle
