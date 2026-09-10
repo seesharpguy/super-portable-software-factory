@@ -1,5 +1,5 @@
 /**
- * OpenTelemetry span export (v1): a config-gated, lossy, fire-and-forget
+ * OpenTelemetry span export (v2): a config-gated, lossy, fire-and-forget
  * PROJECTION of the trace SQLite already holds. Read this header before
  * changing anything here — every paragraph is a constraint that survived an
  * adversarial review, not a preference.
@@ -12,35 +12,84 @@
  * ever throw into a caller, block a caller, or be awaited by a caller other
  * than the two shutdown paths named under LIFECYCLE below.
  *
- * SPANS ONLY. No `resourceMetrics`, no `resourceLogs`. The OTLP metrics data
- * model (temporality, monotonicity, cumulative-vs-delta) is exactly where a
- * hand-rolled encoder produces numbers a backend silently misreads, and a
- * wrong cost number is worse than no cost number. Token counts and dollars
- * ride as span ATTRIBUTES instead. Do not "just add metrics" here.
+ * v2 CHANGE (SDK ENCODER SWAP). v1 hand-rolled the entire OTLP/HTTP-JSON wire
+ * format with its own `fetch()` call. v2 keeps every invariant below —
+ * public API, the deterministic sha256 id scheme, the attribute allowlist,
+ * the bounded queue, the per-run lifecycle — byte-for-byte, and replaces
+ * ONLY the encoder: spans are now plain objects that structurally satisfy
+ * `@opentelemetry/sdk-trace`'s `ReadableSpan` interface (that package's own
+ * concrete `Span`/`SpanImpl` class is NOT part of its public API surface —
+ * only the type is exported — so a duck-typed object is not a workaround,
+ * it is the intended integration point), handed to a real
+ * `@opentelemetry/exporter-trace-otlp-http` `OTLPTraceExporter` instance.
+ * `IdGenerator.generateSpanId()` takes no arguments and cannot be handed our
+ * sha256 ids any other way — this is why the SDK is used AROUND our own ids
+ * rather than asked to generate them.
+ *
+ * VERIFIED WIRE-SHAPE DIFFERENCES from the old hand-rolled encoder (proven
+ * against a real in-process OTLP/HTTP receiver in `src/test/otel.test.ts`,
+ * not assumed from docs — this was v1's #1 documented open risk):
+ *   - `intValue` is a JSON NUMBER (`{"intValue":1234}`), not a numeric
+ *     STRING. The real JSON serializer's `toAnyValue()` (`@opentelemetry/
+ *     otlp-transformer`) picks `intValue` whenever `Number.isInteger(value)`
+ *     and never stringifies it — proto3 JSON's "int64 as string" rule is a
+ *     PROTOBUF-JSON convention this exporter's plain-JSON path does not
+ *     follow. A whole-number COST (e.g. exactly `$2`) is therefore
+ *     indistinguishable on the wire from an integer attribute — a real,
+ *     accepted limitation of `number`-typed OTel attributes, not a bug
+ *     introduced here.
+ *   - `startTimeUnixNano`/`endTimeUnixNano`/event `timeUnixNano` ARE
+ *     STRINGS (`encodeAsString` — nanoseconds via `BigInt`, so no
+ *     precision loss past 2^53), matching v1's own precision-driven choice.
+ *   - trace/span ids are lowercase hex STRINGS (the JSON encoder's
+ *     `encodeSpanContext` is `identity` — our own hex ids pass straight
+ *     through), matching v1 exactly.
+ *   - a ROOT span's `parentSpanId` is OMITTED from the wire object entirely
+ *     (no key at all) rather than v1's explicit `""` — both spellings mean
+ *     "no parent" per the OTLP proto3-JSON mapping (proto3 JSON drops
+ *     zero-value/unset fields by default); `src/test/otel.test.ts` asserts
+ *     `undefined`, not `""`, for a root span now.
+ *   - extra fields the real exporter adds that v1 never had (`flags`,
+ *     `traceState`, `droppedAttributesCount`, `droppedEventsCount`,
+ *     `droppedLinksCount`, `links: []`) are additive and harmless — nothing
+ *     downstream reads a fixed field LIST, only named fields.
+ *
+ * SPANS ONLY (from THIS module's own per-run exporter). No `resourceLogs`.
+ * Metrics are now real (see `otel_metrics.ts`) but live on their own
+ * PROCESS-scoped pipeline with their own real `@opentelemetry/sdk-metrics`
+ * temporality/aggregation handling — never hand-rolled, and never mixed into
+ * this module's `resourceSpans` payload.
  *
  * EXPLICIT CONFIG ONLY. Activation requires `observability.otel.endpoint` in
  * the config file. This module NEVER reads `OTEL_EXPORTER_OTLP_ENDPOINT` or
- * any other ambient exporter variable: an unrelated shell variable inherited
- * from a CI image or a coworker's dotfiles must not be able to turn a repo's
- * telemetry egress on. (`SPF_CLAUDE_CMD` is not a precedent for the opposite:
- * that variable is SPF-namespaced and only redirects a LOCAL subprocess — it
- * moves no data off the machine.)
+ * any other ambient exporter variable AS AN ACTIVATION SWITCH: an unrelated
+ * shell variable inherited from a CI image or a coworker's dotfiles must not
+ * be able to turn a repo's telemetry egress on. `observability.otel.
+ * allow_env` (see `data_types.ts`'s `OTelConfigSchema`) is the one narrow,
+ * opt-in exception: when `true` AND the block is ALREADY active (`endpoint`
+ * set), `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` may
+ * SUPPLEMENT it (an env-injected token in CI, say) — never activate it from
+ * nothing, and config-declared values always win over the env on conflict.
+ * (`SPF_CLAUDE_CMD` is not a precedent for the opposite: that variable is
+ * SPF-namespaced and only redirects a LOCAL subprocess — it moves no data
+ * off the machine.)
  *
  * ATTRIBUTE ALLOWLIST — exfiltration is the top risk here, because
  * `EventRecord.payload` carries the repository's own source code (tool args,
  * result snippets, diffs, prompts, envelope contents, the operator's request
  * text). The allowlist, in full: phase name/kind/owner/status/seq/attempt,
- * chain name, adw_id, agent name/model/coding_agent, gate name + passed +
- * violation COUNT, token counts (UsageBreakdown fields) + costs, durations
- * (implied by span start/end), and event TYPE. Everything else is excluded by
- * construction, not by filtering:
+ * chain name, adw_id, agent name/model/coding_agent/lora_adapter, gate name +
+ * passed + violation COUNT, token counts (UsageBreakdown fields) + costs,
+ * durations (implied by span start/end), and event TYPE. Everything else is
+ * excluded by construction, not by filtering:
  *   - This module reads `EventRecord.payload` for FINITE NUMBERS ONLY (see
  *     `numOrNull`) and only under known UsageBreakdown/cost keys. A string can
  *     never reach an attribute through the payload path. Do not add a
- *     `stringValue` read from `payload` — that single line is the whole
+ *     string read from `payload` — that single line is the whole
  *     exfiltration bug.
- *   - Agent model/coding_agent come from the typed `AgentConfig` handed to
- *     `recordAgentSession` (config data), NOT from the `agent_start` payload.
+ *   - Agent model/coding_agent/lora_adapter come from the typed `AgentConfig`
+ *     handed to `recordAgentSession` (config data), NOT from the
+ *     `agent_start` payload.
  *   - Tool spans are named from `record.name`'s prefix up to the first ":"
  *     (see `toolSpanName`). The full `record.name` is a HUMAN LABEL built from
  *     real tool arguments (`agent_flue.ts`'s `labelFor` -> "bash: cat
@@ -71,7 +120,9 @@
  * `agent:<phase_id>:<agent>:<n>` for an agent call, `tool:<phase_id>:<event_id>`
  * for a tool call). Determinism means a re-export of the same run lands on the
  * same ids instead of duplicating the trace, and a child span can name its
- * parent's id without waiting for the parent to be emitted.
+ * parent's id without waiting for the parent to be emitted. UNCHANGED in v2:
+ * the SDK is used to ENCODE spans we already fully control, never to
+ * generate their ids.
  * `EventRecord.parent_id` is structurally ALWAYS EMPTY today (SPF's phases are
  * flat siblings; nothing writes nesting), so there is no recorded hierarchy to
  * mine — the parenting above is reconstructed from phase_id + agent-call
@@ -79,9 +130,9 @@
  *
  * PHASE SPANS ARE EMITTED AT PHASE END ONLY. A hung or killed phase is
  * therefore INVISIBLE to the backend (its buffered span events die with it),
- * while SQLite still shows it as `running`. Deliberate v1 trade: streaming a
- * span at phase start would require mutating an already-sent span, which OTLP
- * has no notion of. Recorded here so it is a known gap, not a surprise.
+ * while SQLite still shows it as `running`. Deliberate v1 trade, unchanged:
+ * streaming a span at phase start would require mutating an already-sent
+ * span, which OTLP has no notion of.
  *
  * INBOUND TRACEPARENT. When a valid W3C `traceparent` is present in the
  * environment, its trace-id becomes this run's trace-id and the run's root
@@ -91,6 +142,37 @@
  * constructed and nothing is sent, traceparent or not. Garbage is rejected
  * silently (see `parseTraceparent`) — a malformed variable must degrade to
  * "own root", never to an error.
+ *
+ * OUTBOUND PROPAGATION (new in v2). `agentCallTraceContext()` hands back the
+ * CURRENTLY OPEN agent call's own trace context (same traceId, same sha256
+ * span id already computed by `openAgentCall`) so a caller can propagate it
+ * onward — `agents.ts`'s `send()` reads it into `AgentRequest.otel`, which
+ * `agent_cc.ts`'s single `spawn()` choke point turns into `TRACEPARENT` +
+ * `ANTHROPIC_CUSTOM_HEADERS` env vars for the `claude` CLI subprocess (see
+ * that module's own header for the verified env var format). This is a
+ * READ of state this exporter already tracks for its own id scheme — it
+ * does not change what gets exported, and it is `null` (a silent no-op)
+ * whenever no agent call is currently open.
+ *
+ * LORA ADAPTER ATTRIBUTE. `loraAdapterFor()` resolves `spf.lora_adapter` —
+ * see its own doc comment for the two zero-config conventions plus the
+ * explicit `AgentConfig.lora_adapter` override, checked in that order. The
+ * attribute is omitted entirely when nothing resolves — never a blind copy
+ * of a non-LoRA model id.
+ *
+ * METRICS FAN-OUT (new in v2). `recordPhase`/`recordGate`/`closeAgentCall`
+ * additionally fan out to an OPTIONAL, PROCESS-scoped `OtelMetrics` handle
+ * (see `otel_metrics.ts`) — `spf.phase.duration`, `spf.gate.result`,
+ * `spf.tokens`, `spf.cost_usd`, `spf.agent.calls`. `resolveOtelExporter`
+ * resolves it once via `otel_metrics.resolveOtelMetrics(cfg)` and holds the
+ * reference; every OTHER call site (`tracer.ts`, `agents.ts`) is BYTE-
+ * IDENTICAL to before metrics existed. The v1 "dropped spans" resource
+ * attribute hack is GONE (a `Resource` is immutable per-exporter-instance in
+ * the real SDK — there is no home for a value that changes after
+ * construction) — dropped-span/dropped-event counts now ride as real
+ * Counters on the metrics pipeline instead, recorded once (same "once, on
+ * the final flush" cadence the warn log already used), with the warn log
+ * itself UNCHANGED as the fallback when metrics are off.
  *
  * LIFECYCLE (copied from `notify/notifier.ts`'s discipline, with one
  * addition `notify` doesn't need — see RUN-SCOPED CLEANUP below). A
@@ -133,24 +215,37 @@
  * Spans go into a BOUNDED queue (`MAX_QUEUED_SPANS`, drop-OLDEST) and leave in
  * batches (`BATCH_SPANS`, or `FLUSH_INTERVAL_MS`, whichever comes first) via an
  * UNREF'D timer that can never hold the process open. Dropped spans are
- * counted, reported once as a warn line, and exported as a resource attribute
- * on the final flush so the gap is visible in the backend too. The size
- * trigger schedules a timer rather than flushing inline, which also means a
- * synchronous burst of thousands of events exercises the bound (see the queue
- * test) instead of interleaving sends.
+ * counted and reported once as a warn line (and once as a metric, when one is
+ * configured — see METRICS FAN-OUT above). The size trigger schedules a timer
+ * rather than flushing inline, which also means a synchronous burst of
+ * thousands of events exercises the bound (see the queue test) instead of
+ * interleaving sends.
  *
- * WIRE FORMAT is hand-rolled OTLP/HTTP with a JSON body — no new npm
- * dependency for an optional, lossy projection. The shape that matters:
- * `{resourceSpans:[{resource:{attributes:[KeyValue]},scopeSpans:[{scope,spans:[Span]}]}]}`,
- * every attribute value wrapped in an AnyValue (`{stringValue}`/`{intValue}`/
- * `{doubleValue}`/`{boolValue}`), trace/span ids as lowercase hex strings, and
- * every uint64 nanosecond timestamp AS A STRING (a JSON number would lose
- * precision past 2^53 and backends reject it). `src/test/otel.test.ts` pins
- * this shape against an in-process receiver.
+ * WIRE TRANSPORT is `@opentelemetry/exporter-trace-otlp-http`'s real
+ * `OTLPTraceExporter`, JSON-encoded (its default) against the resolved
+ * `/v1/traces` URL — see the VERIFIED WIRE-SHAPE DIFFERENCES note above for
+ * exactly how its bytes differ from v1's hand-rolled ones.
+ * `keepAlive: false` is passed explicitly: the real Node HTTP agent defaults
+ * `keepAlive: true`, which would hold an open socket past this exporter's own
+ * bounded `drain()` — the same "must never be the reason a `spf` process
+ * lingers" requirement the unref'd flush timer already exists for.
+ * `timeoutMillis: SEND_TIMEOUT_MS` bounds the exporter's own internal
+ * retrying transport (up to 5 attempts, capped by this same deadline across
+ * all of them — verified against `@opentelemetry/otlp-exporter-base`'s
+ * `RetryingTransport` source) to the same budget the old hand-rolled
+ * `AbortController` enforced.
  */
 
 import { createHash } from "node:crypto";
-import type { AgentConfig, EventRecord, GateReport, OTelConfig, Phase, SFConfig } from "./data_types.ts";
+import type { Attributes, HrTime, SpanContext } from "@opentelemetry/api";
+import { SpanKind, TraceFlags } from "@opentelemetry/api";
+import { ExportResultCode } from "@opentelemetry/core";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { JsonTraceSerializer } from "@opentelemetry/otlp-transformer";
+import { resourceFromAttributes, type Resource } from "@opentelemetry/resources";
+import type { ReadableSpan, TimedEvent } from "@opentelemetry/sdk-trace";
+import { applyOtelEnvSupplement, type AgentConfig, type EventRecord, type GateReport, type OTelConfig, type Phase, type SFConfig } from "./data_types.ts";
+import { resolveOtelMetrics, type OtelMetrics } from "./otel_metrics.ts";
 
 // ── tunables (see BACKPRESSURE above) ───────────────────────────────────────
 const MAX_QUEUED_SPANS = 2048;
@@ -161,41 +256,12 @@ const SEND_TIMEOUT_MS = 2_000;
 /** Span events buffered per phase while it runs; a runaway phase cannot grow unbounded. */
 const MAX_EVENTS_PER_SPAN = 64;
 
-const SPAN_KIND_INTERNAL = 1;
 const STATUS_UNSET = 0;
 const STATUS_OK = 1;
 const STATUS_ERROR = 2;
 
-// ── OTLP/HTTP-JSON wire types (hand-rolled; see WIRE FORMAT above) ──────────
-type AnyValue = { stringValue: string } | { intValue: string } | { doubleValue: number } | { boolValue: boolean };
-interface KeyValue {
-  key: string;
-  value: AnyValue;
-}
-interface SpanEvent {
-  timeUnixNano: string;
-  name: string;
-  attributes: KeyValue[];
-}
-interface Span {
-  traceId: string;
-  spanId: string;
-  /** "" means "no parent" — OTLP/JSON's spelling for a root span. */
-  parentSpanId: string;
-  name: string;
-  kind: number;
-  startTimeUnixNano: string;
-  endTimeUnixNano: string;
-  attributes: KeyValue[];
-  events: SpanEvent[];
-  status: { code: number };
-}
-interface OtlpTracesPayload {
-  resourceSpans: Array<{
-    resource: { attributes: KeyValue[] };
-    scopeSpans: Array<{ scope: { name: string; version: string }; spans: Span[] }>;
-  }>;
-}
+/** Only what this module ever produces — string/number/boolean, never an array or bytes. */
+type Attrs = Record<string, string | number | boolean>;
 
 // ── pure helpers (exported so `src/test/otel.test.ts` can pin them) ─────────
 
@@ -293,18 +359,35 @@ export function endpointLabel(endpoint: string): string {
   }
 }
 
-/**
- * ISO-8601 -> uint64 nanoseconds AS A STRING (see WIRE FORMAT). Unparseable,
- * missing, or pre-epoch input falls back to `fallbackMs`, because a span with
- * a nonsense timestamp is rejected wholesale by most backends while a span
- * with an approximate one is still useful.
- */
-export function nanosFromIso(iso: string | null | undefined, fallbackMs: number = Date.now()): string {
+/** ISO -> epoch milliseconds, with a fallback for unparseable/missing/pre-epoch input. Shared by `nanosFromIso` and the internal `HrTime` builder below. */
+function resolveMs(iso: string | null | undefined, fallbackMs: number): number {
   const parsed = iso ? Date.parse(iso) : NaN;
-  const ms = Number.isFinite(parsed) && parsed >= 0 ? parsed : fallbackMs;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallbackMs;
+}
+
+/** ISO-8601 -> uint64 nanoseconds AS A STRING. Unparseable, missing, or pre-epoch input falls back to `fallbackMs`. Kept as its own public, string-returning helper — pinned by tests since before the SDK swap. */
+export function nanosFromIso(iso: string | null | undefined, fallbackMs: number = Date.now()): string {
+  const ms = resolveMs(iso, fallbackMs);
   // String concat, not BigInt math: ms is an integer, and appending six zeros
   // is exact where `ms * 1e6` would drift into float territory.
   return `${Math.floor(ms)}000000`;
+}
+
+/** Same fallback logic as `nanosFromIso`, as the `[seconds, nanoseconds]` tuple `ReadableSpan.startTime`/`endTime` actually want. */
+function hrTimeFromIso(iso: string | null | undefined, fallbackMs: number = Date.now()): HrTime {
+  const ms = resolveMs(iso, fallbackMs);
+  return [Math.floor(ms / 1000), Math.floor(ms % 1000) * 1_000_000];
+}
+
+/** Best-effort, informational only — never serialized to the wire (OTLP has no "duration" field; start/end carry it). */
+function hrDuration(start: HrTime, end: HrTime): HrTime {
+  let sec = end[0] - start[0];
+  let nano = end[1] - start[1];
+  if (nano < 0) {
+    sec -= 1;
+    nano += 1_000_000_000;
+  }
+  return sec < 0 ? [0, 0] : [sec, nano];
 }
 
 /**
@@ -346,11 +429,6 @@ function numOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-const str = (key: string, value: string): KeyValue => ({ key, value: { stringValue: value } });
-const int = (key: string, value: number): KeyValue => ({ key, value: { intValue: String(Math.trunc(value)) } });
-const dbl = (key: string, value: number): KeyValue => ({ key, value: { doubleValue: value } });
-const bool = (key: string, value: boolean): KeyValue => ({ key, value: { boolValue: value } });
-
 /** UsageBreakdown's token fields -> attribute suffixes. Numbers only, by construction. */
 const TOKEN_FIELDS: Array<[string, string]> = [
   ["input_tokens", "spf.tokens.input"],
@@ -368,6 +446,34 @@ const COST_FIELDS: Array<[string, string]> = [
   ["total_cost", "spf.cost.total"],
 ];
 
+/**
+ * `spf.lora_adapter` — the served LoRA adapter name for this agent's model,
+ * when one can be determined. Checked in order, first match wins:
+ *   1. `agent.lora_adapter` (explicit config) — set once per agent, the
+ *      unambiguous source of truth an operator can always fall back to.
+ *   2. `provider/base:adapter` — an explicit adapter suffix after the LAST
+ *      ":" in the model id (e.g. `vllm/nemotron-base:my-lora` -> `my-lora`).
+ *   3. `provider/adapter-name` — no ":" in the model id, but the id itself
+ *      contains "-lora-" (case-insensitive) — this org's own vLLM/Switchyard
+ *      served-model naming convention (`k8s/manifests/switchyard/
+ *      configmap-routes.yaml`: "id MUST equal the name= half of the matching
+ *      --lora-modules entry", e.g. `nemotron-lora-placeholder`) — the WHOLE
+ *      model id (minus the `provider/` prefix) IS the adapter name in this
+ *      convention, since vLLM resolves LoRA adapters by served-model name,
+ *      not by a base-model-plus-suffix split.
+ * No match on any of the three -> `null`, and the attribute is omitted
+ * entirely — never a blind copy of a non-LoRA model id.
+ */
+export function loraAdapterFor(agent: { model: string; lora_adapter?: string | null }): string | null {
+  if (agent.lora_adapter) return clip(agent.lora_adapter);
+  const model = agent.model ?? "";
+  const slash = model.indexOf("/");
+  const modelId = slash === -1 ? model : model.slice(slash + 1);
+  const colon = modelId.lastIndexOf(":");
+  if (colon !== -1 && colon < modelId.length - 1) return clip(modelId.slice(colon + 1));
+  return /-lora-/i.test(modelId) ? clip(modelId) : null;
+}
+
 // ── the exporter ────────────────────────────────────────────────────────────
 
 export interface OtelExporterInit {
@@ -380,11 +486,13 @@ export interface OtelExporterInit {
   log?: (message: string) => void;
   /** Injectable for tests; defaults to `process.env`. Only ever read for `traceparent`. */
   env?: NodeJS.ProcessEnv;
+  /** The process-scoped metrics handle (see `otel_metrics.ts`), or `null` when metrics are off/unconfigured. Injectable for tests. */
+  metrics?: OtelMetrics | null;
 }
 
 interface OpenAgentCall {
   spanId: string;
-  startNano: string;
+  startTime: HrTime;
 }
 
 export class OtelExporter {
@@ -394,13 +502,18 @@ export class OtelExporter {
   private readonly serviceName: string;
   private readonly url: string;
   private readonly log: (message: string) => void;
+  private readonly metrics: OtelMetrics | null;
 
   private readonly traceId: string;
   /** "" unless an inbound traceparent parented this run — see INBOUND TRACEPARENT. */
   private readonly rootParentSpanId: string;
   private readonly rootSpanId: string;
 
-  private queue: Span[] = [];
+  private readonly resource: Resource;
+  private readonly scope = { name: "spf", version: "1" };
+  private readonly spanExporter: OTLPTraceExporter;
+
+  private queue: ReadableSpan[] = [];
   private dropped = 0;
   private droppedEvents = 0;
   private warnedDrops = false;
@@ -411,7 +524,7 @@ export class OtelExporter {
   private pending = new Set<Promise<void>>();
 
   /** Span events buffered until their phase span exists. Key "" = the root run span. */
-  private bufferedEvents = new Map<string, SpanEvent[]>();
+  private bufferedEvents = new Map<string, TimedEvent[]>();
   /**
    * Phases whose span has already gone out. Events DO arrive after a phase
    * span is emitted — `run.finish()`'s `not_accepted` error names the last
@@ -420,12 +533,12 @@ export class OtelExporter {
    * nothing will ever drain.
    */
   private emittedPhases = new Set<string>();
-  /** `<phase_id> <agent>` -> the open agent call, for closing it and parenting tool spans. */
+  /** `<phase_id> <agent>` -> the open agent call, for closing it and parenting tool spans. */
   private openAgents = new Map<string, OpenAgentCall>();
   /** How many times an agent has been called in a phase, so a retry gets its own span id. */
   private agentCalls = new Map<string, number>();
   /** agent name -> config metadata, from `recordAgentSession` (typed config, never a payload). */
-  private agentMeta = new Map<string, { model: string; codingAgent: string }>();
+  private agentMeta = new Map<string, { model: string; codingAgent: string; loraAdapter: string | null }>();
 
   private runStartedAtMs = Date.now();
   private rootEmitted = false;
@@ -437,11 +550,27 @@ export class OtelExporter {
     this.serviceName = init.cfg.service_name || "spf";
     this.url = resolveTracesUrl(init.cfg.endpoint);
     this.log = init.log ?? ((m: string) => console.error(m));
+    this.metrics = init.metrics ?? null;
 
     const inbound = inboundTraceparent(init.env ?? process.env);
     this.traceId = inbound ? inbound.traceId : traceIdFor(init.adwId);
     this.rootParentSpanId = inbound ? inbound.spanId : "";
     this.rootSpanId = spanIdFor(`run:${init.adwId}`);
+
+    this.resource = resourceFromAttributes({
+      "service.name": this.serviceName,
+      "spf.adw_id": this.adwId,
+      "spf.chain": this.chainName,
+    });
+    this.spanExporter = new OTLPTraceExporter({
+      url: this.url,
+      headers: init.cfg.headers,
+      timeoutMillis: SEND_TIMEOUT_MS,
+      // The Node HTTP agent defaults `keepAlive: true`, which would hold a
+      // socket open past this exporter's own bounded drain() — see the
+      // module header's WIRE TRANSPORT note.
+      keepAlive: false,
+    });
   }
 
   // ── fan-out seams (called from tracer.ts's write methods) ────────────────
@@ -492,11 +621,11 @@ export class OtelExporter {
       case "handoff":
       case "error":
         this.bufferSpanEvent(record.phase_id, {
-          timeUnixNano: nanosFromIso(record.started_at ?? tsIso),
+          time: hrTimeFromIso(record.started_at ?? tsIso),
           name: record.type,
           // `record.name` is code- or config-declared (a phase name, a gate
           // name, "paths_touched"), never agent output — unlike payload.
-          attributes: [str("spf.event.type", record.type), str("spf.event.name", clip(record.name))],
+          attributes: { "spf.event.type": record.type, "spf.event.name": clip(record.name) },
         });
         return;
       default:
@@ -515,29 +644,37 @@ export class OtelExporter {
     if (!phase.ended_at) return;
     const spanId = spanIdFor(phase.phase_id);
     this.emittedPhases.add(phase.phase_id);
-    const attributes: KeyValue[] = [
-      str("spf.adw_id", this.adwId),
-      str("spf.chain", this.chainName),
-      str("spf.phase.name", clip(phase.params.name)),
-      str("spf.phase.kind", clip(phase.params.kind)),
-      str("spf.phase.owner", clip(phase.params.owner)),
-      str("spf.phase.status", clip(phase.status)),
-      int("spf.phase.seq", phase.seq),
-      int("spf.phase.attempt", phase.attempt),
-    ];
-    this.enqueue({
-      traceId: this.traceId,
-      spanId,
-      parentSpanId: this.rootSpanId,
-      name: `phase ${phase.params.name}`,
-      kind: SPAN_KIND_INTERNAL,
-      startTimeUnixNano: nanosFromIso(phase.started_at, this.runStartedAtMs),
-      endTimeUnixNano: nanosFromIso(phase.ended_at),
-      attributes,
-      // `phase.error` is deliberately absent: agent- and repo-derived text.
-      // The ERROR status is the whole signal a backend gets.
-      status: { code: phase.status === "success" ? STATUS_OK : STATUS_ERROR },
-      events: this.takeBufferedEvents(phase.phase_id),
+    const attributes: Attrs = {
+      "spf.adw_id": this.adwId,
+      "spf.chain": this.chainName,
+      "spf.phase.name": clip(phase.params.name),
+      "spf.phase.kind": clip(phase.params.kind),
+      "spf.phase.owner": clip(phase.params.owner),
+      "spf.phase.status": clip(phase.status),
+      "spf.phase.seq": Math.trunc(phase.seq),
+      "spf.phase.attempt": Math.trunc(phase.attempt),
+    };
+    const start = hrTimeFromIso(phase.started_at, this.runStartedAtMs);
+    const end = hrTimeFromIso(phase.ended_at);
+    this.enqueue(
+      this.makeSpan({
+        spanId,
+        parentSpanId: this.rootSpanId,
+        name: `phase ${phase.params.name}`,
+        start,
+        end,
+        attributes,
+        // `phase.error` is deliberately absent: agent- and repo-derived text.
+        // The ERROR status is the whole signal a backend gets.
+        statusCode: phase.status === "success" ? STATUS_OK : STATUS_ERROR,
+        events: this.takeBufferedEvents(phase.phase_id),
+      }),
+    );
+    const durationSeconds = (end[0] + end[1] / 1e9) - (start[0] + start[1] / 1e9);
+    this.metrics?.recordPhaseDuration(Math.max(0, durationSeconds), {
+      kind: phase.params.kind,
+      owner: phase.params.owner,
+      status: phase.status,
     });
   }
 
@@ -548,15 +685,16 @@ export class OtelExporter {
    */
   recordGate(phase: Phase, gate: string, report: GateReport, attempt: number): void {
     this.bufferSpanEvent(phase.phase_id, {
-      timeUnixNano: nanosFromIso(null),
+      time: hrTimeFromIso(null),
       name: report.passed ? "gate_pass" : "gate_fail",
-      attributes: [
-        str("spf.gate.name", clip(gate)),
-        bool("spf.gate.passed", report.passed),
-        int("spf.gate.violation_count", report.violations.length),
-        int("spf.gate.attempt", attempt),
-      ],
+      attributes: {
+        "spf.gate.name": clip(gate),
+        "spf.gate.passed": report.passed,
+        "spf.gate.violation_count": Math.trunc(report.violations.length),
+        "spf.gate.attempt": Math.trunc(attempt),
+      },
     });
+    this.metrics?.recordGateResult(clip(gate), report.passed);
   }
 
   /**
@@ -568,7 +706,11 @@ export class OtelExporter {
    * measure).
    */
   recordAgentSession(agent: AgentConfig): void {
-    this.agentMeta.set(agent.name, { model: agent.model, codingAgent: agent.coding_agent });
+    this.agentMeta.set(agent.name, {
+      model: agent.model,
+      codingAgent: agent.coding_agent,
+      loraAdapter: loraAdapterFor(agent),
+    });
   }
 
   /**
@@ -580,6 +722,21 @@ export class OtelExporter {
     this.emitRootSpan(ok ? "success" : "fail", ok ? STATUS_OK : STATUS_ERROR);
   }
 
+  // ── outbound propagation seam (new in v2 — see the header) ───────────────
+
+  /**
+   * The currently-open agent call's trace context — `null` when otel has no
+   * agent call open for this phase+agent pair right now (agent_start hasn't
+   * fired, or already closed). `agents.ts`'s `send()` reads this into
+   * `AgentRequest.otel`; a `null` here just means that field stays unset, a
+   * plain no-op for every backend that doesn't propagate it.
+   */
+  agentCallTraceContext(phaseId: string, agentName: string): { traceparent: string; spanId: string } | null {
+    const open = this.openAgents.get(this.agentKey(phaseId, agentName));
+    if (!open) return null;
+    return { traceparent: `00-${this.traceId}-${open.spanId}-01`, spanId: open.spanId };
+  }
+
   // ── queue + batching ────────────────────────────────────────────────────
 
   /** Queued spans and spans/events dropped so far. For tests and diagnostics. */
@@ -589,15 +746,18 @@ export class OtelExporter {
 
   /**
    * The exact JSON body the next flush would POST, without sending or
-   * draining. This is the seam `src/test/otel.test.ts` uses to prove the
-   * allowlist holds — the assertion is on the literal bytes, so any future
-   * attribute that leaks a payload fails a test rather than a review.
+   * draining — via the SAME `JsonTraceSerializer` the real exporter uses
+   * internally, so this is not a second, possibly-diverging encoding path.
+   * This is the seam `src/test/otel.test.ts` uses to prove the allowlist
+   * holds — the assertion is on the literal bytes, so any future attribute
+   * that leaks a payload fails a test rather than a review.
    */
   pendingJson(): string {
-    return JSON.stringify(this.payloadFor(this.queue, false));
+    const bytes = JsonTraceSerializer.serializeRequest(this.queue);
+    return bytes ? Buffer.from(bytes).toString("utf-8") : "{}";
   }
 
-  private enqueue(span: Span): void {
+  private enqueue(span: ReadableSpan): void {
     if (this.queue.length >= MAX_QUEUED_SPANS) {
       this.queue.shift(); // drop OLDEST: the newest spans are the ones still explaining the run
       this.dropped += 1;
@@ -630,7 +790,11 @@ export class OtelExporter {
   /**
    * Send whatever is queued. Never throws, never rejects: a failed export is a
    * single redacted log line and a swallowed error, because the alternative is
-   * an observability feature that can fail a run.
+   * an observability feature that can fail a run. `OTLPTraceExporter.export()`
+   * itself already never throws and always calls its callback exactly once
+   * (verified against `@opentelemetry/otlp-exporter-base`'s
+   * `OTLPExportDelegate.export()` source) — the try/catch here is belt-and-
+   * braces for that contract, not a load-bearing guard.
    */
   async flush(isFinal: boolean = false): Promise<void> {
     if (this.timer) {
@@ -641,28 +805,25 @@ export class OtelExporter {
     if (this.queue.length === 0) return;
     const spans = this.queue;
     this.queue = [];
-    const body = JSON.stringify(this.payloadFor(spans, isFinal));
 
     if (isFinal && this.dropped > 0 && !this.warnedDrops) {
       this.warnedDrops = true;
       this.log(`spf: otel export dropped ${this.dropped} span(s) — the queue bound (${MAX_QUEUED_SPANS}) was hit`);
+      this.metrics?.recordDroppedSpans(this.dropped);
+      if (this.droppedEvents > 0) this.metrics?.recordDroppedSpanEvents(this.droppedEvents);
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
-    timer.unref?.();
     try {
-      const response = await fetch(this.url, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...(this.cfg.headers ?? {}) },
-        body,
-        signal: controller.signal,
+      await new Promise<void>((resolve) => {
+        this.spanExporter.export(spans, (result) => {
+          if (result.code !== ExportResultCode.SUCCESS) {
+            this.logFailureOnce(result.error?.message ?? String(result.error ?? "export failed"));
+          }
+          resolve();
+        });
       });
-      if (!response.ok) this.logFailureOnce(`HTTP ${response.status}`);
     } catch (error) {
       this.logFailureOnce((error as Error)?.message ?? String(error));
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -701,29 +862,63 @@ export class OtelExporter {
 
   // ── internals ───────────────────────────────────────────────────────────
 
+  private makeSpan(opts: {
+    spanId: string;
+    parentSpanId: string;
+    parentIsRemote?: boolean;
+    name: string;
+    start: HrTime;
+    end: HrTime;
+    attributes: Attrs;
+    statusCode: number;
+    events: TimedEvent[];
+  }): ReadableSpan {
+    const spanContext: SpanContext = { traceId: this.traceId, spanId: opts.spanId, traceFlags: TraceFlags.SAMPLED };
+    const parentSpanContext: SpanContext | undefined = opts.parentSpanId
+      ? { traceId: this.traceId, spanId: opts.parentSpanId, traceFlags: TraceFlags.SAMPLED, isRemote: opts.parentIsRemote ?? false }
+      : undefined;
+    return {
+      name: opts.name,
+      kind: SpanKind.INTERNAL,
+      spanContext: () => spanContext,
+      parentSpanContext,
+      startTime: opts.start,
+      endTime: opts.end,
+      status: { code: opts.statusCode },
+      attributes: opts.attributes as Attributes,
+      links: [],
+      events: opts.events,
+      duration: hrDuration(opts.start, opts.end),
+      ended: true,
+      resource: this.resource,
+      instrumentationScope: this.scope,
+      droppedAttributesCount: 0,
+      droppedEventsCount: 0,
+      droppedLinksCount: 0,
+    };
+  }
+
   private emitRootSpan(status: string, code: number): void {
     if (this.rootEmitted) return;
     this.rootEmitted = true;
-    this.enqueue({
-      traceId: this.traceId,
-      spanId: this.rootSpanId,
-      parentSpanId: this.rootParentSpanId,
-      name: `spf run ${this.chainName}`,
-      kind: SPAN_KIND_INTERNAL,
-      startTimeUnixNano: nanosFromIso(null, this.runStartedAtMs),
-      endTimeUnixNano: nanosFromIso(null),
-      attributes: [
-        str("spf.adw_id", this.adwId),
-        str("spf.chain", this.chainName),
-        str("spf.run.status", status),
-      ],
-      status: { code },
-      events: this.takeBufferedEvents(""),
-    });
+    const now = hrTimeFromIso(null);
+    this.enqueue(
+      this.makeSpan({
+        spanId: this.rootSpanId,
+        parentSpanId: this.rootParentSpanId,
+        parentIsRemote: true, // the only possible parent here is an INBOUND traceparent — always a remote context
+        name: `spf run ${this.chainName}`,
+        start: hrTimeFromIso(null, this.runStartedAtMs),
+        end: now,
+        attributes: { "spf.adw_id": this.adwId, "spf.chain": this.chainName, "spf.run.status": status },
+        statusCode: code,
+        events: this.takeBufferedEvents(""),
+      }),
+    );
   }
 
   private agentKey(phaseId: string, agentName: string): string {
-    return `${phaseId} ${agentName}`;
+    return `${phaseId} ${agentName}`;
   }
 
   private openAgentCall(phaseId: string, agentName: string, tsIso: string): void {
@@ -732,7 +927,7 @@ export class OtelExporter {
     this.agentCalls.set(key, n);
     this.openAgents.set(key, {
       spanId: spanIdFor(`agent:${phaseId}:${agentName}:${n}`),
-      startNano: nanosFromIso(tsIso),
+      startTime: hrTimeFromIso(tsIso),
     });
   }
 
@@ -741,15 +936,17 @@ export class OtelExporter {
     const open = this.openAgents.get(key);
     this.openAgents.delete(key);
     const meta = this.agentMeta.get(record.name);
-    const attributes: KeyValue[] = [
-      str("spf.adw_id", this.adwId),
-      str("spf.agent.name", clip(record.name)),
-    ];
+    const attributes: Attrs = {
+      "spf.adw_id": this.adwId,
+      "spf.agent.name": clip(record.name),
+    };
     if (meta) {
-      attributes.push(str("spf.agent.model", clip(meta.model)), str("spf.agent.coding_agent", clip(meta.codingAgent)));
+      attributes["spf.agent.model"] = clip(meta.model);
+      attributes["spf.agent.coding_agent"] = clip(meta.codingAgent);
       // gen_ai.* is the OTel semantic convention a GenAI-aware backend groups
       // by; the spf.* twins stay because they are what SPF's own queries use.
-      attributes.push(str("gen_ai.request.model", clip(meta.model)));
+      attributes["gen_ai.request.model"] = clip(meta.model);
+      if (meta.loraAdapter) attributes["spf.lora_adapter"] = meta.loraAdapter;
     }
 
     // NUMBERS ONLY out of payload — see the ATTRIBUTE ALLOWLIST note on
@@ -758,33 +955,57 @@ export class OtelExporter {
     const usageObj = usage && typeof usage === "object" ? (usage as Record<string, unknown>) : {};
     for (const [field, key2] of TOKEN_FIELDS) {
       const value = numOrNull(usageObj[field]);
-      if (value !== null) attributes.push(int(key2, value));
+      if (value !== null) attributes[key2] = Math.trunc(value);
     }
     for (const [field, key2] of COST_FIELDS) {
       const value = numOrNull(usageObj[field]);
-      if (value !== null) attributes.push(dbl(key2, value));
+      if (value !== null) attributes[key2] = value;
     }
     const totalTokens = numOrNull(record.tokens);
-    if (totalTokens !== null) attributes.push(int("spf.tokens.total", totalTokens));
+    if (totalTokens !== null) attributes["spf.tokens.total"] = Math.trunc(totalTokens);
     const inputTokens = numOrNull(usageObj["input_tokens"]);
-    if (inputTokens !== null) attributes.push(int("gen_ai.usage.input_tokens", inputTokens));
+    if (inputTokens !== null) attributes["gen_ai.usage.input_tokens"] = Math.trunc(inputTokens);
     const outputTokens = numOrNull(usageObj["output_tokens"]);
-    if (outputTokens !== null) attributes.push(int("gen_ai.usage.output_tokens", outputTokens));
+    if (outputTokens !== null) attributes["gen_ai.usage.output_tokens"] = Math.trunc(outputTokens);
+    // Semantic-convention twin of spf.tokens.cache_read — the vLLM/OpenAI-
+    // compatible `usage.prompt_tokens_details.cached_tokens` shape, already
+    // normalized into `cache_read_tokens` upstream (pi-ai's openai-completions
+    // adapter -> UsageBreakdown.add_turn -> this event's payload.usage) by
+    // the time it reaches this module; nothing new to read here beyond one
+    // more attribute name for the same already-present number.
+    const cacheReadTokens = numOrNull(usageObj["cache_read_tokens"]);
+    if (cacheReadTokens !== null) attributes["gen_ai.usage.cache_read.input_tokens"] = Math.trunc(cacheReadTokens);
     const cost = numOrNull(record.payload?.["cost"]);
-    if (cost !== null) attributes.push(dbl("spf.cost.total", cost));
+    if (cost !== null) attributes["spf.cost.total"] = cost;
 
-    this.enqueue({
-      traceId: this.traceId,
-      spanId: open?.spanId ?? spanIdFor(`agent:${record.phase_id}:${record.name}:orphan`),
-      parentSpanId: record.phase_id ? spanIdFor(record.phase_id) : this.rootSpanId,
-      name: `agent ${record.name}`,
-      kind: SPAN_KIND_INTERNAL,
-      startTimeUnixNano: open?.startNano ?? nanosFromIso(tsIso),
-      endTimeUnixNano: nanosFromIso(tsIso),
-      attributes,
-      status: { code: STATUS_UNSET }, // the phase span carries the verdict
-      events: [],
-    });
+    const start = open?.startTime ?? hrTimeFromIso(tsIso);
+    const end = hrTimeFromIso(tsIso);
+    this.enqueue(
+      this.makeSpan({
+        spanId: open?.spanId ?? spanIdFor(`agent:${record.phase_id}:${record.name}:orphan`),
+        parentSpanId: record.phase_id ? spanIdFor(record.phase_id) : this.rootSpanId,
+        name: `agent ${record.name}`,
+        start,
+        end,
+        attributes,
+        statusCode: STATUS_UNSET, // the phase span carries the verdict
+        events: [],
+      }),
+    );
+
+    if (meta) {
+      this.metrics?.recordAgentCall({ agent: record.name, model: meta.model, codingAgent: meta.codingAgent });
+      for (const [field, kind] of [
+        ["input_tokens", "input"],
+        ["output_tokens", "output"],
+        ["cache_read_tokens", "cache_read"],
+        ["cache_write_tokens", "cache_write"],
+      ] as const) {
+        const value = numOrNull(usageObj[field]);
+        if (value !== null && value !== 0) this.metrics?.recordTokens(kind, value, { agent: record.name, model: meta.model });
+      }
+      if (cost !== null && cost !== 0) this.metrics?.recordCost(cost, { agent: record.name, model: meta.model });
+    }
   }
 
   /**
@@ -799,21 +1020,21 @@ export class OtelExporter {
     const agentName = record.payload?.["agent"];
     const open = typeof agentName === "string" ? this.openAgents.get(this.agentKey(record.phase_id, agentName)) : undefined;
     const parent = open?.spanId ?? (record.phase_id ? spanIdFor(record.phase_id) : this.rootSpanId);
-    this.enqueue({
-      traceId: this.traceId,
-      spanId: spanIdFor(`tool:${record.phase_id}:${eventId}`),
-      parentSpanId: parent,
-      name: toolSpanName(record.name),
-      kind: SPAN_KIND_INTERNAL,
-      startTimeUnixNano: nanosFromIso(record.started_at ?? tsIso),
-      endTimeUnixNano: nanosFromIso(record.ended_at ?? tsIso),
-      attributes: [str("spf.adw_id", this.adwId), str("spf.event.type", record.type)],
-      status: { code: STATUS_UNSET },
-      events: [],
-    });
+    this.enqueue(
+      this.makeSpan({
+        spanId: spanIdFor(`tool:${record.phase_id}:${eventId}`),
+        parentSpanId: parent,
+        name: toolSpanName(record.name),
+        start: hrTimeFromIso(record.started_at ?? tsIso),
+        end: hrTimeFromIso(record.ended_at ?? tsIso),
+        attributes: { "spf.adw_id": this.adwId, "spf.event.type": record.type },
+        statusCode: STATUS_UNSET,
+        events: [],
+      }),
+    );
   }
 
-  private bufferSpanEvent(phaseId: string, event: SpanEvent): void {
+  private bufferSpanEvent(phaseId: string, event: TimedEvent): void {
     const key = phaseId && !this.emittedPhases.has(phaseId) ? phaseId : "";
     const list = this.bufferedEvents.get(key) ?? [];
     if (list.length >= MAX_EVENTS_PER_SPAN) {
@@ -824,30 +1045,10 @@ export class OtelExporter {
     this.bufferedEvents.set(key, list);
   }
 
-  private takeBufferedEvents(phaseId: string): SpanEvent[] {
+  private takeBufferedEvents(phaseId: string): TimedEvent[] {
     const events = this.bufferedEvents.get(phaseId) ?? [];
     this.bufferedEvents.delete(phaseId);
     return events;
-  }
-
-  private payloadFor(spans: Span[], isFinal: boolean): OtlpTracesPayload {
-    const attributes: KeyValue[] = [
-      str("service.name", this.serviceName),
-      str("spf.adw_id", this.adwId),
-      str("spf.chain", this.chainName),
-    ];
-    // The drop counter rides the FINAL flush's resource, so the gap is visible
-    // in the backend and not only in a log line nobody kept.
-    if (isFinal && this.dropped > 0) attributes.push(int("spf.otel.dropped_spans", this.dropped));
-    if (isFinal && this.droppedEvents > 0) attributes.push(int("spf.otel.dropped_span_events", this.droppedEvents));
-    return {
-      resourceSpans: [
-        {
-          resource: { attributes },
-          scopeSpans: [{ scope: { name: "spf", version: "1" }, spans }],
-        },
-      ],
-    };
   }
 
   private logFailureOnce(reason: string): void {
@@ -876,6 +1077,12 @@ const LIVE = new Map<string, OtelExporter>();
  * the default for every repo that has not configured an endpoint, and no
  * environment variable can change that (see EXPLICIT CONFIG ONLY).
  *
+ * Also resolves (once per process — see `otel_metrics.ts`'s own singleton
+ * guard) the shared, PROCESS-scoped `OtelMetrics` handle and holds a
+ * reference on the exporter, so `recordPhase`/`recordGate`/`closeAgentCall`
+ * can fan out to it without any OTHER call site (`tracer.ts`, `agents.ts`)
+ * needing to know metrics exist at all.
+ *
  * Registered under `opts.adwId` — the RESOLVED id (`session.ensure`'s own
  * `id`, never a caller's possibly-null `ctx.adw_id`) — which is exactly the
  * key `releaseOtelExporter` below looks it up by. A second registration
@@ -888,14 +1095,19 @@ export function resolveOtelExporter(
   cfg: SFConfig,
   opts: { adwId: string; chainName: string; log?: (message: string) => void; env?: NodeJS.ProcessEnv },
 ): OtelExporter | null {
-  const otel = cfg.observability.otel;
-  if (!otel || !otel.endpoint) return null;
+  const rawOtel = cfg.observability.otel;
+  if (!rawOtel || !rawOtel.endpoint) return null;
+  // `allow_env`'s narrow supplement — see `data_types.ts`'s
+  // `applyOtelEnvSupplement`: a no-op unless the block above is ALREADY
+  // active (it is, we just checked `endpoint`) AND `allow_env: true`.
+  const otel = applyOtelEnvSupplement(rawOtel, opts.env ?? process.env);
   const exporter = new OtelExporter({
     cfg: otel,
     adwId: opts.adwId,
     chainName: opts.chainName,
     log: opts.log,
     env: opts.env,
+    metrics: resolveOtelMetrics(cfg),
   });
   LIVE.set(opts.adwId, exporter);
   return exporter;
