@@ -101,11 +101,20 @@ record independent of the commit log.
   `@opentelemetry/instrumentation`, `@opentelemetry/instrumentation-http`,
   `@opentelemetry/instrumentation-undici`, `@opentelemetry/context-async-hooks`,
   `@flue/opentelemetry`.
-- `.npmrc` (new): `legacy-peer-deps=true` — `@flue/opentelemetry@2.0.4`
-  publishes a `peerDependencies` entry of `@flue/runtime: "workspace:^"`,
-  an unrewritten workspace-protocol range that breaks plain `npm ci`/
-  `npm install` with `EUNSUPPORTEDPROTOCOL` otherwise. See the file's own
-  comment; revisit once a fixed `@flue/opentelemetry` ships.
+- `.npmrc` (new, then REMOVED again — see the **Update (#81)** below):
+  `legacy-peer-deps=true` — `@flue/opentelemetry@2.0.4` publishes a
+  `peerDependencies` entry of `@flue/runtime: "workspace:^"`, an
+  unrewritten workspace-protocol range that breaks plain `npm ci`/
+  `npm install` with `EUNSUPPORTEDPROTOCOL` otherwise.
+  **Update (#81):** `@flue/opentelemetry@2.0.5` (shipped 2026-09-11)
+  rewrites the peer range properly (`@flue/runtime: "^2.0.5"`), so both
+  flue packages are bumped to exact-pinned `2.0.5` and the `.npmrc`
+  workaround is deleted — plain `npm ci` with npm's default peer
+  resolution is the verified acceptance path. `@flue/runtime`'s public
+  types (`dist/index.d.mts`) are byte-identical between 2.0.3 and 2.0.5,
+  and 2.0.5's `builtin-providers` chunk still carries the process-lifetime
+  `claimLoop()` the flue trace-unification design (#80) is built around —
+  so no code change rides along with the bump.
 
 Not part of this change (explicit owner decision): no Briefs-specific model
 provider, and no `BRIEFS_*` env var — this was OTel-extension work only.
