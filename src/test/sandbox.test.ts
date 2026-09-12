@@ -84,6 +84,7 @@ function makeRun(cfg: SFConfig, overrides: Partial<{ adw_id: string; repo_root: 
       retry: () => {},
       envelopeSummary: () => {},
       agentFinished: () => {},
+      note: () => {},
     },
     addUsage: () => {},
     saveAgentMap: () => {},

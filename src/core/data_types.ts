@@ -772,6 +772,39 @@ export const ConfigDefaultsSchema = v.object({
   // the machinery that decides whether its work passed.
   // .spf/ is the whole per-repo footprint now — no adws/ tree to protect.
   protected_files: v.optional(v.array(v.string()), () => [".spf/", "spf.config.yaml"]),
+  /**
+   * Paths a READ-ONLY (or write-restricted) agent may touch WITHOUT failing
+   * the phase — `core/permissions.ts`'s `enforce()` still rolls every one of
+   * them back (an agent's claimed report must never rest on a change that
+   * didn't survive), it just does not count that rollback as a breach.
+   *
+   * WHY THIS EXISTS: a lockfile is dependency-manager BOOKKEEPING, not the
+   * repo's intent — an agent that ran `npm install` (to read a package's
+   * real shape, say) rewrites `package-lock.json` as a side effect of a
+   * read, not an edit. Observed live: a read-only scout phase failed with
+   * "scout is read-only but modified 1 path(s): factory/content/
+   * package-lock.json — rolled back" over exactly this, for work that
+   * changed nothing an operator would call "the code."
+   *
+   * The four defaults are the lockfiles of every package manager this repo
+   * already builds against (npm, pnpm, yarn, bun) — additive, not
+   * exhaustive; a repo using another one adds its own pattern here. Same
+   * glob syntax as `protected_files`/`agents[].writes` (`permissions.ts`'s
+   * `globToRegex`), where a leading "**" followed by a path separator
+   * matches at any depth INCLUDING the repo root — so the packaged
+   * defaults below match a lockfile whether it sits at the top of the repo
+   * or nested under a subdirectory.
+   *
+   * Emptying this list (`read_only_ignore: []`) restores today's strict
+   * behavior exactly — every touched path outside an agent's own allowlist
+   * fails the phase, lockfiles included.
+   */
+  read_only_ignore: v.optional(v.array(v.string()), () => [
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/bun.lockb",
+  ]),
   data_dir: v.optional(v.string(), ".spf/data"),
   /**
    * RUN BUDGET CEILINGS — the two knobs that bound what one adw_id may spend.

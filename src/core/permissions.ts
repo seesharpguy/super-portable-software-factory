@@ -86,6 +86,19 @@ export function changedPaths(before: Record<string, string>, after: Record<strin
 function globToRegex(pattern: string): RegExp {
   let out = "";
   let i = 0;
+  // A LEADING "**/" is the common "any depth, including the repo root"
+  // idiom (gitignore, npm, ...) — "**/package-lock.json" must match both a
+  // root-level "package-lock.json" and a nested "a/b/package-lock.json".
+  // The plain "**" -> ".*" rule below (still applied to a "**" anywhere else
+  // in a pattern) cannot express that alone: ".*" still requires the
+  // literal "/" that follows it in the pattern text, so a root-level file
+  // with no directory prefix would never match. Only this one leading shape
+  // gets the optional-prefix translation; `defaults.read_only_ignore`'s own
+  // default patterns are exactly this shape.
+  if (pattern.startsWith("**/")) {
+    out += "(?:.*/)?";
+    i = 3;
+  }
   while (i < pattern.length) {
     const char = pattern[i];
     if (pattern.startsWith("**", i)) {
@@ -171,6 +184,11 @@ function rollBack(
   return result.status === 0 ? "rolled back" : "could not roll back";
 }
 
+/** True when `p` matches one of `defaults.read_only_ignore`'s patterns — dependency-manager bookkeeping (a lockfile), not the repo's intent. See that field's own doc comment (`data_types.ts`) for why it exists and what rolling one back "silently" means. */
+function isIgnorableChurn(p: string, cfg: SFConfig): boolean {
+  return (cfg.defaults.read_only_ignore ?? []).some((pattern) => matches(p, pattern));
+}
+
 /**
  * Compare the tree against `before`; undo and raise if the agent overstepped.
  *
@@ -180,27 +198,45 @@ function rollBack(
  * Detection alone would leave the repo holding the unauthorized change while
  * reporting a failure, so anything the agent introduced outside its allowlist
  * is rolled back before the phase dies. What it cannot undo, it names.
+ *
+ * `defaults.read_only_ignore` carves out one exception to "names, fails":
+ * an unauthorized change matching it is STILL rolled back (unconditionally —
+ * an ignored path is never left standing) but does not, on its own, fail the
+ * phase. `onIgnored`, when given, is called once with every such path before
+ * returning, so a caller with a logger (`agents.ts`'s `execute()`) can print
+ * the one required info line — this module has no logger of its own to call
+ * (`RunLike` is only `repo_root`/`cfg`), so the caller does the printing.
  */
 export function enforce(
   run: RunLike,
   _phase: unknown,
   agent: AgentConfig,
   before: Record<string, string>,
+  onIgnored?: (paths: string[]) => void,
 ): string[] {
   const after = snapshot(run);
   const touched = changedPaths(before, after);
   const breaches = touched.filter((p) => !permitted(p, agent, run.cfg));
   if (breaches.length === 0) return touched;
 
+  const ignored = breaches.filter((p) => isIgnorableChurn(p, run.cfg));
+  const realBreaches = breaches.filter((p) => !ignored.includes(p));
+
+  // Roll back EVERY breach, ignored ones included — restoring the tree is
+  // unconditional; only whether it fails the PHASE differs below.
   const outcomes = new Map(breaches.map((p) => [p, rollBack(run, p, before, after)]));
+
+  if (ignored.length > 0) onIgnored?.(ignored);
+  if (realBreaches.length === 0) return touched; // nothing left but ignored churn — rolled back, phase still passes
+
   const scope =
     agent.writes && agent.writes.length === 0
       ? "read-only"
       : agent.writes
         ? `limited to ${JSON.stringify(agent.writes)}`
         : `barred from ${JSON.stringify(run.cfg.defaults.protected_files)}`;
-  const detail = [...outcomes.entries()].map(([p, outcome]) => `  - ${p} — ${outcome}`).join("\n");
+  const detail = realBreaches.map((p) => `  - ${p} — ${outcomes.get(p)}`).join("\n");
   throw new PermissionBreach(
-    `${agent.name} is ${scope} but modified ${breaches.length} path(s):\n${detail}`,
+    `${agent.name} is ${scope} but modified ${realBreaches.length} path(s):\n${detail}`,
   );
 }
