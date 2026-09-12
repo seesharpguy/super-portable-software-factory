@@ -63,6 +63,7 @@ function makeRun(cfg: SFConfig, overrides: Partial<{ adw_id: string; repo_root: 
     adw_id,
     tokens: 0,
     cost: 0,
+    billable_tokens: 0,
     repo_root: overrides.repo_root ?? "/repo",
     spf_dir: null,
     data_dir: "/repo/.spf/data",

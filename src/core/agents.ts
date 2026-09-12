@@ -86,15 +86,57 @@ export function formatUsd(value: number): string {
   return `$${fixed.endsWith("0") ? fixed.slice(0, -1) : fixed}`;
 }
 
+/** Anthropic's own API — a `claude_code` agent talking to exactly this is billed honestly; anything else is a gateway/proxy standing in for it. */
+const ANTHROPIC_DEFAULT_BASE_URL_RE = /^https:\/\/api\.anthropic\.com\/?$/i;
+
+/**
+ * True when this run will dispatch at least one `claude_code` agent AND the
+ * environment's `ANTHROPIC_BASE_URL` points somewhere other than Anthropic's
+ * own API.
+ *
+ * WHY THIS MATTERS: `agent_cc.ts`'s `run()` reports `final.total_cost_usd`
+ * (the `claude` CLI's OWN number) into `UsageBreakdown.total_cost` verbatim
+ * — that figure is Anthropic's price table applied to whichever model the
+ * CLI thinks it called, computed CLIENT-SIDE with no visibility into what
+ * actually served the request. Pointed at a gateway (Ollama Cloud, a
+ * Cloudflare AI Gateway proxy, ...) fronting a different provider/billing
+ * model entirely (subscription, flat per-token gateway price, ...), that
+ * number is a plausible-looking ESTIMATE of what Anthropic would have
+ * charged for this many tokens — not a fact about what was actually billed.
+ * `Console.sessionFinished` reads this to change the run summary's "cost"
+ * line from a bare dollar figure to a labeled estimate rather than silently
+ * presenting a guess as ground truth.
+ *
+ * `env` defaults to `process.env` (already carrying `cfg.env`'s own
+ * defaults — see `applyConfigEnv`, applied once at CLI startup before any
+ * `Run` is constructed) but is overridable so a test never touches the
+ * real environment.
+ */
+export function isGatewayEstimatedCost(cfg: SFConfig, env: Record<string, string | undefined> = process.env): boolean {
+  const usesClaudeCode = cfg.agents.some((a) => a.coding_agent === "claude_code");
+  if (!usesClaudeCode) return false;
+  const baseUrl = env["ANTHROPIC_BASE_URL"];
+  if (!baseUrl || !baseUrl.trim()) return false;
+  return !ANTHROPIC_DEFAULT_BASE_URL_RE.test(baseUrl.trim());
+}
+
 /**
  * The accumulating totals a budget check reads. Structurally a subset of
- * `Run` (`core/runner.ts`) — `run.tokens`/`run.cost` are incremented by
- * `run.addUsage()` after every send — so the real `Run` satisfies it with no
- * adapter, and a test can pass a plain object with fake usage.
+ * `Run` (`core/runner.ts`) — `run.tokens`/`run.cost`/`run.billable_tokens`
+ * are incremented by `run.addUsage()` after every send — so the real `Run`
+ * satisfies it with no adapter, and a test can pass a plain object with fake
+ * usage.
+ *
+ * `tokens` (the display total, cache reads included) is kept on this
+ * interface for structural parity with `Run` even though `assertRunBudget`
+ * itself no longer reads it — only `billable_tokens` does. See
+ * `UsageBreakdown.billable_tokens`'s doc comment (`data_types.ts`) for why
+ * the two diverge.
  */
 export interface RunBudgetState {
   cfg: SFConfig;
   tokens: number;
+  billable_tokens: number;
   cost: number;
 }
 
@@ -122,9 +164,9 @@ export function assertRunBudget(run: RunBudgetState): void {
         `raise defaults.max_run_cost or split the work`,
     );
   }
-  if (maxTokens !== undefined && run.tokens >= maxTokens) {
+  if (maxTokens !== undefined && run.billable_tokens >= maxTokens) {
     throw new BudgetExceeded(
-      `run budget exceeded: ${run.tokens.toLocaleString("en-US")} tokens of max_run_tokens ` +
+      `run budget exceeded: ${run.billable_tokens.toLocaleString("en-US")} tokens of max_run_tokens ` +
         `${maxTokens.toLocaleString("en-US")} — raise defaults.max_run_tokens or split the work`,
     );
   }
@@ -661,6 +703,8 @@ interface RunForAgents {
   /** Run-total tokens/cost so far, mirrored by `addUsage` below — read by `assertRunBudget` before every send. */
   tokens: number;
   cost: number;
+  /** The BILLABLE half of `tokens` — what `assertRunBudget` actually checks `max_run_tokens` against. See `UsageBreakdown.billable_tokens`'s doc comment. */
+  billable_tokens: number;
   repo_root: string;
   spf_dir: string | null;
   data_dir: string;
@@ -692,7 +736,7 @@ interface RunForAgents {
     envelopeSummary: (envelope: EnvelopeBase, typeName: string) => Promise<void>;
     agentFinished: (name: string, tokens: number, cost: number) => Promise<void>;
   };
-  addUsage: (tokens: number, cost: number) => Promise<void>;
+  addUsage: (tokens: number, cost: number, billableTokens: number) => Promise<void>;
   saveAgentMap: (agent: string, entry: { session_id: string; model: string; coding_agent: string }) => void;
 }
 
@@ -990,7 +1034,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     }
     // SPEND IS RECORDED BEFORE THE EXTRACT CAN THROW: a failed extract must
     // not also lose this call's tokens/cost off the Run's ledger.
-    await run.addUsage(result.tokens, result.cost);
+    await run.addUsage(result.tokens, result.cost, result.usage.billable_tokens);
     spent.merge(result.usage);
     // opencode-ONLY: every subsequent send() in THIS phase (JSON-repair
     // retries, gate corrections) must target the real captured session, not

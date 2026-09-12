@@ -129,16 +129,28 @@ export class Console {
     });
   }
 
-  async sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string): Promise<void> {
+  /**
+   * `costIsEstimate` (default `false`, byte-identical to before this param
+   * existed): true when `run.cost_is_estimate` found a `claude_code` agent
+   * pointed at a non-Anthropic `ANTHROPIC_BASE_URL` (see `agents.ts`'s
+   * `isGatewayEstimatedCost`) — `total_cost_usd` from `claude`'s own CLI is
+   * Anthropic's price table applied client-side, which is a fact only when
+   * Anthropic itself served the request, and a labeled guess otherwise. The
+   * label is cosmetic only: `cost` itself is unchanged (still the real sum
+   * `UsageBreakdown.total_cost` accumulated), and nothing about the budget
+   * check (`assertRunBudget`) reads this flag.
+   */
+  async sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string, costIsEstimate: boolean = false): Promise<void> {
     if (this.finished) return;
     this.finished = true;
     const passed = this.results.filter((r) => r === "success").length;
     const status = ok ? paint("green", "✓ success") : paint("red", "✗ fail");
+    const costText = costIsEstimate ? `≈ $${cost.toFixed(4)} (claude_code estimate; gateway-billed)` : `$${cost.toFixed(4)}`;
     const rows = [
       ` ${paint("dim", "status")}   ${status}`,
       ` ${paint("dim", "phases")}   ${passed}/${this.results.length} passed`,
       ` ${paint("dim", "tokens")}   ${tokens.toLocaleString()}`,
-      ` ${paint("dim", "cost")}     $${cost.toFixed(4)}`,
+      ` ${paint("dim", "cost")}     ${costText}`,
       ` ${paint("dim", "adw_id")}   ${this.adwId}`,
       ` ${paint("dim", "db")}       ${dbPath}`,
       ` ${paint("dim", "next")}     ${paint("bold", `just phases ${this.adwId}`)}`,
@@ -146,7 +158,7 @@ export class Console {
     const rendered = panel(rows, "ADW complete", ok ? "green" : "red");
     this.sink(rendered);
     this.observer?.onSessionEnd?.(ok);
-    const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`;
+    const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · ${costText}`;
     await this.tracer.event(
       makeEventRecord({
         adw_id: this.adwId,
@@ -164,7 +176,7 @@ export class Console {
         ["adw_id", this.adwId],
         ["phases", `${passed}/${this.results.length}`],
         ["tokens", tokens.toLocaleString()],
-        ["cost", `$${cost.toFixed(4)}`],
+        ["cost", costText],
       ],
     });
   }

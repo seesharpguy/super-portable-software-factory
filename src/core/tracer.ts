@@ -128,6 +128,12 @@ const MIGRATIONS: Array<[string, string, string]> = [
   ["agent_sessions", "context_tokens", "INTEGER"],
   ["agent_sessions", "context_window", "INTEGER"],
   ["sessions", "archived", "INTEGER DEFAULT 0"],
+  // The BILLABLE half of `total_tokens` — see `UsageBreakdown.billable_tokens`'s
+  // own doc comment (`data_types.ts`) for why the two diverge. `total_tokens`
+  // is untouched (still every re-sent token, cache reads included); this is
+  // the new column `sessionAddUsage` also increments, so a trace db from
+  // before this existed just gets a column full of 0 until its next run.
+  ["sessions", "billable_tokens", "INTEGER DEFAULT 0"],
 ];
 
 export class Tracer {
@@ -326,10 +332,16 @@ export class Tracer {
     if (processesError) throw processesError;
   }
 
-  async sessionAddUsage(adwId: string, tokens: number, cost: number): Promise<void> {
+  /**
+   * `tokens`/`cost` are the DISPLAY totals (`total_tokens`, unchanged from
+   * before `billable_tokens` existed); `billableTokens` is the new column —
+   * see `UsageBreakdown.billable_tokens`'s doc comment for what it excludes
+   * and why. Both accumulate in the same row, same as before.
+   */
+  async sessionAddUsage(adwId: string, tokens: number, cost: number, billableTokens: number): Promise<void> {
     await this.db
-      .query("UPDATE sessions SET total_tokens=total_tokens+?, total_cost=total_cost+? WHERE adw_id=?")
-      .run(tokens, cost, adwId);
+      .query("UPDATE sessions SET total_tokens=total_tokens+?, total_cost=total_cost+?, billable_tokens=billable_tokens+? WHERE adw_id=?")
+      .run(tokens, cost, billableTokens, adwId);
   }
 
   // ── processes (adw_id → pid, so a hung run can be found and killed) ─────

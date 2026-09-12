@@ -109,6 +109,19 @@ export class Run {
   phases: Phase[] = [];
   tokens = 0;
   cost = 0;
+  /** The BILLABLE half of `tokens` — see `UsageBreakdown.billable_tokens`'s doc comment. What `assertRunBudget` actually checks `defaults.max_run_tokens` against; `tokens` stays the display total. */
+  billable_tokens = 0;
+  /**
+   * True when this run dispatches at least one `claude_code` agent AND
+   * `ANTHROPIC_BASE_URL` points somewhere other than Anthropic's own API —
+   * i.e. a gateway/proxy is standing in for Anthropic. Computed once, here,
+   * from the resolved config (see `agents.ts`'s `isGatewayEstimatedCost`),
+   * and read by `Console.sessionFinished` to label the run's printed cost
+   * as an estimate rather than a fact: `claude`'s own `total_cost_usd` is
+   * ANTHROPIC's price table applied to whatever the CLI thinks it called,
+   * which is honest only when Anthropic itself served the request.
+   */
+  cost_is_estimate: boolean;
   repo_root: string; // where every agent is spawned to work — always absolute
   /** Every git operation for this run, bound to repo_root. Never call git_helper directly. */
   git: GitHandle;
@@ -136,6 +149,7 @@ export class Run {
     this.notify = init.notifier ?? null;
     this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw", init.sink, init.observer);
     this.engineer = init.engineer;
+    this.cost_is_estimate = agents.isGatewayEstimatedCost(init.cfg);
     this.seq = init.startSeq;
     this.repo_root = init.repoRoot;
     this.spf_dir = init.sfDir;
@@ -154,10 +168,11 @@ export class Run {
   }
 
   // ── usage (run totals mirror what the tracer accumulates in the trace db) ─
-  async addUsage(tokens: number, cost: number): Promise<void> {
+  async addUsage(tokens: number, cost: number, billableTokens: number): Promise<void> {
     this.tokens += tokens;
     this.cost += cost;
-    await this.tracer.sessionAddUsage(this.adw_id, tokens, cost);
+    this.billable_tokens += billableTokens;
+    await this.tracer.sessionAddUsage(this.adw_id, tokens, cost, billableTokens);
     await this.console.notifyUsage(this.tokens, this.cost);
   }
 
@@ -211,7 +226,7 @@ export class Run {
       await this.tracer.phaseUpsert(phase);
       await this.tracer.sessionFinish(this.adw_id, false);
       await this.console.phaseEnded(phase, (performance.now() - clock) / 1000);
-      await this.console.sessionFinished(false, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
+      await this.console.sessionFinished(false, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db), this.cost_is_estimate);
       throw error;
     }
   }
@@ -242,7 +257,7 @@ export class Run {
       await this.console.note(`not accepted: ${note}`);
     }
     await this.tracer.sessionFinish(this.adw_id, ok);
-    await this.console.sessionFinished(ok, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db));
+    await this.console.sessionFinished(ok, this.tokens, this.cost, describeObservabilityDb(this.cfg.observability.db), this.cost_is_estimate);
     return ok ? 0 : 1;
   }
 }

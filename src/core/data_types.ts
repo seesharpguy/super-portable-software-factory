@@ -794,11 +794,20 @@ export const ConfigDefaultsSchema = v.object({
    * `agents.ts`'s `BudgetExceeded`.
    *
    * `max_run_cost` is USD (the same unit the provider's own usage.cost
-   * arrives in, summed by `UsageBreakdown`); `max_run_tokens` is TOTAL
-   * tokens, i.e. the spend number — every turn re-sends the whole
-   * conversation, so this counts cached re-reads too, exactly like the
-   * `total_tokens` column in `sessions` (see `ui/server/db.ts`'s `usage()`
-   * for why that number is much larger than "material moved").
+   * arrives in, summed by `UsageBreakdown`); `max_run_tokens` is BILLABLE
+   * tokens — `UsageBreakdown.billable_tokens` (input + cache-write + output),
+   * checked against `Run.billable_tokens`, NOT the `total_tokens` column
+   * `sessions` also carries for display. A prompt-caching backend (Ollama
+   * Cloud's kimi models, Anthropic's own caching) re-sends the whole
+   * conversation every turn as CACHE READS, which `total_tokens` counts and
+   * this ceiling does not: cache reads are billed (when billed at all) at a
+   * small fraction of input price, sometimes free, so a ceiling measured
+   * against the bigger number trips on bulk that cost nothing — observed
+   * live, one scout phase alone reported 1,311,740 total_tokens against a
+   * gateway that billed 189,321 uncached input + 17,908 output for it.
+   * `total_tokens` is kept exactly as before for anything display-only
+   * (the sessions-panel "tokens" line, the UI) — only the budget check
+   * changed which number it reads.
    *
    * Both are `> 0`, not `>= 0`: a zero ceiling would mean "no agent may ever
    * run", which is a config mistake, not a budget — it would fail the first
@@ -1651,6 +1660,24 @@ export class UsageBreakdown {
   // at the output rate. Report it nested under output, never added to it.
   reasoning_tokens = 0;
   total_tokens = 0;
+  /**
+   * The SPEND number, as distinct from `total_tokens` (the SIZE number).
+   * `input_tokens + output_tokens + cache_write_tokens` — `cache_read_tokens`
+   * excluded on purpose: a cache read is Anthropic's own prompt-caching
+   * discount (billed at a small fraction of the input rate, sometimes free
+   * on some gateways) for context the conversation already sent, not new
+   * material moved. `total_tokens` re-sends (and re-counts) the whole
+   * conversation every turn, so a long-running scout/build session's cache
+   * reads dwarf everything else in it (observed live: 1.31M total_tokens in
+   * one phase, of which 1.15M were cache reads the gateway did not bill as
+   * input) — a run-budget ceiling measured against `total_tokens` trips on
+   * cache-driven bulk that cost nothing, not on real spend. `assertRunBudget`
+   * (`agents.ts`) checks THIS field against `defaults.max_run_tokens`;
+   * `total_tokens` is kept, unchanged, for display (the sessions-panel
+   * "tokens" line, the UI) because an operator sizing context occupancy
+   * still needs the real re-send count, not the billable one.
+   */
+  billable_tokens = 0;
   input_cost = 0.0;
   output_cost = 0.0;
   cache_read_cost = 0.0;
@@ -1671,6 +1698,7 @@ export class UsageBreakdown {
     this.cache_write_tokens += usage.cacheWrite || 0;
     this.reasoning_tokens += usage.reasoning || 0;
     this.total_tokens += totalTokens;
+    this.billable_tokens += (usage.input || 0) + (usage.output || 0) + (usage.cacheWrite || 0);
     this.input_cost += cost.input || 0.0;
     this.output_cost += cost.output || 0.0;
     this.cache_read_cost += cost.cacheRead || 0.0;

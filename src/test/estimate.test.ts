@@ -100,7 +100,7 @@ async function seedSession(
     await tracer.phaseUpsert(phase);
     await tracer.event(makeEventRecord({ adw_id: adwId, phase_id: phase.phase_id, type: "agent_end", name: p.owner, tokens: p.tokens, payload: { cost: 0 } }));
   }
-  await tracer.sessionAddUsage(adwId, totals.tokens, totals.cost);
+  await tracer.sessionAddUsage(adwId, totals.tokens, totals.cost, totals.tokens);
   await tracer.sessionFinish(adwId, status === "success");
 }
 
