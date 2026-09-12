@@ -92,17 +92,28 @@
  * ?.traceId` — the thing that provably survives into the active context at
  * request time — and looks IT UP in `traceIdRegistrations`, rather than
  * trying to read a value off a context object that was never activated.
- * One deterministic trace id per adw_id, and flue's single claim loop
- * dispatches one submission's calls sequentially, so "latest registration
- * for this trace id" is correct within a run; two flue AGENTS dispatching
- * truly concurrently to overlapping traces (not the common case) could still
- * collide on this map, the same documented race `ollama_provider.ts`'s
- * static per-model-id headers already carry. `mostRecentRegistration` is a
- * last-resort, process-wide fallback (not scoped to any one trace id) for
- * the rarer case of a span whose trace id genuinely isn't in the map at all
- * — an unmapped/bookkeeping span `resolveFlueRootContext` failed to root,
- * which mints its own random trace id. The SAME registration carries this
- * session's `adw_id`/agent name (see `FlueSessionRegistration`) so a
+ * One deterministic trace id per adw_id (`otel.ts:556`'s `traceIdFor(adwId)`,
+ * reused for EVERY agent call in that run — `otel.ts:737`'s
+ * `agentCallTraceContext` varies only the span id, never the trace id), and
+ * `traceIdRegistrations` is keyed on that trace id alone, not on session id
+ * or span id. So "latest registration for this trace id wins" is exact
+ * within a run when its agents run one at a time — which is how a `fanout`
+ * attempt's own agents run: `fanout.ts:448` derives each attempt its OWN
+ * adw_id, so distinct fanout attempts get distinct trace ids and cannot
+ * collide here, regardless of `fanout`'s concurrency. The one real collision
+ * this map can still see is narrower and does not happen in SPF today: TWO
+ * AGENTS OVERLAPPING INSIDE ONE adw_id — a single run dispatching a second
+ * flue agent call before the first one's `unregisterFlueSessionTrace` has
+ * run — since both share that run's one trace id, the second
+ * `registerFlueSessionTrace` call overwrites the first agent's entry in
+ * `traceIdRegistrations` while its dispatch may still be in flight, and that
+ * agent's outbound request would then carry the OTHER agent's
+ * `x-correlation-id`/`x-spf-agent` (never a wrong `adw_id`, since both
+ * belong to the same run — only the wrong `agentName`). No chain SPF ships
+ * dispatches two agents concurrently within one adw_id; this is flagged as
+ * the mechanism's honest limit, not a bug being carried forward. The SAME
+ * registration carries this session's `adw_id`/agent name (see
+ * `FlueSessionRegistration`) so a
  * session's `x-correlation-id`/`x-spf-agent` ride the exact same "resolved
  * once per submission, read per real HTTP call" path as `traceparent` does,
  * via `GatewayHeadersPropagator` below, instead of the static-per-model-id
@@ -126,8 +137,9 @@
  *     resolve to an unparented root — flue's spans root a separate SDK
  *     trace exactly as v1 did, correlatable by `spf.adw_id`/time window.
  *     Degraded join, never an error and never MIS-attributed; the gateway
- *     headers for exactly this case fall back to `mostRecentRegistration`
- *     rather than going silent.
+ *     headers for exactly this case are simply ABSENT (no fallback identity
+ *     — see `GatewayHeadersPropagator.inject()` below) rather than guessing
+ *     at whichever session happened to register most recently.
  *   - flue's internal `executionContext.traceCarrier` (typed but not on
  *     the public `AgentDispatchRequest` surface) stays unused — noted here
  *     as flue's own escape hatch, not something SPF reaches into.
@@ -238,18 +250,6 @@ interface GatewayIdentity {
 const traceIdRegistrations = new Map<string, GatewayIdentity>();
 
 /**
- * The identity most recently passed to `registerFlueSessionTrace`, kept
- * process-wide (NOT removed by `unregisterFlueSessionTrace` — see that
- * function's doc) as `GatewayHeadersPropagator`'s last-resort fallback for a
- * span whose trace id isn't in `traceIdRegistrations` at all: flue's own
- * unmapped/bookkeeping spans (an unregistered session id, a malformed
- * traceparent — see `resolveFlueRootContext`'s doc) mint a brand-new random
- * trace id that was never registered under. `undefined` until the first
- * `registerFlueSessionTrace` call in this process.
- */
-let mostRecentRegistration: GatewayIdentity | undefined;
-
-/**
  * Parses the W3C `traceId` segment out of a `traceparent` string via a real
  * `propagation.extract`/`getSpanContext` round trip — the SAME extraction
  * `resolveFlueRootContext` performs, so "the trace id we index
@@ -272,14 +272,12 @@ function traceIdFromTraceparent(traceparent: string): string | undefined {
  * minted by SPF and handed to `init(SfAgent, { id })`. Overwrites a prior
  * registration for the same id (a same-phase retry is the same logical call;
  * the current call wins). Also indexes the SAME identity under this
- * registration's parsed trace id (`traceIdRegistrations`) and records it as
- * the process-wide `mostRecentRegistration` fallback — see the module
- * header's BLOCKER 1 section and each map's own doc for why both exist.
+ * registration's parsed trace id (`traceIdRegistrations`) — see the module
+ * header's BLOCKER 1 section and that map's own doc for why.
  */
 export function registerFlueSessionTrace(sessionId: string, registration: FlueSessionRegistration): void {
   flueSessionTraces.set(sessionId, registration);
   const identity: GatewayIdentity = { adwId: registration.adwId, agentName: registration.agentName };
-  mostRecentRegistration = identity;
   const traceId = traceIdFromTraceparent(registration.traceparent);
   if (traceId) traceIdRegistrations.set(traceId, identity);
 }
@@ -291,11 +289,14 @@ export function registerFlueSessionTrace(sessionId: string, registration: FlueSe
  * `W3CTraceContextPropagator` uses for `traceparent`, and, critically, keyed
  * on the one piece of `resolveFlueRootContext`'s return value that provably
  * survives into that active context (see the module header's BLOCKER 1
- * section for why a context VALUE does not). Falls back to
- * `mostRecentRegistration` when this exact trace id isn't in the map (an
- * unmapped/bookkeeping span — see that variable's own doc), and is a true
- * no-op (nothing set) only when NEITHER produces anything — never throws,
- * never invents a value. Replaces the old `XRequestIdPropagator`:
+ * section for why a context VALUE does not). Injects NOTHING — no fallback,
+ * no last-known identity — when this exact trace id is not in the map: an
+ * unregistered/unmapped span (flue's own bookkeeping spans, or ANY span
+ * after every session has been unregistered) must not stamp a stale or
+ * unrelated session's `x-correlation-id`/`x-spf-agent` onto unrelated
+ * outbound traffic (a third-party call, a post-session straggler). A true
+ * no-op (nothing set) in that case — never throws, never invents a value.
+ * Replaces the old `XRequestIdPropagator`:
  * `x-request-id` must NEVER reach the gateway (Envoy/Switchyard own it
  * end-to-end; a client-sent value corrupts their own sampling) and this repo
  * no longer has anything that wants it emitted.
@@ -303,7 +304,7 @@ export function registerFlueSessionTrace(sessionId: string, registration: FlueSe
 export class GatewayHeadersPropagator implements TextMapPropagator {
   inject(ctx: Context, carrier: unknown, setter: TextMapSetter): void {
     const spanContext = traceApi.getSpanContext(ctx);
-    const registration = (spanContext && traceIdRegistrations.get(spanContext.traceId)) ?? mostRecentRegistration;
+    const registration = spanContext && traceIdRegistrations.get(spanContext.traceId);
     if (!registration) return;
     if (registration.adwId) setter.set(carrier, X_CORRELATION_ID_HEADER, registration.adwId);
     if (registration.agentName) setter.set(carrier, X_SPF_AGENT_HEADER, registration.agentName);
@@ -323,9 +324,7 @@ export class GatewayHeadersPropagator implements TextMapPropagator {
  * a REUSED session id could collide with on a later phase. Also prunes this
  * session's entry out of `traceIdRegistrations` (parsed fresh from the
  * departing registration's own `traceparent`, so it removes exactly the
- * entry this session added) — but deliberately does NOT touch
- * `mostRecentRegistration`, which is a process-wide last-resort fallback,
- * not scoped to any one session's lifetime (see its own doc).
+ * entry this session added.
  */
 export function unregisterFlueSessionTrace(sessionId: string): void {
   const registration = flueSessionTraces.get(sessionId);
@@ -417,18 +416,6 @@ export function installFluePropagation(cfg: FluePropagationConfig | undefined | 
 export function resetFluePropagationForTest(): void {
   installed = false;
   flueInstrumented = false;
-}
-
-/**
- * Tests only: forgets `mostRecentRegistration` (the process-wide fallback —
- * see its own doc) so a test asserting "nothing registered -> no headers"
- * isn't at the mercy of file-level test declaration order leaving a stale
- * identity behind from an earlier test's `registerFlueSessionTrace` call.
- * Does NOT touch `flueSessionTraces`/`traceIdRegistrations` — those are
- * already scoped per session id and cleaned up by `unregisterFlueSessionTrace`.
- */
-export function resetGatewayFallbackForTest(): void {
-  mostRecentRegistration = undefined;
 }
 
 /**

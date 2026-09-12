@@ -44,7 +44,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import type { Context as PiContext } from "@earendil-works/pi-ai";
 import { resetModelsForTests } from "@flue/runtime/internal";
 import { providerForTest, registerOllamaModel, resetOllamaRegistrationForTest } from "../core/ollama_provider.js";
-import { installFluePropagation, registerFlueSessionTrace, resolveFlueRootContext, resetGatewayFallbackForTest, unregisterFlueSessionTrace } from "../core/otel_propagation.js";
+import { installFluePropagation, registerFlueSessionTrace, resolveFlueRootContext, unregisterFlueSessionTrace } from "../core/otel_propagation.js";
 
 const TRACEPARENT_RE = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 const fakeAuthContext = { env: async () => undefined, fileExists: async () => false };
@@ -142,7 +142,6 @@ test("registerOllamaModel(ctx): INSTALLED — Model.headers carries NO static x-
 test("end-to-end (BLOCKER 1, honest flue mechanics): a real dispatch through the registered ollama provider, with propagation installed, carries EXACTLY ONE traceparent whose trace id is SPF's registered one, the registered session's x-correlation-id/x-spf-agent, and NEVER x-request-id", async () => {
   resetOllamaRegistrationForTest();
   resetModelsForTests();
-  resetGatewayFallbackForTest();
   const { server, url, requests, rawRequests } = await startHeaderCaptureServer();
   const originalBaseUrl = process.env.OLLAMA_BASE_URL;
   process.env.OLLAMA_BASE_URL = url;
@@ -211,7 +210,6 @@ test("end-to-end (BLOCKER 1, honest flue mechanics): a real dispatch through the
 test("end-to-end (no duplicate headers): registerOllamaModel(ctx) is ALSO called with adw_id/agent_name (as agent_flue.ts always passes them — see data_types.ts's AgentRequest.adw_id doc) while propagation is installed; the wire still carries exactly ONE x-correlation-id/x-spf-agent, from the propagator, never doubled with a static Model.headers value", async () => {
   resetOllamaRegistrationForTest();
   resetModelsForTests();
-  resetGatewayFallbackForTest();
   const { server, url, rawRequests } = await startHeaderCaptureServer();
   const originalBaseUrl = process.env.OLLAMA_BASE_URL;
   process.env.OLLAMA_BASE_URL = url;

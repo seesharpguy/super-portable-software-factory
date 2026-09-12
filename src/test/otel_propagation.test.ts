@@ -44,7 +44,6 @@ import {
   isFluePropagationInstalled,
   registerFlueSessionTrace,
   resetFluePropagationForTest,
-  resetGatewayFallbackForTest,
   resolveFlueRootContext,
   unregisterFlueSessionTrace,
   X_CORRELATION_ID_HEADER,
@@ -125,12 +124,11 @@ test("GatewayHeadersPropagator: fields() names exactly the two headers it sets",
   assert.deepEqual(p.fields(), [X_CORRELATION_ID_HEADER, X_SPF_AGENT_HEADER]);
 });
 
-test("GatewayHeadersPropagator: inject() is a no-op when the active context carries no span AND nothing has ever been registered (a plain, un-instrumented context, fresh process)", () => {
-  resetGatewayFallbackForTest(); // this file's tests share module state (see header) — a later test's registerFlueSessionTrace must not leak into this one via the process-wide fallback
+test("GatewayHeadersPropagator: inject() is a no-op when the active context carries no span (a plain, un-instrumented context, fresh process) — no fallback identity of any kind", () => {
   const p = new GatewayHeadersPropagator();
   const carrier: Record<string, string> = {};
   p.inject(context.active(), carrier, { set: (c, k, v) => ((c as Record<string, string>)[k] = v) });
-  assert.deepEqual(carrier, {}, "no span -> no trace id to look up by, and no process-wide fallback either -> no header");
+  assert.deepEqual(carrier, {}, "no span -> no trace id to look up by -> no header");
 });
 
 test("isFluePropagationInstalled: false before installFluePropagation is ever called (or called with nothing configured)", () => {
@@ -151,7 +149,6 @@ test("installFluePropagation: a no-op when otel is unconfigured (undefined, or n
 });
 
 test("installFluePropagation: registers a REAL global TracerProvider + propagator — traceparent lands on an injected carrier; isFluePropagationInstalled() flips true", () => {
-  resetGatewayFallbackForTest(); // this span's trace id is fresh/random, never registered — the process-wide fallback must not leak an unrelated identity in here
   installFluePropagation({ endpoint: "http://127.0.0.1:1/v1/traces", service_name: "spf-test" });
   assert.equal(isFluePropagationInstalled(), true);
 
@@ -452,7 +449,6 @@ test("register/activate/inject (honest mechanism): a session registered with adw
 });
 
 test("register/activate/inject: a registration with NO adw_id/agent_name injects traceparent only — nothing to correlate by, so nothing extra is invented", () => {
-  resetGatewayFallbackForTest();
   registerFlueSessionTrace("ses_gateway_bare", { traceparent: FLUE_TP });
   try {
     const carrier = activateAndInject("ses_gateway_bare", "chat some-model");
@@ -466,10 +462,9 @@ test("register/activate/inject: a registration with NO adw_id/agent_name injects
 
 test("register/activate/inject: two sessions' spans each inject THEIR OWN adw_id/agent_name by trace id — precise per-trace-id attribution, not just 'whichever registered most recently'", () => {
   registerFlueSessionTrace("ses_gateway_x", { traceparent: "00-11111111111111111111111111111111-2222222222222222-01", adwId: "adw_x", agentName: "agent_x" });
-  // ses_gateway_y registers SECOND (and so is the process-wide "most recent"
-  // fallback) — a span honestly parented under ses_gateway_x's resolved
-  // context must still resolve to ses_gateway_x's OWN identity by trace id,
-  // not fall through to whichever registered later.
+  // ses_gateway_y registers SECOND — a span honestly parented under
+  // ses_gateway_x's resolved context must still resolve to ses_gateway_x's
+  // OWN identity by trace id, not to whichever registered later.
   registerFlueSessionTrace("ses_gateway_y", { traceparent: "00-33333333333333333333333333333333-4444444444444444-01", adwId: "adw_y", agentName: "agent_y" });
   try {
     const carrierX = activateAndInject("ses_gateway_x", "chat x");
@@ -485,9 +480,9 @@ test("register/activate/inject: two sessions' spans each inject THEIR OWN adw_id
   }
 });
 
-test("GatewayHeadersPropagator: an active span whose trace id is NOT in the registry (flue's own unmapped/bookkeeping span, minting a fresh random trace id) falls back to the MOST RECENT registration process-wide, rather than going silent", () => {
+test("GatewayHeadersPropagator: an active span whose trace id is NOT in the registry (flue's own unmapped/bookkeeping span, minting a fresh random trace id) injects NEITHER header — no process-wide fallback identity, ever (MAJOR regression fix: this used to stamp the most-recently-registered session's identity onto unrelated spans)", () => {
   registerFlueSessionTrace("ses_fallback_source", { traceparent: "00-55555555555555555555555555555555-6666666666666666-01", adwId: "adw_fallback", agentName: "fallback_agent" });
-  unregisterFlueSessionTrace("ses_fallback_source"); // removes the trace-id entry; mostRecentRegistration persists (see its own doc)
+  unregisterFlueSessionTrace("ses_fallback_source"); // removes the trace-id entry entirely — nothing left anywhere to fall back to
 
   const span = trace.getTracer("otel-propagation-test-fallback").startSpan("bookkeeping-span"); // brand-new random trace id, deliberately never registered
   const carrier: Record<string, string> = {};
@@ -496,6 +491,37 @@ test("GatewayHeadersPropagator: an active span whose trace id is NOT in the regi
   });
   span.end();
 
-  assert.equal(carrier[X_CORRELATION_ID_HEADER], "adw_fallback", "no exact trace-id match -> falls back to the most recently registered identity");
-  assert.equal(carrier[X_SPF_AGENT_HEADER], "fallback_agent");
+  assert.equal(X_CORRELATION_ID_HEADER in carrier, false, "no exact trace-id match -> nothing injected, never a stale/unrelated identity");
+  assert.equal(X_SPF_AGENT_HEADER in carrier, false);
+});
+
+test("GatewayHeadersPropagator: MAJOR regression — after a session is registered, dispatched, and unregistered, a later UNRELATED span (a bare fetch to a third-party path, no flue session in flight at all) carries NO x-correlation-id/x-spf-agent, even though this process has propagation installed and has registered a session before", () => {
+  registerFlueSessionTrace("ses_unrelated_before", { traceparent: "00-77777777777777777777777777777777-8888888888888888-01", adwId: "adw_should_never_leak", agentName: "agent_should_never_leak" });
+  // "dispatch": inject once while the session is live, proving the registration really was active and wired correctly.
+  const liveCarrier: Record<string, string> = {};
+  const resolved = resolveFlueRootContext({}, { id: "ses_unrelated_before" });
+  const liveSpan = trace.getTracer("otel-propagation-test-unrelated").startSpan("chat some-model", { root: resolved === undefined }, resolved);
+  context.with(trace.setSpan(context.active(), liveSpan), () => {
+    propagation.inject(context.active(), liveCarrier);
+  });
+  liveSpan.end();
+  assert.equal(liveCarrier[X_CORRELATION_ID_HEADER], "adw_should_never_leak", "sanity: the registration really was live and injecting");
+  assert.equal(liveCarrier[X_SPF_AGENT_HEADER], "agent_should_never_leak");
+
+  unregisterFlueSessionTrace("ses_unrelated_before");
+
+  // Now: a bare, brand-new root span — exactly what an unrelated outbound
+  // call (a third-party API, spf's own Jira/GitHub/OTLP traffic in a
+  // watch/loop/fanout daemon) gets, with NO flue session in flight and NO
+  // registration standing in for it.
+  const unrelatedSpan = trace.getTracer("otel-propagation-test-unrelated").startSpan("GET /unrelated-third-party");
+  const unrelatedCarrier: Record<string, string> = {};
+  context.with(trace.setSpan(context.active(), unrelatedSpan), () => {
+    propagation.inject(context.active(), unrelatedCarrier);
+  });
+  unrelatedSpan.end();
+
+  assert.equal(X_CORRELATION_ID_HEADER in unrelatedCarrier, false, "unrelated traffic after unregister must NEVER carry a stale x-correlation-id");
+  assert.equal(X_SPF_AGENT_HEADER in unrelatedCarrier, false, "unrelated traffic after unregister must NEVER carry a stale x-spf-agent");
+  assert.ok(unrelatedCarrier["traceparent"], "traceparent still comes from the W3C propagator regardless");
 });

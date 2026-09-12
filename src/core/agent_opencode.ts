@@ -125,7 +125,6 @@
  * at all. A caller that truly wants zero config-file overhead has no lever
  * for that today short of clearing `adw_id`/`agent_name` on the request.
  *
-
  * OPERATOR-CONFIG MERGE: when a caller-provided `OPENCODE_CONFIG` already
  * exists in the base env (operatorEnv() passthrough or an agent's
  * env_allowlist) AND this module needs a temp config of its own (a tools:

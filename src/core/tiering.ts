@@ -27,7 +27,7 @@
  */
 
 import type { AgentConfig, SFConfig, Tier } from "./data_types.ts";
-import { ollamaBaseUrl } from "./ollama_provider.ts";
+import { ollamaApiKey, ollamaBaseUrl } from "./ollama_provider.ts";
 
 // ── the classifier (design doc §2) ──────────────────────────────────────────
 
@@ -249,9 +249,13 @@ async function fetchServedOllamaTags(): Promise<Set<string> | null> {
   try {
     // ollamaBaseUrl() is the SAME default-substitution a real dispatch
     // uses, including treating a set-but-EMPTY OLLAMA_BASE_URL as unset —
-    // never re-derive that default here.
+    // never re-derive that default here. Same for ollamaApiKey(): against a
+    // gateway (not bare Ollama) this endpoint 401s without a bearer — send
+    // the SAME dummy-or-real bearer a real dispatch sends (byte-identical
+    // to doctor.ts's own OLLAMA_BASE_URL reachability probe), or this probe
+    // fails closed (401 -> null) even when a real dispatch would succeed.
     const url = ollamaBaseUrl().replace(/\/+$/, "") + "/models";
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, headers: { authorization: `Bearer ${ollamaApiKey()}` } });
     if (res.status !== 200) return null;
     const body = (await res.json()) as { data?: unknown } | null;
     if (!body || !Array.isArray(body.data)) return null;

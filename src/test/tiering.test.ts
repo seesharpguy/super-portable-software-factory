@@ -40,6 +40,7 @@ import {
 import { CHAINS, resolveRequiredAgents } from "../chains/index.js";
 import { startRun } from "../chains/steps.js";
 import type { ChainContext } from "../chains/context.js";
+import { ollamaApiKey } from "../core/ollama_provider.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -285,6 +286,32 @@ test("6f: probeServedOllamaTags — strips the ollama/ prefix before lookup, and
     assert.equal(await probeServedOllamaTags(cfg), null, "missing/non-array data -> null");
   } finally {
     globalThis.fetch = savedFetch;
+    resetProbeCacheForTest();
+  }
+});
+
+test("6f-auth: probeServedOllamaTags sends Authorization: Bearer <ollamaApiKey()> — the SAME bearer a real dispatch/doctor.ts's probe sends, so it isn't 401'd by a gateway in front of Ollama", async () => {
+  const savedFetch = globalThis.fetch;
+  const savedKey = process.env.OLLAMA_API_KEY;
+  const cfg = makeCfg({
+    tiering: { enabled: true, tiers: [{ name: "t0", coding_agent: "flue", model: "ollama/granite4.1:8b" }], roles: { x: "t0" } },
+  });
+  let capturedHeaders: RequestInit["headers"] | undefined;
+  try {
+    process.env.OLLAMA_API_KEY = "real-gateway-key";
+    resetProbeCacheForTest();
+    globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {
+      capturedHeaders = init?.headers;
+      return new Response(JSON.stringify({ object: "list", data: [] }), { status: 200 });
+    }) as typeof fetch;
+    await probeServedOllamaTags(cfg);
+    const headers = new Headers(capturedHeaders);
+    assert.equal(headers.get("authorization"), `Bearer ${ollamaApiKey()}`, "must carry the same bearer ollamaApiKey() produces — a gateway 401s a bare/no-auth GET");
+    assert.equal(headers.get("authorization"), "Bearer real-gateway-key");
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedKey === undefined) delete process.env.OLLAMA_API_KEY;
+    else process.env.OLLAMA_API_KEY = savedKey;
     resetProbeCacheForTest();
   }
 });
