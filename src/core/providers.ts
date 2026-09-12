@@ -21,9 +21,14 @@ export const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   deepseek: ["DEEPSEEK_API_KEY"],
   together: ["TOGETHER_API_KEY"],
   cerebras: ["CEREBRAS_API_KEY"],
-  // Keyless: a local server, not a hosted API — nothing to check for or
-  // prompt for. An empty array here means "known provider, needs no key",
-  // never "unknown provider" (that's a missing table entry, not `[]`).
+  // Keyless by default: a local server, not a hosted API — nothing to
+  // require or prompt for. An empty array here means "known provider,
+  // needs no key", never "unknown provider" (that's a missing table entry,
+  // not `[]`). NOT the same as "no key is ever honored": ollama_provider.ts's
+  // `ollamaApiKey()` reads `OLLAMA_API_KEY` and sends it as the bearer when
+  // set (e.g. required by a gateway in front of Ollama, like Envoy AI
+  // Gateway), falling back to its dummy placeholder otherwise — optional,
+  // not required, which is why it stays out of this required-keys table.
   ollama: [],
   // Cloudflare Workers AI — a real Bearer token (NOT keyless like ollama;
   // Cloudflare's API 401s on an empty Authorization header). The base URL

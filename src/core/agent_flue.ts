@@ -472,7 +472,12 @@ export async function run(
   // imports this module for `resolveModel()` alone (doctor.ts, interview.ts)
   // without ever dispatching an ollama call.
   const [provider, modelId] = resolveModel(request.model);
-  if (provider === "ollama") await registerOllamaModel(modelId);
+  // `adw_id`/`agent_name` (when the caller supplied them — see
+  // `data_types.ts`'s `AgentRequest` doc) become this model id's static
+  // `x-correlation-id`/`x-spf-agent` gateway headers on FIRST registration
+  // only — see `ollama_provider.ts`'s "Gateway headers" section for why a
+  // per-call value isn't safe here.
+  if (provider === "ollama") await registerOllamaModel(modelId, { adwId: request.adw_id, agentName: request.agent_name });
   // Cloudflare Workers AI is the same self-registration shape as Ollama
   // (no pi-ai/Flue built-in "cloudflare" provider on Node) — see
   // cloudflare_provider.ts's header comment for the Workers AI OpenAI-

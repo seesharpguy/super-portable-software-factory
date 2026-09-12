@@ -1589,6 +1589,19 @@ export interface AgentRequest {
   /** Absent (the default) => local(), byte-identical to before this field existed. See sandbox.ts. */
   sandbox?: SandboxSpec;
   /**
+   * The run's own adw_id / the calling agent's name — set by `agents.ts`'s
+   * `send()` from `run.adw_id`/`agent.name`, which are unconditionally in
+   * scope there (unlike `otel` below, this pair is NOT gated on
+   * `observability.otel` being configured: a gateway that groups calls by
+   * `x-correlation-id`/`x-spf-agent` needs them on every call, not only when
+   * SPF's own OTel export happens to be turned on). Consulted today only by
+   * `agent_flue.ts`'s ollama registration (see `ollama_provider.ts`'s
+   * `GatewayCallContext`); every other backend ignores both fields, so this
+   * addition is byte-identical to before it existed for them.
+   */
+  adw_id?: string;
+  agent_name?: string;
+  /**
    * Outbound OTel trace-context propagation — set by `agents.ts`'s `send()`
    * from `otel.ts`'s `OtelExporter.agentCallTraceContext()` ONLY when
    * `observability.otel` is configured for this run; absent otherwise, and

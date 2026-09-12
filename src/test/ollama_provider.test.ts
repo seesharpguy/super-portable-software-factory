@@ -10,6 +10,11 @@ import {
   providerForTest,
   registerOllamaModel,
   resetOllamaRegistrationForTest,
+  gatewayHeaders,
+  freshTraceparent,
+  withGatewayHeaders,
+  X_REQUEST_ID_HEADER,
+  type FetchLike,
 } from "../core/ollama_provider.js";
 
 // A minimal stand-in for pi-ai's `AuthContext` — our resolver ignores it
@@ -18,17 +23,24 @@ import {
 const fakeAuthContext = { env: async () => undefined, fileExists: async () => false };
 
 const ORIGINAL_BASE_URL = process.env.OLLAMA_BASE_URL;
+const ORIGINAL_API_KEY = process.env.OLLAMA_API_KEY;
 
 beforeEach(() => {
   resetOllamaRegistrationForTest();
   resetModelsForTests();
   delete process.env.OLLAMA_BASE_URL;
+  delete process.env.OLLAMA_API_KEY;
 });
 
 afterEach(() => {
   if (ORIGINAL_BASE_URL === undefined) delete process.env.OLLAMA_BASE_URL;
   else process.env.OLLAMA_BASE_URL = ORIGINAL_BASE_URL;
+  if (ORIGINAL_API_KEY === undefined) delete process.env.OLLAMA_API_KEY;
+  else process.env.OLLAMA_API_KEY = ORIGINAL_API_KEY;
 });
+
+// A well-formed W3C traceparent: `00-<32 hex>-<16 hex>-<2 hex>`.
+const TRACEPARENT_RE = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 
 test("registerOllamaModel: union accumulation — registering a second id doesn't orphan the first", async () => {
   await registerOllamaModel("model-a");
@@ -129,4 +141,165 @@ test("registerOllamaModel: auth.apiKey resolves a truthy dummy key, never the up
     typeof resolved!.auth.apiKey === "string" && resolved!.auth.apiKey.length > 0,
     "the resolved apiKey must be a non-empty string — a falsy one is exactly what pi-ai's getClientApiKey() throws on at dispatch",
   );
+});
+
+// ── (0) OLLAMA_API_KEY honored, dummy retained as fallback ─────────────────
+
+test("auth.apiKey.resolve: OLLAMA_API_KEY unset -> the dummy placeholder, unchanged from before this feature existed", async () => {
+  await registerOllamaModel("model-a");
+  const resolved = await providerForTest()!.auth.apiKey!.resolve({ ctx: fakeAuthContext, credential: undefined });
+  assert.equal(resolved!.auth.apiKey, "ollama-local-unused");
+});
+
+test("auth.apiKey.resolve: OLLAMA_API_KEY set -> the bearer equals it, not the dummy", async () => {
+  process.env.OLLAMA_API_KEY = "briefs-gateway-client-key-123";
+  await registerOllamaModel("model-a");
+  const resolved = await providerForTest()!.auth.apiKey!.resolve({ ctx: fakeAuthContext, credential: undefined });
+  assert.equal(resolved!.auth.apiKey, "briefs-gateway-client-key-123");
+});
+
+test("auth.apiKey.resolve: OLLAMA_API_KEY is trimmed, and blank/whitespace-only still falls back to the dummy", async () => {
+  process.env.OLLAMA_API_KEY = "  padded-key  ";
+  await registerOllamaModel("model-a");
+  let resolved = await providerForTest()!.auth.apiKey!.resolve({ ctx: fakeAuthContext, credential: undefined });
+  assert.equal(resolved!.auth.apiKey, "padded-key");
+
+  resetOllamaRegistrationForTest();
+  resetModelsForTests();
+  process.env.OLLAMA_API_KEY = "   ";
+  await registerOllamaModel("model-b");
+  resolved = await providerForTest()!.auth.apiKey!.resolve({ ctx: fakeAuthContext, credential: undefined });
+  assert.equal(resolved!.auth.apiKey, "ollama-local-unused", "whitespace-only is treated as unset");
+});
+
+test("auth.apiKey.resolve: reads OLLAMA_API_KEY fresh — set AFTER registration still takes effect on the next dispatch, no re-registration needed", async () => {
+  await registerOllamaModel("model-a"); // registers with the var still unset
+  process.env.OLLAMA_API_KEY = "set-after-registration";
+  const resolved = await providerForTest()!.auth.apiKey!.resolve({ ctx: fakeAuthContext, credential: undefined });
+  assert.equal(resolved!.auth.apiKey, "set-after-registration");
+});
+
+// ── (3a) freshTraceparent / gatewayHeaders: per-call, well-formed, no x-request-id ──
+
+test("freshTraceparent: well-formed W3C traceparent (00-<32 hex>-<16 hex>-<2 hex>), no active OTel span installed", () => {
+  const tp = freshTraceparent();
+  assert.match(tp, TRACEPARENT_RE);
+});
+
+test("freshTraceparent: two consecutive calls produce two DIFFERENT, both well-formed traceparents", () => {
+  const first = freshTraceparent();
+  const second = freshTraceparent();
+  assert.match(first, TRACEPARENT_RE);
+  assert.match(second, TRACEPARENT_RE);
+  assert.notEqual(first, second, "each call must mint a fresh id pair, not reuse a cached one");
+});
+
+test("auth.apiKey.resolve: two consecutive resolves (one per simulated dispatch) carry two different, well-formed traceparents", async () => {
+  await registerOllamaModel("model-a");
+  const apiKeyAuth = providerForTest()!.auth.apiKey!;
+  const first = await apiKeyAuth.resolve({ ctx: fakeAuthContext, credential: undefined });
+  const second = await apiKeyAuth.resolve({ ctx: fakeAuthContext, credential: undefined });
+  const tp1 = first!.auth.headers!["traceparent"]!;
+  const tp2 = second!.auth.headers!["traceparent"]!;
+  assert.match(tp1, TRACEPARENT_RE);
+  assert.match(tp2, TRACEPARENT_RE);
+  assert.notEqual(tp1, tp2, "resolve() must mint a fresh traceparent on every dispatch, not cache one at registration time");
+  assert.equal("x-request-id" in first!.auth.headers!, false, "resolve() must never set x-request-id");
+});
+
+test("gatewayHeaders: always a traceparent; x-correlation-id/x-spf-agent only when ctx supplies them; x-request-id never present", () => {
+  const bare = gatewayHeaders();
+  assert.match(bare["traceparent"]!, TRACEPARENT_RE);
+  assert.equal("x-correlation-id" in bare, false);
+  assert.equal("x-spf-agent" in bare, false);
+  assert.equal(X_REQUEST_ID_HEADER in bare, false);
+
+  const full = gatewayHeaders({ adwId: "adw_123", agentName: "spec_writer" });
+  assert.equal(full["x-correlation-id"], "adw_123");
+  assert.equal(full["x-spf-agent"], "spec_writer");
+  assert.match(full["traceparent"]!, TRACEPARENT_RE);
+  assert.equal(X_REQUEST_ID_HEADER in full, false);
+});
+
+// ── registerOllamaModel(modelId, ctx): static x-correlation-id/x-spf-agent per Model ──
+
+test("registerOllamaModel(ctx): stamps x-correlation-id/x-spf-agent onto the model's static headers", async () => {
+  await registerOllamaModel("model-a", { adwId: "adw_abc", agentName: "researcher" });
+  const model = flueResolveModel("ollama/model-a");
+  assert.deepEqual(model.headers, { "x-correlation-id": "adw_abc", "x-spf-agent": "researcher" });
+  assert.equal("traceparent" in (model.headers ?? {}), false, "traceparent is per-call, not baked into the static Model");
+});
+
+test("registerOllamaModel: no ctx (or an empty one) -> no `headers` field at all, byte-identical to before this feature existed", async () => {
+  await registerOllamaModel("model-a");
+  const model = flueResolveModel("ollama/model-a");
+  assert.equal(model.headers, undefined);
+});
+
+test("registerOllamaModel(ctx): a union re-registration (a second, new model id) keeps the FIRST id's original static headers", async () => {
+  await registerOllamaModel("model-a", { adwId: "adw_first", agentName: "agent_one" });
+  await registerOllamaModel("model-b", { adwId: "adw_second", agentName: "agent_two" });
+
+  const a = flueResolveModel("ollama/model-a");
+  const b = flueResolveModel("ollama/model-b");
+  assert.deepEqual(a.headers, { "x-correlation-id": "adw_first", "x-spf-agent": "agent_one" }, "model-a keeps what it was FIRST registered with");
+  assert.deepEqual(b.headers, { "x-correlation-id": "adw_second", "x-spf-agent": "agent_two" });
+});
+
+// ── withGatewayHeaders: the pure, unit-testable fetch-wrapper primitive ─────
+
+test("withGatewayHeaders: adds traceparent/x-correlation-id/x-spf-agent to the request the wrapped fetch actually receives — no network", async () => {
+  const calls: Array<{ input: unknown; init?: Record<string, unknown> }> = [];
+  const stubFetch: FetchLike = async (input, init) => {
+    calls.push({ input, init });
+    return { ok: true };
+  };
+
+  const wrapped = withGatewayHeaders(stubFetch, { adwId: "adw_xyz", agentName: "coder" });
+  await wrapped("https://inference.briefs.co/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" } });
+
+  assert.equal(calls.length, 1);
+  const sentHeaders = calls[0]!.init!["headers"] as Record<string, string>;
+  assert.match(sentHeaders["traceparent"]!, TRACEPARENT_RE);
+  assert.equal(sentHeaders["x-correlation-id"], "adw_xyz");
+  assert.equal(sentHeaders["x-spf-agent"], "coder");
+  assert.equal(sentHeaders["content-type"], "application/json", "unrelated caller headers pass through untouched");
+  assert.equal(X_REQUEST_ID_HEADER in sentHeaders, false);
+  assert.equal(calls[0]!.init!["method"], "POST", "non-header init fields pass through untouched");
+});
+
+test("withGatewayHeaders: strips an x-request-id the caller already set — never forwarded, case-insensitively", async () => {
+  const calls: Array<{ init?: Record<string, unknown> }> = [];
+  const stubFetch: FetchLike = async (_input, init) => {
+    calls.push({ init });
+    return { ok: true };
+  };
+
+  const wrapped = withGatewayHeaders(stubFetch, {});
+  await wrapped("https://inference.briefs.co/v1/chat/completions", { headers: { "X-Request-Id": "should-never-reach-the-gateway" } });
+
+  const sentHeaders = calls[0]!.init!["headers"] as Record<string, string>;
+  assert.equal(X_REQUEST_ID_HEADER in sentHeaders, false);
+  assert.equal("X-Request-Id" in sentHeaders, false);
+});
+
+test("withGatewayHeaders: two consecutive calls through the SAME wrapper carry two different traceparents", async () => {
+  const calls: Array<{ init?: Record<string, unknown> }> = [];
+  const stubFetch: FetchLike = async (_input, init) => {
+    calls.push({ init });
+    return { ok: true };
+  };
+
+  const wrapped = withGatewayHeaders(stubFetch, { adwId: "adw_same_run" });
+  await wrapped("https://inference.briefs.co/v1/chat/completions", {});
+  await wrapped("https://inference.briefs.co/v1/chat/completions", {});
+
+  const tp1 = (calls[0]!.init!["headers"] as Record<string, string>)["traceparent"];
+  const tp2 = (calls[1]!.init!["headers"] as Record<string, string>)["traceparent"];
+  assert.match(tp1!, TRACEPARENT_RE);
+  assert.match(tp2!, TRACEPARENT_RE);
+  assert.notEqual(tp1, tp2);
+  // x-correlation-id is stable across calls in the same run — only the trace context is per-call.
+  assert.equal((calls[0]!.init!["headers"] as Record<string, string>)["x-correlation-id"], "adw_same_run");
+  assert.equal((calls[1]!.init!["headers"] as Record<string, string>)["x-correlation-id"], "adw_same_run");
 });
