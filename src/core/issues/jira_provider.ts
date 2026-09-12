@@ -14,8 +14,13 @@
  *    now is `/rest/api/3/search/jql`.
  *  - Comment/description bodies in API v3 are Atlassian Document Format
  *    (ADF) JSON, not plain strings — `{"body": "text"}` is rejected
- *    outright. `toAdf`/`adfToText` are the minimal round-trip this needs:
- *    one paragraph of plain text, nothing richer.
+ *    outright. Human/LLM-authored content (`comment()`, `createIssue()`)
+ *    goes through `markdownToAdf()`/`adfToMarkdown()` (`./markdown_adf.ts`)
+ *    for real Jira formatting; the local `toAdf()` minimal round-trip (one
+ *    paragraph of plain text, nothing richer) survives ONLY for
+ *    `writeMarker()`'s hidden `[spf-watch-marker]` JSON payload, which must
+ *    never pass through a real Markdown parser — see `toAdf`'s own doc
+ *    comment.
  *
  * State is modeled as Jira labels (`<prefix>:ready`, etc.), mirroring
  * `github_provider.ts` exactly — labels are spf's ACTUAL state machine and
@@ -69,6 +74,7 @@
  */
 import type { JiraIssueTypeMap, JiraStatusMap } from "../data_types.ts";
 import { fetchRetryTransient } from "../utils.ts";
+import { adfToMarkdown, markdownToAdf } from "./markdown_adf.ts";
 import type { EnsureLabelsResult, Issue, IssueAuthoringKind, IssueAuthoringProvider, IssueComment, IssueProvider, WatchMarker, WatchState } from "./provider.ts";
 
 const STATES: WatchState[] = [
@@ -117,21 +123,25 @@ interface JiraComment {
   created: string;
 }
 
+/**
+ * The ONLY remaining caller is `writeMarker()`'s hidden `[spf-watch-marker]`
+ * JSON payload — deliberately kept as this minimal, un-parsed shape (see
+ * this file's module comment) rather than routed through
+ * `markdownToAdf()`, because that payload must round-trip byte-for-byte
+ * through `MARKER_RE` and must never have its JSON characters (underscores,
+ * brackets, backticks) reinterpreted as Markdown syntax. Do not change this
+ * call site or add other callers — human/LLM-authored content
+ * (`comment()`, `createIssue()`) goes through `markdownToAdf()` instead, and
+ * reading ADF back to text goes through `adfToMarkdown()` (both imported
+ * from `./markdown_adf.ts`) — there is exactly one ADF-to-text
+ * implementation in this codebase now, not two divergent ones.
+ */
 function toAdf(text: string): unknown {
   return {
     type: "doc",
     version: 1,
     content: [{ type: "paragraph", content: [{ type: "text", text }] }],
   };
-}
-
-/** Walks an ADF document's `text` nodes and joins them — the minimal inverse of `toAdf`, not a full ADF renderer. */
-function adfToText(adf: unknown): string {
-  if (!adf || typeof adf !== "object") return "";
-  const node = adf as { type?: string; text?: string; content?: unknown[] };
-  if (node.type === "text" && typeof node.text === "string") return node.text;
-  if (Array.isArray(node.content)) return node.content.map(adfToText).join("");
-  return "";
 }
 
 export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
@@ -184,7 +194,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     return {
       id: raw.key,
       title: raw.fields.summary,
-      body: raw.fields.description ? adfToText(raw.fields.description) : "",
+      body: raw.fields.description ? adfToMarkdown(raw.fields.description) : "",
       labels: raw.fields.labels,
     };
   }
@@ -250,7 +260,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
         fields: {
           project: { key: this.projectKey },
           summary: input.title,
-          description: toAdf(input.body),
+          description: markdownToAdf(input.body),
           issuetype: { name: this.issueTypes[input.kind] },
           labels: input.labels,
         },
@@ -397,7 +407,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   }
 
   async comment(issue: Issue, body: string): Promise<void> {
-    await this.jira(`/rest/api/3/issue/${issue.id}/comment`, { method: "POST", body: JSON.stringify({ body: toAdf(body) }) });
+    await this.jira(`/rest/api/3/issue/${issue.id}/comment`, { method: "POST", body: JSON.stringify({ body: markdownToAdf(body) }) });
   }
 
   /** The single fetch every comment-reading method (`findMarkerComment`, `listComments`) builds on. */
@@ -410,7 +420,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     const comments = await this.fetchComments(issueId);
     let found: { id: string; marker: WatchMarker } | null = null;
     for (const c of comments) {
-      const match = MARKER_RE.exec(adfToText(c.body));
+      const match = MARKER_RE.exec(adfToMarkdown(c.body));
       if (!match) continue;
       try {
         found = { id: c.id, marker: JSON.parse(match[1]) };
@@ -425,8 +435,8 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
   async listComments(issue: Issue): Promise<IssueComment[]> {
     const comments = await this.fetchComments(issue.id);
     return comments
-      .filter((c) => !MARKER_RE.test(adfToText(c.body)))
-      .map((c) => ({ id: c.id, author: c.author?.displayName ?? "unknown", created_at: c.created, body: adfToText(c.body) }));
+      .filter((c) => !MARKER_RE.test(adfToMarkdown(c.body)))
+      .map((c) => ({ id: c.id, author: c.author?.displayName ?? "unknown", created_at: c.created, body: adfToMarkdown(c.body) }));
   }
 
   async readMarker(issue: Issue): Promise<WatchMarker | null> {

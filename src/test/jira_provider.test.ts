@@ -101,6 +101,30 @@ test("createIssue: a custom issue_types override reaches issuetype.name instead 
   }
 });
 
+test("createIssue: a body containing real Markdown syntax produces real ADF marks, not literal asterisks (markdownToAdf wiring)", async () => {
+  const { calls, restore } = mockFetch([{ body: { id: "10005", key: "PROJ-46" } }]);
+  try {
+    const provider = makeProvider();
+    await provider.createIssue({ title: "A story", body: "**bold** text", labels: [], kind: "story" });
+
+    assert.deepEqual(calls[0]!.body.fields.description, {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "bold", marks: [{ type: "strong" }] },
+            { type: "text", text: " text" },
+          ],
+        },
+      ],
+    });
+  } finally {
+    restore();
+  }
+});
+
 // ── linkChild ────────────────────────────────────────────────────────────
 
 test("linkChild: PUTs the child's parent field to the parent's key", async () => {
