@@ -120,6 +120,7 @@ export interface LedgerAttempt {
   error: string | null;
   /** HEAD's short sha after a successful (exit 0) iteration — unchanged from the previous attempt's if this iteration committed nothing new, which is exactly what `isStuck` below looks for. `null` only for an errored or non-accepted (nonzero exit) attempt, where nothing was checked out to read. */
   commit_sha: string | null;
+  /** BILLABLE tokens (input + cache-write + output) — what `--max-tokens`/`overCumulativeBudget` actually compares against, same metric `defaults.max_run_tokens` uses within one chain run. See `UsageBreakdown.billable_tokens`'s doc comment (`data_types.ts`). NOT the display total (`sessions.total_tokens`, cache reads included) — `cli/commands/loop.ts`'s readback reads `session.billable_tokens`, falling back to `total_tokens` only for a row that predates that column being populated. */
   tokens: number;
   cost: number;
   failures: string[];
@@ -196,6 +197,7 @@ export function resolveGoalId(explicit: string | undefined): string {
 
 export interface CumulativeBudget {
   maxCost?: number;
+  /** `--max-tokens` — checked against BILLABLE tokens (see `LedgerAttempt.tokens`'s own doc comment), the same metric `defaults.max_run_tokens` checks per-call inside one chain run. */
   maxTokens?: number;
 }
 
@@ -203,7 +205,7 @@ export function cumulativeSpend(attempts: LedgerAttempt[]): { cost: number; toke
   return attempts.reduce((acc, a) => ({ cost: acc.cost + a.cost, tokens: acc.tokens + a.tokens }), { cost: 0, tokens: 0 });
 }
 
-/** Whether the goal-scoped ceiling is already exhausted going into the NEXT iteration — a stronger, ledger-wide check than any single iteration's own budget. */
+/** Whether the goal-scoped ceiling is already exhausted going into the NEXT iteration — a stronger, ledger-wide check than any single iteration's own budget. `spend.tokens` must already be BILLABLE tokens (see `LedgerAttempt.tokens`) — this function just compares, it does not know which metric it was handed. */
 export function overCumulativeBudget(budget: CumulativeBudget, spend: { cost: number; tokens: number }): boolean {
   if (budget.maxCost !== undefined && spend.cost >= budget.maxCost) return true;
   if (budget.maxTokens !== undefined && spend.tokens >= budget.maxTokens) return true;
@@ -261,6 +263,7 @@ export interface IterationResult {
   error: string | null;
   /** `null` when nothing was committed this iteration (a no-op, or a throw before any commit). */
   commit_sha: string | null;
+  /** BILLABLE tokens — see `LedgerAttempt.tokens`'s own doc comment; `runIteration` (`cli/commands/loop.ts`) reads this straight from `LedgerAttempt`, so the two must stay the same metric. */
   tokens: number;
   cost: number;
   /** `null` when the iteration errored or exited non-zero — the stop check only ever runs against a chain that accepted its own work, same as `fixLoop` only re-verifies after a phase that didn't already throw. */

@@ -72,6 +72,16 @@ interface SeedPhase {
   name: string;
   owner: string;
   tokens: number;
+  /**
+   * When set, written into the `agent_end` event's payload as
+   * `usage.billable_tokens` — diverging from `tokens` (the display total)
+   * to exercise the billable-vs-total split `db.ts`'s `chainPhaseHistory`
+   * and `estimate.ts`'s `findCutoffPhase` care about. Omitted (the default,
+   * every other fixture in this file) reproduces the "old row" shape — no
+   * `usage` at all — which falls back to `tokens`, exactly as it did before
+   * that split existed; see test 30 below for the diverging case.
+   */
+  billableTokens?: number;
 }
 
 /** One synthetic session: a real `sessions` row + real `phases` rows + a real `agent_end` event per phase (tokens on each), all through the real `Tracer`. */
@@ -98,7 +108,9 @@ async function seedSession(
       ended_at: null,
     };
     await tracer.phaseUpsert(phase);
-    await tracer.event(makeEventRecord({ adw_id: adwId, phase_id: phase.phase_id, type: "agent_end", name: p.owner, tokens: p.tokens, payload: { cost: 0 } }));
+    const payload: Record<string, unknown> = { cost: 0 };
+    if (p.billableTokens !== undefined) payload.usage = { billable_tokens: p.billableTokens };
+    await tracer.event(makeEventRecord({ adw_id: adwId, phase_id: phase.phase_id, type: "agent_end", name: p.owner, tokens: p.tokens, payload }));
   }
   await tracer.sessionAddUsage(adwId, totals.tokens, totals.cost, totals.tokens);
   await tracer.sessionFinish(adwId, status === "success");
@@ -466,6 +478,41 @@ test("26: max_run_tokens below the projection names the cut-off phase; exit code
     assert.equal(code, 0, "estimate reports, it does not gate — exit 3 is reserved for 'no history'");
     assert.equal(report.ceilings.max_run_tokens, 150);
     assert.equal(report.ceilings.cutoff_phase, "scout", "cumulative p50 crosses 150 partway through the 2nd phase");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("30: the cutoff-phase projection walks BILLABLE tokens, not the display total — a cache-heavy phase does not trip the ceiling early", async () => {
+  const dir = tmpRepo("spf-estimate-billable-");
+  try {
+    const configPath = writeConfig(dir, agentYaml("scout"), "defaults:\n  max_run_tokens: 100\n");
+    const tracer = await Tracer.open(dbPathFor(dir), join(dir, ".spf", "data", "sessions", "events.jsonl"));
+    // A single phase whose DISPLAY total (cache reads included) is 1000 —
+    // which alone would cross a 100-token ceiling many times over — but
+    // whose BILLABLE figure (input + cache-write + output) is only 50,
+    // comfortably under it. `defaults.max_run_tokens` is a billable
+    // ceiling (see `UsageBreakdown.billable_tokens`'s doc comment), so the
+    // projected cutoff must be decided by 50, never by 1000.
+    await seedSession(
+      tracer,
+      "r1",
+      "scout",
+      "success",
+      [{ name: "scout", owner: "scout", tokens: 1000, billableTokens: 50 }],
+      { tokens: 1000, cost: 0 },
+    );
+    await tracer.close();
+
+    const { code, report } = await runJson(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]);
+    assert.equal(code, 0);
+    assert.equal(report.phases[0]!.p50, 1000, "the printed phase breakdown still shows the display total, for context");
+    assert.equal(report.phases[0]!.billable_p50, 50, "the billable figure the cutoff calc actually used");
+    assert.equal(
+      report.ceilings.cutoff_phase,
+      null,
+      "never reached — billable (50) stays under the 100-token ceiling even though the display total (1000) would have crossed it 10x over",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

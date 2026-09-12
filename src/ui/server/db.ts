@@ -273,7 +273,7 @@ export class SfDb {
       .query<Session, [number]>(
         `SELECT adw_id, ${await this.optionalColumn("sessions", "adw_name")}, request,
                 status, engineer, started_at, ended_at,
-                total_tokens, total_cost,
+                total_tokens, total_cost, ${await this.optionalColumn("sessions", "billable_tokens")},
                 ${await this.optionalColumn("sessions", "archived")}
            FROM sessions
           WHERE COALESCE(${(await this.hasColumn("sessions", "archived")) ? "archived" : "0"}, 0) = 0
@@ -328,7 +328,7 @@ export class SfDb {
         .query<Session, [string]>(
           `SELECT adw_id, ${await this.optionalColumn("sessions", "adw_name")}, request,
                   status, engineer, started_at, ended_at,
-                  total_tokens, total_cost
+                  total_tokens, total_cost, ${await this.optionalColumn("sessions", "billable_tokens")}
              FROM sessions WHERE adw_id = ?`,
         )
         .get(adwId)) ?? null
@@ -580,8 +580,8 @@ export class SfDb {
     const phaseRows = await this.chunked(ids, (chunk) => {
       const placeholders = chunk.map(() => "?").join(", ");
       return this.db
-        .query<{ adw_id: string; name: string; seq: number; tokens: number | null }, string[]>(
-          `SELECT p.adw_id, p.name, p.seq, e.tokens
+        .query<{ adw_id: string; name: string; seq: number; tokens: number | null; payload_json: string | null }, string[]>(
+          `SELECT p.adw_id, p.name, p.seq, e.tokens, e.payload_json
              FROM phases p LEFT JOIN events e ON e.phase_id = p.phase_id AND e.type = 'agent_end'
             WHERE p.adw_id IN (${placeholders})
             ORDER BY p.seq ASC`,
@@ -589,10 +589,25 @@ export class SfDb {
         .all(...chunk);
     });
 
-    const phasesByAdw = new Map<string, { name: string; seq: number; tokens: number }[]>();
+    const phasesByAdw = new Map<string, { name: string; seq: number; tokens: number; billable_tokens: number }[]>();
     for (const row of phaseRows) {
       const list = phasesByAdw.get(row.adw_id);
-      const entry = { name: row.name, seq: row.seq, tokens: row.tokens ?? 0 };
+      const totalTokens = row.tokens ?? 0;
+      // Derived from the payload, same "parse it in JS" approach `usage()`
+      // above already uses (never a stored column) — so a phase from before
+      // `billable_tokens` existed just falls back to the total, exactly
+      // like `Session.billable_tokens`'s own doc comment (`ui/shared/types.ts`)
+      // describes for the session-level number.
+      let billableTokens = totalTokens;
+      if (row.payload_json) {
+        try {
+          const usage = (JSON.parse(row.payload_json) as { usage?: { billable_tokens?: number } }).usage;
+          if (usage && typeof usage.billable_tokens === "number") billableTokens = usage.billable_tokens;
+        } catch {
+          /* a payload written by an older tracer simply falls back to the total */
+        }
+      }
+      const entry = { name: row.name, seq: row.seq, tokens: totalTokens, billable_tokens: billableTokens };
       if (list) list.push(entry);
       else phasesByAdw.set(row.adw_id, [entry]);
     }
@@ -617,8 +632,14 @@ export interface ChainHistorySession {
   started_at: string | null;
   total_tokens: number;
   total_cost: number;
-  /** In `phases.seq` order; one entry per phase iteration (e.g. `fix_1`, `fix_2`), not yet loop-normalized. */
-  phases: { name: string; seq: number; tokens: number }[];
+  /**
+   * In `phases.seq` order; one entry per phase iteration (e.g. `fix_1`,
+   * `fix_2`), not yet loop-normalized. `tokens` is the display total;
+   * `billable_tokens` is what `spf estimate`'s ceiling projection
+   * (`findCutoffPhase`) actually walks against `defaults.max_run_tokens` —
+   * see that field's own doc comment above for the old-row fallback.
+   */
+  phases: { name: string; seq: number; tokens: number; billable_tokens: number }[];
 }
 
 function clamp(value: number, min: number, max: number): number {

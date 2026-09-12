@@ -117,32 +117,39 @@ export function normalizePhaseName(name: string): string {
 
 export interface PhaseProjection {
   name: string;
+  /** Display total (cache reads included) — for the printed "phase p50 tokens" breakdown, i.e. context, never the ceiling comparison below. */
   p50: number;
   min: number;
   max: number;
+  /** BILLABLE p50 — what `findCutoffPhase` actually walks against `defaults.max_run_tokens` (a billable ceiling; see `UsageBreakdown.billable_tokens`'s doc comment in `core/data_types.ts`). Kept alongside, never instead of, `p50`: the two answer different questions and printing only one would silently pick a metric for the reader. */
+  billable_p50: number;
 }
 
 /**
- * Per run: sum every iteration of a normalized phase into one observation.
- * Across runs: median (p50) and min/max of those per-run sums. A phase
- * absent from a given run (a fix loop that never triggered) counts as a
- * `0` observation for that run — not a skip — so its median reflects how
+ * Per run: sum every iteration of a normalized phase into one observation —
+ * both the display total and the billable figure. Across runs: median (p50)
+ * and min/max of the total sums, plus the median of the billable sums. A
+ * phase absent from a given run (a fix loop that never triggered) counts as
+ * a `0` observation for that run — not a skip — so its median reflects how
  * often the phase actually ran, not just its size when it did.
  */
 export function aggregatePhases(sessions: ChainHistorySession[]): PhaseProjection[] {
   const perRunSums: Map<string, number>[] = sessions.map(() => new Map());
+  const perRunBillableSums: Map<string, number>[] = sessions.map(() => new Map());
   const firstSeq = new Map<string, number>();
   sessions.forEach((session, i) => {
     for (const phase of session.phases) {
       const name = normalizePhaseName(phase.name);
       perRunSums[i]!.set(name, (perRunSums[i]!.get(name) ?? 0) + phase.tokens);
+      perRunBillableSums[i]!.set(name, (perRunBillableSums[i]!.get(name) ?? 0) + phase.billable_tokens);
       if (!firstSeq.has(name) || phase.seq < firstSeq.get(name)!) firstSeq.set(name, phase.seq);
     }
   });
   const names = [...firstSeq.keys()].sort((a, b) => firstSeq.get(a)! - firstSeq.get(b)!);
   return names.map((name) => {
     const perRun = perRunSums.map((m) => m.get(name) ?? 0);
-    return { name, p50: median(perRun), min: Math.min(...perRun), max: Math.max(...perRun) };
+    const perRunBillable = perRunBillableSums.map((m) => m.get(name) ?? 0);
+    return { name, p50: median(perRun), min: Math.min(...perRun), max: Math.max(...perRun), billable_p50: median(perRunBillable) };
   });
 }
 
@@ -152,19 +159,31 @@ export interface RunTotalsProjection {
   max: number;
 }
 
-/** The HEADLINE: median of sampled runs' `sessions.total_tokens` — NOT the sum of the per-phase medians (those are different numbers; median of sums != sum of medians). */
+/** The HEADLINE: median of sampled runs' `sessions.total_tokens` — NOT the sum of the per-phase medians (those are different numbers; median of sums != sum of medians). This is the CONTEXT figure (cache reads included); it is never compared against `max_run_tokens` — see `findCutoffPhase` for the billable-based ceiling check. */
 export function projectRunTotals(sessions: ChainHistorySession[]): RunTotalsProjection | null {
   if (sessions.length === 0) return null;
   const totals = sessions.map((s) => s.total_tokens);
   return { p50: median(totals), min: Math.min(...totals), max: Math.max(...totals) };
 }
 
-/** Where a p50 run would be cut off by `max_run_tokens`, walking the phase breakdown cumulatively in the order phases first appeared. `undefined` means unset; `null` means set but never reached on the p50 path. */
+/**
+ * Where a p50 run would be cut off by `max_run_tokens`, walking the phase
+ * breakdown cumulatively in the order phases first appeared. `undefined`
+ * means unset; `null` means set but never reached on the p50 path.
+ *
+ * Walks `billable_p50`, NOT `p50` — `defaults.max_run_tokens` is a BILLABLE
+ * ceiling (`assertRunBudget` in `core/agents.ts` checks it against
+ * `Run.billable_tokens`, never the display total), so comparing it against
+ * a cumulative TOTAL (cache reads included) would trip the projected cutoff
+ * far earlier than a real run ever would — the same total-vs-billable
+ * mismatch `UsageBreakdown.billable_tokens`'s doc comment (`core/data_types.ts`)
+ * describes for the real ceiling check itself.
+ */
 export function findCutoffPhase(phases: PhaseProjection[], maxRunTokens: number | undefined): string | null | undefined {
   if (maxRunTokens === undefined) return undefined;
   let cumulative = 0;
   for (const phase of phases) {
-    cumulative += phase.p50;
+    cumulative += phase.billable_p50;
     if (cumulative >= maxRunTokens) return phase.name;
   }
   return null;
@@ -384,10 +403,10 @@ function printText(report: EstimateReport, coldStart: boolean): void {
   lines.push("");
   if (report.ceilings.max_run_tokens !== undefined) {
     lines.push(
-      `max_run_tokens   ${fmt(report.ceilings.max_run_tokens)}` +
+      `max_run_tokens   ${fmt(report.ceilings.max_run_tokens)} (billable tokens — cache reads excluded)` +
         (report.ceilings.cutoff_phase ? `  -> would stop at "${report.ceilings.cutoff_phase}" on a p50 run` : ""),
     );
-    lines.push('           (checked BEFORE each call: a run can overshoot by one call, and a one-dispatch chain can never trip it)');
+    lines.push('           (checked BEFORE each call, against billable tokens: a run can overshoot by one call, and a one-dispatch chain can never trip it)');
   }
   if (report.ceilings.max_run_cost !== undefined) {
     lines.push(`max_run_cost     $${report.ceilings.max_run_cost.toFixed(3)}`);
