@@ -61,12 +61,51 @@
  * agent processing", which is the id SPF mints and hands to
  * `init(SfAgent, { id })`. Extraction goes through the globally
  * registered propagator against ROOT_CONTEXT, so no leaked loop context
- * can stick. The SAME registration also carries this session's `adw_id`/
- * agent name (see `FlueSessionRegistration`) stashed as a plain context
- * VALUE (not a span field) on the context handed back — so a session's
- * `x-correlation-id`/`x-spf-agent` ride the exact same "resolved once per
- * submission, read per real HTTP call" path as `traceparent` does, via
- * `GatewayHeadersPropagator` below, instead of the static-per-model-id
+ * can stick.
+ *
+ * BLOCKER 1 (fixed) — `resolveRootContext`'s return value NEVER becomes the
+ * active context. Verified against `@flue/opentelemetry`'s own dist
+ * (index.mjs:361 for the `chat <model>` span, :329 for the interceptor that
+ * activates it): the resolved `Context` is passed to `tracer.startSpan(...)`
+ * ONLY as `parentContext` — it supplies the new span's trace id/parent span
+ * id and is then discarded. What actually gets activated around the real
+ * dispatch is `context.with(trace.setSpan(context.active(), span), next)` —
+ * a context built from `context.active()` (whatever was active before,
+ * almost always ROOT) plus the freshly minted `span`, NOT the resolved
+ * context itself. A prior version of this module stashed the session's
+ * `adw_id`/`agent_name` as a plain context VALUE on the context
+ * `resolveFlueRootContext` returned (keyed under a private context key) and
+ * had `GatewayHeadersPropagator` read that value back at inject time — which
+ * can never work, because that exact context object is never the one made
+ * active; only its SpanContext (traceId/spanId/flags) survives, carried by
+ * the new span. Confirmed live: `scratchpad/probe_installed_real.mjs`,
+ * reproducing flue's exact two-line sequence against a real pi-ai dispatch,
+ * printed `x-correlation-id: ABSENT` / `x-spf-agent: ABSENT` before this fix.
+ *
+ * THE FIX: key the registration by TRACE ID instead of by context identity.
+ * `registerFlueSessionTrace` now ALSO records, in `traceIdRegistrations`,
+ * the trace id parsed out of the very `traceparent` it's given — the same
+ * deterministic trace id `resolveFlueRootContext` extracts and hands to
+ * `tracer.startSpan` as that span's parent, so the span it creates carries
+ * that exact trace id forward into whatever context DOES get activated.
+ * `GatewayHeadersPropagator.inject()` below reads `trace.getSpanContext(ctx)
+ * ?.traceId` — the thing that provably survives into the active context at
+ * request time — and looks IT UP in `traceIdRegistrations`, rather than
+ * trying to read a value off a context object that was never activated.
+ * One deterministic trace id per adw_id, and flue's single claim loop
+ * dispatches one submission's calls sequentially, so "latest registration
+ * for this trace id" is correct within a run; two flue AGENTS dispatching
+ * truly concurrently to overlapping traces (not the common case) could still
+ * collide on this map, the same documented race `ollama_provider.ts`'s
+ * static per-model-id headers already carry. `mostRecentRegistration` is a
+ * last-resort, process-wide fallback (not scoped to any one trace id) for
+ * the rarer case of a span whose trace id genuinely isn't in the map at all
+ * — an unmapped/bookkeeping span `resolveFlueRootContext` failed to root,
+ * which mints its own random trace id. The SAME registration carries this
+ * session's `adw_id`/agent name (see `FlueSessionRegistration`) so a
+ * session's `x-correlation-id`/`x-spf-agent` ride the exact same "resolved
+ * once per submission, read per real HTTP call" path as `traceparent` does,
+ * via `GatewayHeadersPropagator` below, instead of the static-per-model-id
  * fallback `ollama_provider.ts` needs when this pipeline isn't installed at
  * all (otel unconfigured). Consequences, all intended:
  *   - Flue's spans inherit SPF's sha256 trace id, parented under the
@@ -78,16 +117,38 @@
  *     SPF's trace — parity with `claude_code`'s `ANTHROPIC_CUSTOM_HEADERS`
  *     path. The same per-request injection point also carries THIS
  *     session's `x-correlation-id`/`x-spf-agent`, correctly attributed even
- *     when multiple sessions are concurrent in one process (their `ctx.id`s,
- *     and therefore their registrations, are distinct).
+ *     when multiple sessions are concurrent in one process, AS LONG AS their
+ *     deterministic trace ids differ (their `ctx.id`s, and therefore their
+ *     registrations, are distinct) — see BLOCKER 1 above for the precise
+ *     lookup key.
  *   - Unmapped sessions (never registered, restarted process with a
  *     durable backlog, post-`unregister` straggler bookkeeping spans)
  *     resolve to an unparented root — flue's spans root a separate SDK
  *     trace exactly as v1 did, correlatable by `spf.adw_id`/time window.
- *     Degraded join, never an error and never MIS-attributed.
+ *     Degraded join, never an error and never MIS-attributed; the gateway
+ *     headers for exactly this case fall back to `mostRecentRegistration`
+ *     rather than going silent.
  *   - flue's internal `executionContext.traceCarrier` (typed but not on
  *     the public `AgentDispatchRequest` surface) stays unused — noted here
  *     as flue's own escape hatch, not something SPF reaches into.
+ *
+ * STATIC HEADERS STAY SUPPRESSED WHEN INSTALLED (BLOCKER 1's other half,
+ * decided AGAINST enabling): `ollama_provider.ts`'s `modelFor()` keeps
+ * omitting `Model.headers`' `x-correlation-id`/`x-spf-agent` whenever
+ * `isFluePropagationInstalled()` is true — it is NOT also stamped as a
+ * baseline alongside this propagator. Measured live
+ * (`scratchpad/probe_duplicate_header.mjs`, against the REAL
+ * `@opentelemetry/instrumentation-undici` used here): `request.addHeader(k,
+ * v)` — what that instrumentation calls for every header
+ * `propagation.inject()` returns — APPENDS a second raw header line rather
+ * than replacing one already present (undici's own `Request.addHeader` has
+ * no dedupe-by-name step); the receiving `http.IncomingMessage.headers`
+ * then comma-joins the two into one corrupted value
+ * (`"FROM_STATIC, FROM_PROPAGATOR"`), and `req.rawHeaders` shows the literal
+ * duplicate line. So when propagation is installed, THIS propagator is the
+ * sole source of `x-correlation-id`/`x-spf-agent` — never doubled up with a
+ * static value from `Model.headers` — proven on the wire by
+ * `src/test/ollama_gateway_e2e.test.ts`'s "no duplicate headers" test.
  *
  * REGISTRATION TIMING. `installFluePropagation()` is called from
  * `agent_flue.ts`'s `run()`, before `ensureRuntime()`/dispatch — i.e. before
@@ -110,7 +171,7 @@
  * agent dispatches this process makes) happens to arrive first.
  */
 
-import { createContextKey, defaultTextMapGetter, propagation, ROOT_CONTEXT, trace as traceApi, context as contextApi, isSpanContextValid, type Context, type TextMapPropagator, type TextMapSetter } from "@opentelemetry/api";
+import { defaultTextMapGetter, propagation, ROOT_CONTEXT, trace as traceApi, context as contextApi, isSpanContextValid, type Context, type TextMapPropagator, type TextMapSetter } from "@opentelemetry/api";
 import { AsyncHooksContextManager } from "@opentelemetry/context-async-hooks";
 import { CompositePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
@@ -157,39 +218,92 @@ export interface FlueSessionRegistration {
  */
 const flueSessionTraces = new Map<string, FlueSessionRegistration>();
 
+/** Just the gateway-identity half of a `FlueSessionRegistration` — what `GatewayHeadersPropagator` actually needs once it's looking things up by trace id instead of by session id. */
+interface GatewayIdentity {
+  adwId?: string;
+  agentName?: string;
+}
+
+/**
+ * Trace id -> gateway identity, keyed on the deterministic trace id parsed
+ * out of a registration's OWN `traceparent` (see `traceIdFromTraceparent`) —
+ * see the module header's BLOCKER 1 section for why this, and not a context
+ * VALUE, is the lookup `GatewayHeadersPropagator` uses. Populated by
+ * `registerFlueSessionTrace`, pruned by `unregisterFlueSessionTrace`. A
+ * trace id collision here (two DIFFERENT registrations sharing one trace id)
+ * is not expected in practice — trace ids are SPF's deterministic per-adw_id
+ * ids — but if it ever happened, the later `registerFlueSessionTrace` call
+ * would simply win, matching this map's own "current call wins" rule.
+ */
+const traceIdRegistrations = new Map<string, GatewayIdentity>();
+
+/**
+ * The identity most recently passed to `registerFlueSessionTrace`, kept
+ * process-wide (NOT removed by `unregisterFlueSessionTrace` — see that
+ * function's doc) as `GatewayHeadersPropagator`'s last-resort fallback for a
+ * span whose trace id isn't in `traceIdRegistrations` at all: flue's own
+ * unmapped/bookkeeping spans (an unregistered session id, a malformed
+ * traceparent — see `resolveFlueRootContext`'s doc) mint a brand-new random
+ * trace id that was never registered under. `undefined` until the first
+ * `registerFlueSessionTrace` call in this process.
+ */
+let mostRecentRegistration: GatewayIdentity | undefined;
+
+/**
+ * Parses the W3C `traceId` segment out of a `traceparent` string via a real
+ * `propagation.extract`/`getSpanContext` round trip — the SAME extraction
+ * `resolveFlueRootContext` performs, so "the trace id we index
+ * `traceIdRegistrations` under" and "the trace id a span parented via this
+ * `traceparent` actually carries" are provably the same value, not two
+ * independent parses that could drift. Returns `undefined` for a malformed
+ * `traceparent` (mirrors `resolveFlueRootContext`'s own malformed-input
+ * handling) rather than throwing.
+ */
+function traceIdFromTraceparent(traceparent: string): string | undefined {
+  const extracted = propagation.extract(ROOT_CONTEXT, { traceparent }, defaultTextMapGetter);
+  const spanContext = traceApi.getSpanContext(extracted);
+  return spanContext && isSpanContextValid(spanContext) ? spanContext.traceId : undefined;
+}
+
 /**
  * Registers `registration` (SPF's deterministic agent-call traceparent, plus
  * this session's adw_id/agent name — see `FlueSessionRegistration`) as the
  * trace root for flue spans belonging to `sessionId` — flue's instance id,
  * minted by SPF and handed to `init(SfAgent, { id })`. Overwrites a prior
  * registration for the same id (a same-phase retry is the same logical call;
- * the current call wins).
+ * the current call wins). Also indexes the SAME identity under this
+ * registration's parsed trace id (`traceIdRegistrations`) and records it as
+ * the process-wide `mostRecentRegistration` fallback — see the module
+ * header's BLOCKER 1 section and each map's own doc for why both exist.
  */
 export function registerFlueSessionTrace(sessionId: string, registration: FlueSessionRegistration): void {
   flueSessionTraces.set(sessionId, registration);
+  const identity: GatewayIdentity = { adwId: registration.adwId, agentName: registration.agentName };
+  mostRecentRegistration = identity;
+  const traceId = traceIdFromTraceparent(registration.traceparent);
+  if (traceId) traceIdRegistrations.set(traceId, identity);
 }
 
-/** Context key `resolveFlueRootContext` stashes a session's `{adwId?, agentName?}` under, and `GatewayHeadersPropagator` reads back — see the module header. Not exported: nothing outside this module needs the key itself, only the propagator's behavior. */
-const GATEWAY_CTX_KEY = createContextKey("spf.gatewayCallContext");
-
 /**
- * Injects `x-correlation-id`/`x-spf-agent` from whatever gateway-call
- * context `resolveFlueRootContext` stashed on the active `Context` for the
- * session this span/request belongs to — the SAME per-real-HTTP-call
- * injection point `W3CTraceContextPropagator` uses for `traceparent`, so
- * these two headers are attributed exactly as precisely as the trace id is
- * (correct even with multiple concurrent flue sessions in one process,
- * unlike the static-per-model-id fallback `ollama_provider.ts` falls back to
- * when this whole pipeline isn't installed). A no-op when there is nothing
- * registered for the active context (an unmapped/un-instrumented session) —
- * never throws, never invents a value. Replaces the old
- * `XRequestIdPropagator`: `x-request-id` must NEVER reach the gateway
- * (Envoy/Switchyard own it end-to-end; a client-sent value corrupts their
- * own sampling) and this repo no longer has anything that wants it emitted.
+ * Injects `x-correlation-id`/`x-spf-agent` by looking up the ACTIVE
+ * `Context`'s SpanContext trace id (`trace.getSpanContext(ctx)?.traceId`) in
+ * `traceIdRegistrations` — the same per-real-HTTP-call injection point
+ * `W3CTraceContextPropagator` uses for `traceparent`, and, critically, keyed
+ * on the one piece of `resolveFlueRootContext`'s return value that provably
+ * survives into that active context (see the module header's BLOCKER 1
+ * section for why a context VALUE does not). Falls back to
+ * `mostRecentRegistration` when this exact trace id isn't in the map (an
+ * unmapped/bookkeeping span — see that variable's own doc), and is a true
+ * no-op (nothing set) only when NEITHER produces anything — never throws,
+ * never invents a value. Replaces the old `XRequestIdPropagator`:
+ * `x-request-id` must NEVER reach the gateway (Envoy/Switchyard own it
+ * end-to-end; a client-sent value corrupts their own sampling) and this repo
+ * no longer has anything that wants it emitted.
  */
 export class GatewayHeadersPropagator implements TextMapPropagator {
   inject(ctx: Context, carrier: unknown, setter: TextMapSetter): void {
-    const registration = ctx.getValue(GATEWAY_CTX_KEY) as { adwId?: string; agentName?: string } | undefined;
+    const spanContext = traceApi.getSpanContext(ctx);
+    const registration = (spanContext && traceIdRegistrations.get(spanContext.traceId)) ?? mostRecentRegistration;
     if (!registration) return;
     if (registration.adwId) setter.set(carrier, X_CORRELATION_ID_HEADER, registration.adwId);
     if (registration.agentName) setter.set(carrier, X_SPF_AGENT_HEADER, registration.agentName);
@@ -206,10 +320,19 @@ export class GatewayHeadersPropagator implements TextMapPropagator {
  * Idempotent — called from `run()`'s `finally`. Post-settlement bookkeeping
  * spans flue mints after this point simply resolve to an unparented root
  * (separate trace), which is preferable to leaking a registration whose id
- * a REUSED session id could collide with on a later phase.
+ * a REUSED session id could collide with on a later phase. Also prunes this
+ * session's entry out of `traceIdRegistrations` (parsed fresh from the
+ * departing registration's own `traceparent`, so it removes exactly the
+ * entry this session added) — but deliberately does NOT touch
+ * `mostRecentRegistration`, which is a process-wide last-resort fallback,
+ * not scoped to any one session's lifetime (see its own doc).
  */
 export function unregisterFlueSessionTrace(sessionId: string): void {
+  const registration = flueSessionTraces.get(sessionId);
   flueSessionTraces.delete(sessionId);
+  if (!registration) return;
+  const traceId = traceIdFromTraceparent(registration.traceparent);
+  if (traceId) traceIdRegistrations.delete(traceId);
 }
 
 /**
@@ -222,6 +345,13 @@ export function unregisterFlueSessionTrace(sessionId: string): void {
  * unparented root span of its own) for an unmapped session id, a malformed
  * traceparent, an absent ctx — and, with no global propagator installed,
  * for everything. Exported for tests.
+ *
+ * Used by `@flue/opentelemetry` ONLY as `tracer.startSpan`'s parent
+ * argument (see the module header's BLOCKER 1 section) — the value handed
+ * back here is never itself activated, so it carries no context VALUES for
+ * `GatewayHeadersPropagator` to read; `x-correlation-id`/`x-spf-agent` are
+ * instead looked up by trace id, via `traceIdRegistrations`, which
+ * `registerFlueSessionTrace` populates independently of this function.
  */
 export function resolveFlueRootContext(
   _event: unknown,
@@ -232,16 +362,7 @@ export function resolveFlueRootContext(
   const extracted = propagation.extract(ROOT_CONTEXT, { traceparent: registration.traceparent }, defaultTextMapGetter);
   const spanContext = traceApi.getSpanContext(extracted);
   if (!spanContext || !isSpanContextValid(spanContext)) return undefined;
-  // Stash this session's adw_id/agent name as a plain context VALUE
-  // (untyped by SpanContext, so it rides along with — but is invisible to —
-  // the span itself) for `GatewayHeadersPropagator` to read back at the
-  // point it injects headers for a real outbound call made under this
-  // context. Omitted (no key set at all) when neither field is present, so
-  // `GatewayHeadersPropagator.inject()`'s `ctx.getValue(...) undefined` path
-  // is exercised identically to "nothing registered".
-  const adwId = registration.adwId;
-  const agentName = registration.agentName;
-  return adwId || agentName ? extracted.setValue(GATEWAY_CTX_KEY, { adwId, agentName }) : extracted;
+  return extracted;
 }
 
 export interface FluePropagationConfig {
@@ -296,6 +417,18 @@ export function installFluePropagation(cfg: FluePropagationConfig | undefined | 
 export function resetFluePropagationForTest(): void {
   installed = false;
   flueInstrumented = false;
+}
+
+/**
+ * Tests only: forgets `mostRecentRegistration` (the process-wide fallback —
+ * see its own doc) so a test asserting "nothing registered -> no headers"
+ * isn't at the mercy of file-level test declaration order leaving a stale
+ * identity behind from an earlier test's `registerFlueSessionTrace` call.
+ * Does NOT touch `flueSessionTraces`/`traceIdRegistrations` — those are
+ * already scoped per session id and cleaned up by `unregisterFlueSessionTrace`.
+ */
+export function resetGatewayFallbackForTest(): void {
+  mostRecentRegistration = undefined;
 }
 
 /**

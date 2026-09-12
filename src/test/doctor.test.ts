@@ -535,7 +535,7 @@ async function withMockedFetchCapturingHeaders<T>(
   }
 }
 
-test("doctor: OLLAMA_BASE_URL reachability probe sends no Authorization header when OLLAMA_API_KEY is unset — a bare local Ollama server needs none", async () => {
+test("doctor: OLLAMA_BASE_URL reachability probe sends the SAME dummy bearer a real dispatch would when OLLAMA_API_KEY is unset (MINOR 3: doctor and dispatch now agree via ollamaApiKey())", async () => {
   const dir = tmpRepo();
   try {
     writeSpfConfig(dir, OLLAMA_FLUE_CONFIG);
@@ -549,7 +549,11 @@ test("doctor: OLLAMA_BASE_URL reachability probe sends no Authorization header w
           assert.equal(reachCheck!.severity, "info");
           assert.match(reachCheck!.detail, /^reachable: GET/);
           assert.equal(calls.length, 1);
-          assert.equal("authorization" in calls[0]!.headers, false);
+          // A prior version sent no Authorization header at all here — a
+          // real divergence from ollama_provider.ts's `resolve()`, which
+          // ALWAYS sends a bearer (the dummy placeholder when unset). Now
+          // both call the same `ollamaApiKey()`.
+          assert.equal(calls[0]!.headers["authorization"], "Bearer ollama-local-unused");
         },
       ),
     );

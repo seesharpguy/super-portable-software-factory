@@ -74,8 +74,19 @@ const DUMMY_API_KEY = "ollama-local-unused";
  * is harmless — just not byte-identical. Read fresh inside `resolve()` (see
  * its call site below) — never cached — so a key exported mid-process (or
  * changed) takes effect on the very next dispatch with no re-registration.
+ *
+ * MINOR 3: exported so `doctor.ts`'s `OLLAMA_BASE_URL reachability` probe
+ * calls this SAME function rather than reading `process.env.OLLAMA_API_KEY`
+ * raw — a prior version of that probe sent NO `Authorization` header at all
+ * when the env var was unset, which diverges from what a real dispatch
+ * sends (the dummy bearer below, always). Against a gateway that rejects a
+ * request with no `Authorization` header at all differently than one with a
+ * wrong/dummy bearer, that divergence could make doctor report reachable
+ * when a real dispatch would 401, or vice versa. Calling `ollamaApiKey()` in
+ * both places means doctor's probe and a real dispatch send byte-identical
+ * bearers for the same env state.
  */
-function ollamaApiKey(): string {
+export function ollamaApiKey(): string {
   const key = (process.env.OLLAMA_API_KEY ?? "").trim();
   return key || DUMMY_API_KEY;
 }

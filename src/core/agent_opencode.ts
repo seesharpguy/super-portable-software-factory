@@ -102,6 +102,30 @@
  * exported pure functions so every fragment is unit-testable without
  * spawning a real subprocess — same discipline as the rest of this module.
  *
+ * MINOR-4 (deliberate, not an oversight): `otelProviderHeaders()` returns
+ * non-null — and so `tempConfigContents()` writes a real `provider` block —
+ * whenever EITHER `otel` OR `gateway.adwId`/`gateway.agentName` is present,
+ * and `data_types.ts`'s `AgentRequest.adw_id`/`agent_name` doc is explicit
+ * that those two are set by `agents.ts`'s `send()` from `run.adw_id`/
+ * `agent.name` UNCONDITIONALLY — every SPF run has an adw_id, every agent
+ * has a name — NOT gated on `observability.otel` being configured at all.
+ * The practical consequence: for any `opencode` agent whose `--model`
+ * carries a `provider/` prefix (opencode's own documented model-id shape;
+ * see `otelProviderHeaders`'s own doc for the bare-model-name exception),
+ * this module writes a temporary `opencode.json` (`mkdtempSync` + one
+ * `writeFileSync`, removed in `run()`'s `finally`) on EVERY invocation, even
+ * with `observability.otel` unconfigured and no `tools:` restriction in
+ * play — there is no "otel off, no gateway identity, no tools restriction"
+ * case left in practice once a run has an adw_id, which is always. This is
+ * KEPT, not gated behind an extra "only when otel/tools apply" check: the
+ * gateway needs `x-correlation-id`/`x-spf-agent` on every real call to group
+ * it by run (same rationale as `ollama_provider.ts`'s static per-model
+ * headers), independent of whether tracing is turned on, and a temp file
+ * per subprocess invocation is cheap relative to spawning that subprocess
+ * at all. A caller that truly wants zero config-file overhead has no lever
+ * for that today short of clearing `adw_id`/`agent_name` on the request.
+ *
+
  * OPERATOR-CONFIG MERGE: when a caller-provided `OPENCODE_CONFIG` already
  * exists in the base env (operatorEnv() passthrough or an agent's
  * env_allowlist) AND this module needs a temp config of its own (a tools:
