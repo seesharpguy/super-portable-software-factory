@@ -798,6 +798,13 @@ export const ConfigDefaultsSchema = v.object({
    * Emptying this list (`read_only_ignore: []`) restores today's strict
    * behavior exactly — every touched path outside an agent's own allowlist
    * fails the phase, lockfiles included.
+   *
+   * PRECEDENCE: `protected_files` always wins. A path matching
+   * `protected_files` is never ignorable via `read_only_ignore`, no matter
+   * how narrowly write-restricted the agent is — a pattern here that
+   * happens to also match a protected path is not read as "exempt this
+   * from protected_files too"; it stays a real breach. See
+   * `permissions.ts`'s `isSafeToIgnore` for the enforcement.
    */
   read_only_ignore: v.optional(v.array(v.string()), () => [
     "**/package-lock.json",

@@ -184,7 +184,18 @@ function rollBack(
   return result.status === 0 ? "rolled back" : "could not roll back";
 }
 
-/** True when `p` matches one of `defaults.read_only_ignore`'s patterns — dependency-manager bookkeeping (a lockfile), not the repo's intent. See that field's own doc comment (`data_types.ts`) for why it exists and what rolling one back "silently" means. Necessary but not sufficient — see `isSafeToIgnore`, which is what `enforce()` actually gates on. */
+/**
+ * True when `p` matches one of `defaults.read_only_ignore`'s patterns —
+ * dependency-manager bookkeeping (a lockfile), not the repo's intent. See
+ * that field's own doc comment (`data_types.ts`) for why it exists and what
+ * rolling one back "silently" means. Necessary but not sufficient — see
+ * `isSafeToIgnore`, which is what `enforce()` actually gates on, and which
+ * ALSO requires the path not match `defaults.protected_files`:
+ * `read_only_ignore` is a narrow "this churn is incidental, not intent"
+ * carve-out, and must never be read as a backdoor around a path an operator
+ * explicitly locked down. `protected_files` always wins — a path listed
+ * there is never ignorable via `read_only_ignore`, regardless of role.
+ */
 function isIgnorableChurn(p: string, cfg: SFConfig): boolean {
   return (cfg.defaults.read_only_ignore ?? []).some((pattern) => matches(p, pattern));
 }
@@ -210,10 +221,21 @@ function isIgnorableChurn(p: string, cfg: SFConfig): boolean {
  *    (uncommitted work lost, cannot restore)" — and neither of those is a
  *    restore. Calling that "ignored" would report a repair that never
  *    happened; it must fail the phase like any other breach instead.
+ *  - The path does NOT match `defaults.protected_files`. `protected_files`
+ *    is what made this a breach in the first place (`permitted()` above);
+ *    `read_only_ignore` matching the SAME path too is not a stronger claim
+ *    that the write was safe, it just means an operator's lockfile-churn
+ *    pattern happens to overlap a path they explicitly protected. Without
+ *    this check a `read_only_ignore` entry could silently exempt a
+ *    read-only agent from `protected_files` — the very thing `protected_files`
+ *    exists to prevent regardless of an agent's `writes` role. So a
+ *    protected path is never ignorable: it always falls through to the
+ *    real-breach path below, still rolled back, but failing the phase.
  */
 function isSafeToIgnore(p: string, agent: AgentConfig, cfg: SFConfig, before: Record<string, string>): boolean {
   const isTrueReadOnlyAgent = Array.isArray(agent.writes) && agent.writes.length === 0;
-  return isTrueReadOnlyAgent && isIgnorableChurn(p, cfg) && !(p in before);
+  const isProtected = cfg.defaults.protected_files.some((pattern) => matches(p, pattern));
+  return isTrueReadOnlyAgent && isIgnorableChurn(p, cfg) && !(p in before) && !isProtected;
 }
 
 /**

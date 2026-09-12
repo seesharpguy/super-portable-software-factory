@@ -513,6 +513,15 @@ test("30: the cutoff-phase projection walks BILLABLE tokens, not the display tot
       null,
       "never reached — billable (50) stays under the 100-token ceiling even though the display total (1000) would have crossed it 10x over",
     );
+
+    const { logs } = await captureConsole(() =>
+      estimateCommand(["scout", "look around", "--config", configPath, "--cwd", dir, "--no-probe"]),
+    );
+    assert.match(
+      logs.join("\n"),
+      /billable p50\s+50\s+\(cache reads excluded/,
+      "the text report prints the billable p50 figure the ceiling is actually compared against, not just the display total",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

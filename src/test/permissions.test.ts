@@ -323,3 +323,38 @@ test("enforce: a write-restricted (non-empty writes) agent that changes package.
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── fix: protected_files always wins over read_only_ignore ─────────────────
+
+test("enforce: a read_only_ignore pattern that also matches a protected_files path does NOT exempt a read-only agent — still a real breach", () => {
+  const dir = makeRepo();
+  try {
+    // An operator's read_only_ignore pattern happens to overlap a path they
+    // separately locked down with protected_files. protected_files must
+    // still win: this is not a lockfile-churn carve-out, it is the exact
+    // machinery protected_files exists to guard.
+    const cfg = makeCfg({ read_only_ignore: ["**/spf.config.yaml"], protected_files: [".spf/", "spf.config.yaml"] });
+    const agent = makeAgent({ writes: [] }); // true read-only
+    const before = snapshot({ repo_root: dir, cfg }); // clean — spf.config.yaml does not exist yet
+    writeFileSync(path.join(dir, "spf.config.yaml"), "defaults:\n  protected_files: []\n");
+
+    const ignoredCalls: string[][] = [];
+    let thrown: PermissionBreach | undefined;
+    try {
+      enforce({ repo_root: dir, cfg }, null, agent, before, (paths) => ignoredCalls.push(paths));
+    } catch (error) {
+      thrown = error as PermissionBreach;
+    }
+
+    assert.ok(thrown instanceof PermissionBreach, "protected_files must win — a read-only agent editing a protected path is a real breach, even though read_only_ignore also matches it");
+    assert.match(thrown!.message, /spf\.config\.yaml/);
+    assert.deepEqual(ignoredCalls, [], "onIgnored must not fire — this was never safely ignorable");
+    assert.equal(
+      execFileSync("git", ["status", "--porcelain", "spf.config.yaml"], { cwd: dir, encoding: "utf-8" }).trim(),
+      "",
+      "still rolled back (deleted, since it was untracked) despite failing the phase",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

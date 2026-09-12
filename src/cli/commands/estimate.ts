@@ -379,6 +379,12 @@ function printText(report: EstimateReport, coldStart: boolean): void {
       for (const phase of report.phases) {
         lines.push(`${phase.name.padEnd(20)} ${fmt(phase.p50).padStart(12)}    ${fmt(phase.min)} - ${fmt(phase.max)}`);
       }
+      // The display total above (cache reads included) is context only — it is
+      // never what `max_run_tokens` is checked against (see `findCutoffPhase`).
+      // Print the same billable sum that calc actually walks, so the ceiling
+      // line below (labeled "billable tokens") has a comparable figure on screen.
+      const billableTotal = report.phases.reduce((sum, p) => sum + p.billable_p50, 0);
+      lines.push(`billable p50         ${fmt(billableTotal).padStart(12)}    (cache reads excluded; what max_run_tokens checks against)`);
     }
     if (report.projected) {
       lines.push("");

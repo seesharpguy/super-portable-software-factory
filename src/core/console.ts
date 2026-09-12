@@ -140,8 +140,9 @@ export class Console {
   /**
    * `costIsEstimate` (default `false`, byte-identical to before this param
    * existed): true when `run.cost_is_estimate` found a `claude_code` agent
-   * pointed at a non-Anthropic `ANTHROPIC_BASE_URL` (see `agents.ts`'s
-   * `isGatewayEstimatedCost`) — `total_cost_usd` from `claude`'s own CLI is
+   * pointed at a non-Anthropic `ANTHROPIC_BASE_URL` (see `runner.ts`'s
+   * `Run.recordDispatch` / `agents.ts`'s `isGatewayEstimatedDispatch`) —
+   * `total_cost_usd` from `claude`'s own CLI is
    * Anthropic's price table applied client-side, which is a fact only when
    * Anthropic itself served the request, and a labeled guess otherwise. The
    * label is cosmetic only: `cost` itself is unchanged (still the real sum
