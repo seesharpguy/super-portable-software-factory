@@ -175,6 +175,31 @@ test("linkToSpec: falls back to a plain comment naming the spec when the issue-l
   }
 });
 
+test("linkToSpec: the fallback comment ALSO failing is logged, never thrown out of publish()", async () => {
+  const { calls, restore } = mockFetch([
+    { status: 400, body: { errorMessages: ["link type not found"] } },
+    { status: 500, body: { errorMessages: ["comment API down"] } },
+  ]);
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg: unknown) => logged.push(String(msg));
+  try {
+    const provider = makeProvider();
+    await assert.doesNotReject(
+      provider.linkToSpec("WEB-1", { id: "WEB-2", title: "leaf", body: "", labels: [] }),
+      "both the link call and its comment fallback failing must still resolve — a cosmetic cross-reference must never fail the whole publish",
+    );
+    assert.equal(calls.length, 2, "the failed link attempt, then the failed fallback comment attempt");
+    assert.ok(
+      logged.some((line) => line.includes("WEB-2") && line.includes("WEB-1")),
+      "the failure is logged, naming both the issue and the spec it could not link to",
+    );
+  } finally {
+    console.error = originalError;
+    restore();
+  }
+});
+
 // ── linkChild ────────────────────────────────────────────────────────────
 
 test("linkChild: PUTs the child's parent field to the parent's key", async () => {

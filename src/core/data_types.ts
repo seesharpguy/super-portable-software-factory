@@ -1205,6 +1205,16 @@ export const WatchJiraConfigSchema = v.object({
    * here regardless of which type actually published. "Relates" is a
    * built-in link type on every Jira Cloud project; override this only if a
    * project's admin has renamed or restricted it.
+   *
+   * MUST NAME A SYMMETRIC LINK TYPE. `JiraProvider.linkToSpec` fixes which
+   * side is `inwardIssue`/`outwardIssue` (the published root is always
+   * inward, the spec always outward) and does not expose direction as a
+   * separate knob — harmless for a symmetric type like "Relates" (Jira's UI
+   * does not even surface a direction for one), but pointing this at a
+   * DIRECTIONAL type (e.g. "blocks"/"is blocked by") would silently record
+   * the opposite relationship from the one intended. Only rename this to
+   * another symmetric type; a directional one needs code changes, not just
+   * config.
    */
   link_type: v.optional(v.string(), "Relates"),
 });

@@ -313,6 +313,24 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
    * bottom, a cosmetic cross-reference. Falls back to a plain comment
    * naming the spec, so the relationship is visible SOMEWHERE even when
    * the link API itself is unavailable.
+   *
+   * The fallback comment gets the SAME "never fail publish() over this"
+   * treatment as the link call itself: a rate limit or network blip on the
+   * comment call is just as cosmetic a failure as one on the link call, so
+   * it is caught and logged here rather than left to propagate out of
+   * `publish()` (`refine.ts`), which awaits this unguarded.
+   *
+   * `this.linkType` MUST name a SYMMETRIC link type ("Relates" and its
+   * project-renamed equivalents) — `inwardIssue`/`outwardIssue` above are
+   * fixed (the published root is always inward, the spec always outward)
+   * and not independently configurable, which is fine for a symmetric type
+   * (Jira does not surface the direction differently in the UI) but WRONG
+   * for a directional one (e.g. "blocks"/"is blocked by"): configuring
+   * `watch.jira.link_type` to a directional type would silently assert the
+   * opposite relationship from the one intended. See that field's own doc
+   * comment (`data_types.ts`) — direction is not exposed as a separate knob
+   * on purpose, to avoid a second config field only meaningful alongside a
+   * link type most projects never change from the "Relates" default.
    */
   async linkToSpec(specId: string, issue: Issue): Promise<void> {
     try {
@@ -324,8 +342,18 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
           outwardIssue: { key: specId },
         }),
       });
-    } catch {
-      await this.comment(issue, `Refined from ${specId}.`);
+    } catch (linkError) {
+      try {
+        await this.comment(issue, `Refined from ${specId}.`);
+      } catch (commentError) {
+        // Both the issue-link API and the comment fallback failed — the
+        // spec/root relationship is not recorded ANYWHERE on Jira this run,
+        // but that is still a cosmetic loss, not a reason to fail the whole
+        // publish (see this method's own doc comment).
+        console.error(
+          `spf watch: ${issue.id} — could not link to spec ${specId} (${linkError instanceof Error ? linkError.message : String(linkError)}) and the fallback comment also failed — ${commentError instanceof Error ? commentError.message : String(commentError)}`,
+        );
+      }
     }
   }
 
