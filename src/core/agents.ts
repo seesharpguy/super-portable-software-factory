@@ -735,7 +735,7 @@ interface RunForAgents {
     retry: (name: string, attempt: number, limit: number, reason: string) => Promise<void>;
     envelopeSummary: (envelope: EnvelopeBase, typeName: string) => Promise<void>;
     agentFinished: (name: string, tokens: number, cost: number) => Promise<void>;
-    /** Free-form detail line — used here only to name a `defaults.read_only_ignore` rollback so it's visible without failing the phase. */
+    /** Free-form detail line — used here only to name a `defaults.read_only_ignore` restore so it's visible without failing the phase. */
     note: (message: string) => Promise<void>;
   };
   addUsage: (tokens: number, cost: number, billableTokens: number) => Promise<void>;
@@ -1109,9 +1109,14 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
   let touched: string[];
   try {
     touched = permissions.enforce(run, phase, agent, treeBefore, (ignoredPaths) => {
-      void run.console.note(
-        `${agent.name}: rolled back and ignored dependency-lockfile churn (defaults.read_only_ignore) without failing the phase: ${ignoredPaths.join(", ")}`,
-      );
+      // Fire-and-forget, same discipline as onSpawn/onExit above: this is a
+      // logging side effect off the main control flow, not something a
+      // failed write here should turn into an unhandled rejection.
+      void run.console
+        .note(
+          `${agent.name}: restored and ignored dependency-lockfile churn (defaults.read_only_ignore) without failing the phase: ${ignoredPaths.join(", ")}`,
+        )
+        .catch(() => {});
     });
   } catch (breach) {
     await run.tracer.event(

@@ -185,3 +185,125 @@ test("enforce: an agent explicitly allowed to write the lockfile is unaffected e
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── BLOCKER fix: ignoring requires the path was CLEAN before the phase ──
+//
+// Before this fix, `enforce()` ignored (and reported "rolled back and
+// ignored") ANY read_only_ignore match regardless of whether the path was
+// already dirty going in — even when `rollBack` could not actually restore
+// anything ("left as-is" or "REVERTED-BY-AGENT"). These pin the honest
+// behavior: only a path that was clean beforehand can be "restored and
+// ignored"; a dirty-before path is always a real breach.
+
+test("enforce: a lockfile that was ALREADY dirty before the phase, and the agent modifies it further, is a real breach — never silently ignored", () => {
+  const dir = makeRepo();
+  try {
+    const cfg = makeCfg();
+    const agent = makeAgent({ writes: [] }); // true read-only
+    // Dirty BEFORE the phase starts — an operator's own uncommitted change.
+    writeFileSync(path.join(dir, "package-lock.json"), '{"lockfileVersion": 2, "operatorDirty": true}\n');
+    const before = snapshot({ repo_root: dir, cfg });
+    // The agent modifies it further during the phase. `snapshot()` fingerprints
+    // by numstat (added/removed line counts vs HEAD), not content — so this
+    // edit deliberately changes the LINE COUNT too (one line -> four), not
+    // just the content, to actually produce a different fingerprint from the
+    // dirty-before state and register as a further change.
+    writeFileSync(path.join(dir, "package-lock.json"), '{\n  "lockfileVersion": 3,\n  "agentTouched": true\n}\n');
+
+    let thrown: PermissionBreach | undefined;
+    const ignoredCalls: string[][] = [];
+    try {
+      enforce({ repo_root: dir, cfg }, null, agent, before, (paths) => ignoredCalls.push(paths));
+    } catch (error) {
+      thrown = error as PermissionBreach;
+    }
+    assert.ok(thrown instanceof PermissionBreach, "a dirty-before lockfile must fail the phase, matching read_only_ignore or not");
+    assert.match(thrown!.message, /package-lock\.json — left as-is \(was already modified\)/);
+    assert.deepEqual(ignoredCalls, [], "onIgnored must not fire — nothing here was safely ignored");
+    assert.equal(
+      readFileSync(path.join(dir, "package-lock.json"), "utf-8"),
+      '{\n  "lockfileVersion": 3,\n  "agentTouched": true\n}\n',
+      "left exactly as the agent left it — 'left as-is' is not a restore",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("enforce: a read-only agent that REVERTS a dirty-before lockfile back to HEAD is a real breach (REVERTED-BY-AGENT) — never 'restored and ignored'", () => {
+  const dir = makeRepo();
+  try {
+    const cfg = makeCfg();
+    const agent = makeAgent({ writes: [] });
+    writeFileSync(path.join(dir, "package-lock.json"), '{"lockfileVersion": 2, "operatorDirty": true}\n');
+    const before = snapshot({ repo_root: dir, cfg });
+    // The agent "cleans up" by checking the file back out to HEAD — the
+    // tree shows no diff afterward, so `after` has no entry for this path:
+    // an operator's uncommitted work is gone and unrecoverable.
+    execFileSync("git", ["checkout", "--", "package-lock.json"], { cwd: dir, stdio: "ignore" });
+
+    let thrown: PermissionBreach | undefined;
+    try {
+      enforce({ repo_root: dir, cfg }, null, agent, before);
+    } catch (error) {
+      thrown = error as PermissionBreach;
+    }
+    assert.ok(thrown instanceof PermissionBreach, "reverting an operator's uncommitted work must fail the phase, never pass silently");
+    assert.match(thrown!.message, /package-lock\.json — REVERTED-BY-AGENT \(uncommitted work lost, cannot restore\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("enforce: a lockfile that was CLEAN before the phase is restored and ignored (the one case the exemption actually covers)", () => {
+  const dir = makeRepo();
+  try {
+    const cfg = makeCfg();
+    const agent = makeAgent({ writes: [] });
+    const before = snapshot({ repo_root: dir, cfg }); // clean
+    writeFileSync(path.join(dir, "package-lock.json"), '{"lockfileVersion": 2, "agentTouched": true}\n');
+
+    const ignoredCalls: string[][] = [];
+    const touched = enforce({ repo_root: dir, cfg }, null, agent, before, (paths) => ignoredCalls.push(paths));
+
+    assert.deepEqual(touched, ["package-lock.json"]);
+    assert.deepEqual(ignoredCalls, [["package-lock.json"]]);
+    assert.equal(
+      readFileSync(path.join(dir, "package-lock.json"), "utf-8"),
+      '{"lockfileVersion": 1}\n',
+      "actually restored to the committed content — this is the case where 'restored and ignored' is true",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── MAJOR fix: read_only_ignore applies ONLY to true read-only agents ────
+
+test("enforce: a write-restricted (non-empty writes) agent that changes package.json and the lockfile together still fails — read_only_ignore is not for write-restricted roles", () => {
+  const dir = makeRepo();
+  try {
+    const cfg = makeCfg();
+    const agent = makeAgent({ writes: ["package.json"] }); // write-restricted, NOT read-only
+    const before = snapshot({ repo_root: dir, cfg });
+    writeFileSync(path.join(dir, "package.json"), '{"name": "x", "version": "2.0.0"}\n'); // permitted — named in writes
+    writeFileSync(path.join(dir, "package-lock.json"), '{"lockfileVersion": 2, "followedPackageJson": true}\n'); // would be ignorable for a read-only agent — not this one
+
+    let thrown: PermissionBreach | undefined;
+    try {
+      enforce({ repo_root: dir, cfg }, null, agent, before);
+    } catch (error) {
+      thrown = error as PermissionBreach;
+    }
+    assert.ok(thrown instanceof PermissionBreach, "must fail — an inconsistent tree (package.json changed, lockfile followed) from a write-restricted agent is a real breach");
+    assert.match(thrown!.message, /package-lock\.json/);
+    assert.equal(
+      readFileSync(path.join(dir, "package.json"), "utf-8"),
+      '{"name": "x", "version": "2.0.0"}\n',
+      "the permitted file is untouched — only the lockfile is the breach",
+    );
+    assert.equal(readFileSync(path.join(dir, "package-lock.json"), "utf-8"), '{"lockfileVersion": 1}\n', "still rolled back despite failing the phase");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

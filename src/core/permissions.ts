@@ -184,9 +184,36 @@ function rollBack(
   return result.status === 0 ? "rolled back" : "could not roll back";
 }
 
-/** True when `p` matches one of `defaults.read_only_ignore`'s patterns — dependency-manager bookkeeping (a lockfile), not the repo's intent. See that field's own doc comment (`data_types.ts`) for why it exists and what rolling one back "silently" means. */
+/** True when `p` matches one of `defaults.read_only_ignore`'s patterns — dependency-manager bookkeeping (a lockfile), not the repo's intent. See that field's own doc comment (`data_types.ts`) for why it exists and what rolling one back "silently" means. Necessary but not sufficient — see `isSafeToIgnore`, which is what `enforce()` actually gates on. */
 function isIgnorableChurn(p: string, cfg: SFConfig): boolean {
   return (cfg.defaults.read_only_ignore ?? []).some((pattern) => matches(p, pattern));
+}
+
+/**
+ * Whether an ignorable-churn path is actually safe to ignore for THIS phase.
+ * Both conditions are required, and either one failing means: real breach,
+ * `rollBack`'s own honest outcome string, no silent "ignored".
+ *
+ *  - The agent is a TRUE read-only role (`writes: []`), not merely
+ *    write-restricted (`writes: [...]`). A write-restricted agent that
+ *    changes `package.json` and its lockfile together left an
+ *    INCONSISTENT tree, not incidental dependency-manager bookkeeping —
+ *    `read_only_ignore` exists for the read-only case this module's header
+ *    describes (a read that happens to rewrite a lockfile), never as a
+ *    blanket exemption for one specific file pattern regardless of role.
+ *  - The path was CLEAN before this phase started (`!(p in before)`). Only
+ *    then does `rollBack` below actually take the "not in before" branch
+ *    and restore it (delete the untracked file, or `git checkout --` the
+ *    tracked one back to HEAD). A path that was ALREADY dirty when the
+ *    agent started hits `rollBack`'s OTHER branch instead — "left as-is"
+ *    or, if the agent discarded that uncommitted work, "REVERTED-BY-AGENT
+ *    (uncommitted work lost, cannot restore)" — and neither of those is a
+ *    restore. Calling that "ignored" would report a repair that never
+ *    happened; it must fail the phase like any other breach instead.
+ */
+function isSafeToIgnore(p: string, agent: AgentConfig, cfg: SFConfig, before: Record<string, string>): boolean {
+  const isTrueReadOnlyAgent = Array.isArray(agent.writes) && agent.writes.length === 0;
+  return isTrueReadOnlyAgent && isIgnorableChurn(p, cfg) && !(p in before);
 }
 
 /**
@@ -199,13 +226,20 @@ function isIgnorableChurn(p: string, cfg: SFConfig): boolean {
  * reporting a failure, so anything the agent introduced outside its allowlist
  * is rolled back before the phase dies. What it cannot undo, it names.
  *
- * `defaults.read_only_ignore` carves out one exception to "names, fails":
- * an unauthorized change matching it is STILL rolled back (unconditionally —
- * an ignored path is never left standing) but does not, on its own, fail the
- * phase. `onIgnored`, when given, is called once with every such path before
- * returning, so a caller with a logger (`agents.ts`'s `execute()`) can print
- * the one required info line — this module has no logger of its own to call
- * (`RunLike` is only `repo_root`/`cfg`), so the caller does the printing.
+ * `defaults.read_only_ignore` carves out one exception to "names, fails" —
+ * but only where `isSafeToIgnore` says restoring is actually possible (see
+ * its own doc comment): a TRUE read-only agent (`writes: []`) that churned
+ * a lockfile that was CLEAN before this phase. That one case is STILL
+ * rolled back unconditionally like any other breach — an ignored path is
+ * never left standing — it just does not, on its own, fail the phase.
+ * Everything else `isIgnorableChurn` alone would have matched (a dirty-before
+ * path, an agent that reverted uncommitted work, a write-restricted rather
+ * than read-only agent) falls through to the real-breach path below instead.
+ * `onIgnored`, when given, is called once with every safely-ignored path
+ * before returning, so a caller with a logger (`agents.ts`'s `execute()`)
+ * can print the one required info line — this module has no logger of its
+ * own to call (`RunLike` is only `repo_root`/`cfg`), so the caller does the
+ * printing.
  */
 export function enforce(
   run: RunLike,
@@ -219,7 +253,7 @@ export function enforce(
   const breaches = touched.filter((p) => !permitted(p, agent, run.cfg));
   if (breaches.length === 0) return touched;
 
-  const ignored = breaches.filter((p) => isIgnorableChurn(p, run.cfg));
+  const ignored = breaches.filter((p) => isSafeToIgnore(p, agent, run.cfg, before));
   const realBreaches = breaches.filter((p) => !ignored.includes(p));
 
   // Roll back EVERY breach, ignored ones included — restoring the tree is
