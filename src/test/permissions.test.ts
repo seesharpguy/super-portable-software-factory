@@ -60,6 +60,22 @@ test("permitted: a leading '**/' pattern matches a file at the repo root, not on
   assert.equal(permitted("package-lock.jsonx", agent, cfg), false, "not a suffix match");
 });
 
+// `agents[].writes`'s own root-matching is pinned just above — this is the
+// intentional, repo-wide OTHER half: `defaults.protected_files` uses the
+// exact same `matches()`/`globToRegex`, so a leading "**/" pattern there
+// must widen identically, blocking a root-level file it names just as
+// completely as a nested one. Documented as an intentional, arguably
+// correct fix in 8737ee5's commit message; this pins both directions of it
+// (blocked at the root, blocked nested) so the widening cannot regress
+// silently on either config surface.
+test("permitted: defaults.protected_files also matches a root-level file via a leading '**/' pattern, not only a nested one", () => {
+  const cfg = makeCfg({ protected_files: ["**/secrets.yaml"] });
+  const agent = makeAgent(); // unrestricted (writes undefined) — the only thing standing between it and any path is protected_files
+  assert.equal(permitted("secrets.yaml", agent, cfg), false, "blocked at the repo root");
+  assert.equal(permitted("a/b/secrets.yaml", agent, cfg), false, "blocked nested too, unchanged from before this fix");
+  assert.equal(permitted("other.yaml", agent, cfg), true, "an unrelated path is still unaffected — unrestricted agent, no protected match");
+});
+
 // ── defaults.read_only_ignore: the default value ─────────────────────────
 
 test("ConfigDefaultsSchema: read_only_ignore defaults to the four common lockfiles", () => {
