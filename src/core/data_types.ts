@@ -772,6 +772,46 @@ export const ConfigDefaultsSchema = v.object({
   // the machinery that decides whether its work passed.
   // .spf/ is the whole per-repo footprint now — no adws/ tree to protect.
   protected_files: v.optional(v.array(v.string()), () => [".spf/", "spf.config.yaml"]),
+  /**
+   * Paths a READ-ONLY (or write-restricted) agent may touch WITHOUT failing
+   * the phase — `core/permissions.ts`'s `enforce()` still rolls every one of
+   * them back (an agent's claimed report must never rest on a change that
+   * didn't survive), it just does not count that rollback as a breach.
+   *
+   * WHY THIS EXISTS: a lockfile is dependency-manager BOOKKEEPING, not the
+   * repo's intent — an agent that ran `npm install` (to read a package's
+   * real shape, say) rewrites `package-lock.json` as a side effect of a
+   * read, not an edit. Observed live: a read-only scout phase failed with
+   * "scout is read-only but modified 1 path(s): factory/content/
+   * package-lock.json — rolled back" over exactly this, for work that
+   * changed nothing an operator would call "the code."
+   *
+   * The four defaults are the lockfiles of every package manager this repo
+   * already builds against (npm, pnpm, yarn, bun) — additive, not
+   * exhaustive; a repo using another one adds its own pattern here. Same
+   * glob syntax as `protected_files`/`agents[].writes` (`permissions.ts`'s
+   * `globToRegex`), where a leading "**" followed by a path separator
+   * matches at any depth INCLUDING the repo root — so the packaged
+   * defaults below match a lockfile whether it sits at the top of the repo
+   * or nested under a subdirectory.
+   *
+   * Emptying this list (`read_only_ignore: []`) restores today's strict
+   * behavior exactly — every touched path outside an agent's own allowlist
+   * fails the phase, lockfiles included.
+   *
+   * PRECEDENCE: `protected_files` always wins. A path matching
+   * `protected_files` is never ignorable via `read_only_ignore`, no matter
+   * how narrowly write-restricted the agent is — a pattern here that
+   * happens to also match a protected path is not read as "exempt this
+   * from protected_files too"; it stays a real breach. See
+   * `permissions.ts`'s `isSafeToIgnore` for the enforcement.
+   */
+  read_only_ignore: v.optional(v.array(v.string()), () => [
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/bun.lockb",
+  ]),
   data_dir: v.optional(v.string(), ".spf/data"),
   /**
    * RUN BUDGET CEILINGS — the two knobs that bound what one adw_id may spend.
@@ -794,11 +834,20 @@ export const ConfigDefaultsSchema = v.object({
    * `agents.ts`'s `BudgetExceeded`.
    *
    * `max_run_cost` is USD (the same unit the provider's own usage.cost
-   * arrives in, summed by `UsageBreakdown`); `max_run_tokens` is TOTAL
-   * tokens, i.e. the spend number — every turn re-sends the whole
-   * conversation, so this counts cached re-reads too, exactly like the
-   * `total_tokens` column in `sessions` (see `ui/server/db.ts`'s `usage()`
-   * for why that number is much larger than "material moved").
+   * arrives in, summed by `UsageBreakdown`); `max_run_tokens` is BILLABLE
+   * tokens — `UsageBreakdown.billable_tokens` (input + cache-write + output),
+   * checked against `Run.billable_tokens`, NOT the `total_tokens` column
+   * `sessions` also carries for display. A prompt-caching backend (Ollama
+   * Cloud's kimi models, Anthropic's own caching) re-sends the whole
+   * conversation every turn as CACHE READS, which `total_tokens` counts and
+   * this ceiling does not: cache reads are billed (when billed at all) at a
+   * small fraction of input price, sometimes free, so a ceiling measured
+   * against the bigger number trips on bulk that cost nothing — observed
+   * live, one scout phase alone reported 1,311,740 total_tokens against a
+   * gateway that billed 189,321 uncached input + 17,908 output for it.
+   * `total_tokens` is kept exactly as before for anything display-only
+   * (the sessions-panel "tokens" line, the UI) — only the budget check
+   * changed which number it reads.
    *
    * Both are `> 0`, not `>= 0`: a zero ceiling would mean "no agent may ever
    * run", which is a config mistake, not a budget — it would fail the first
@@ -1151,6 +1200,30 @@ export const WatchJiraConfigSchema = v.object({
   project_key: v.optional(v.string(), ""), // e.g. "PROJ"
   issue_types: v.optional(JiraIssueTypeMapSchema, () => v.parse(JiraIssueTypeMapSchema, {})),
   status_map: v.optional(JiraStatusMapSchema, () => v.parse(JiraStatusMapSchema, {})),
+  /**
+   * The Jira issue-link `type` name `refine.ts`'s `publish()` uses to
+   * connect a freshly-published tree's ROOT issue(s) back to the spec they
+   * were refined from (`JiraProvider.linkToSpec`) — a plain, symmetric
+   * "issue link" (Jira's generic relate-two-issues mechanism), never the
+   * hierarchical `parent` field `linkChild` sets: the spec's own issue type
+   * defaults to Story (`issue_types.spec`), and a root node is often an
+   * Epic/Task — Jira's issue-type hierarchy frequently refuses a Story as
+   * one of those types' PARENT, so the hierarchy field is not a safe choice
+   * here regardless of which type actually published. "Relates" is a
+   * built-in link type on every Jira Cloud project; override this only if a
+   * project's admin has renamed or restricted it.
+   *
+   * MUST NAME A SYMMETRIC LINK TYPE. `JiraProvider.linkToSpec` fixes which
+   * side is `inwardIssue`/`outwardIssue` (the published root is always
+   * inward, the spec always outward) and does not expose direction as a
+   * separate knob — harmless for a symmetric type like "Relates" (Jira's UI
+   * does not even surface a direction for one), but pointing this at a
+   * DIRECTIONAL type (e.g. "blocks"/"is blocked by") would silently record
+   * the opposite relationship from the one intended. Only rename this to
+   * another symmetric type; a directional one needs code changes, not just
+   * config.
+   */
+  link_type: v.optional(v.string(), "Relates"),
 });
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 
@@ -1651,6 +1724,24 @@ export class UsageBreakdown {
   // at the output rate. Report it nested under output, never added to it.
   reasoning_tokens = 0;
   total_tokens = 0;
+  /**
+   * The SPEND number, as distinct from `total_tokens` (the SIZE number).
+   * `input_tokens + output_tokens + cache_write_tokens` — `cache_read_tokens`
+   * excluded on purpose: a cache read is Anthropic's own prompt-caching
+   * discount (billed at a small fraction of the input rate, sometimes free
+   * on some gateways) for context the conversation already sent, not new
+   * material moved. `total_tokens` re-sends (and re-counts) the whole
+   * conversation every turn, so a long-running scout/build session's cache
+   * reads dwarf everything else in it (observed live: 1.31M total_tokens in
+   * one phase, of which 1.15M were cache reads the gateway did not bill as
+   * input) — a run-budget ceiling measured against `total_tokens` trips on
+   * cache-driven bulk that cost nothing, not on real spend. `assertRunBudget`
+   * (`agents.ts`) checks THIS field against `defaults.max_run_tokens`;
+   * `total_tokens` is kept, unchanged, for display (the sessions-panel
+   * "tokens" line, the UI) because an operator sizing context occupancy
+   * still needs the real re-send count, not the billable one.
+   */
+  billable_tokens = 0;
   input_cost = 0.0;
   output_cost = 0.0;
   cache_read_cost = 0.0;
@@ -1671,6 +1762,7 @@ export class UsageBreakdown {
     this.cache_write_tokens += usage.cacheWrite || 0;
     this.reasoning_tokens += usage.reasoning || 0;
     this.total_tokens += totalTokens;
+    this.billable_tokens += (usage.input || 0) + (usage.output || 0) + (usage.cacheWrite || 0);
     this.input_cost += cost.input || 0.0;
     this.output_cost += cost.output || 0.0;
     this.cache_read_cost += cost.cacheRead || 0.0;

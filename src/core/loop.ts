@@ -120,7 +120,35 @@ export interface LedgerAttempt {
   error: string | null;
   /** HEAD's short sha after a successful (exit 0) iteration — unchanged from the previous attempt's if this iteration committed nothing new, which is exactly what `isStuck` below looks for. `null` only for an errored or non-accepted (nonzero exit) attempt, where nothing was checked out to read. */
   commit_sha: string | null;
+  /**
+   * Kept for backward compatibility with ledger rows written before
+   * `billable_tokens` (below) existed — on a row this old, `tokens` is the
+   * DISPLAY total (`sessions.total_tokens`, cache reads included), the only
+   * figure that era ever recorded. On every row written since, this field
+   * and `billable_tokens` are set to the SAME (billable) value; they only
+   * ever diverge across that one-time boundary, never within a single
+   * write. `cumulativeSpend` is what actually reads either — see its own
+   * doc comment for the precedence.
+   */
   tokens: number;
+  /**
+   * The BILLABLE figure (input + cache-write + output) — what
+   * `--max-tokens`/`overCumulativeBudget` is SUPPOSED to compare against,
+   * same metric `defaults.max_run_tokens` uses within one chain run (see
+   * `UsageBreakdown.billable_tokens`'s doc comment, `data_types.ts`). NOT
+   * the display total (`sessions.total_tokens`, cache reads included) —
+   * `cli/commands/loop.ts`'s readback reads `session.billable_tokens`,
+   * falling back to `total_tokens` only for a SESSION row that predates
+   * that sqlite column being populated.
+   *
+   * `undefined` on any LEDGER row written before this field existed — a
+   * genuinely old-format row, not a free ($0) iteration. `cumulativeSpend`
+   * falls back to `tokens` for exactly that row (the only figure it has,
+   * a display total it cannot retroactively convert), and
+   * `hasLegacyTokenRows` is what a caller uses to warn once that a ceiling
+   * check is now mixing metrics across the ledger's own history.
+   */
+  billable_tokens?: number;
   cost: number;
   failures: string[];
   started_at: string;
@@ -196,14 +224,37 @@ export function resolveGoalId(explicit: string | undefined): string {
 
 export interface CumulativeBudget {
   maxCost?: number;
+  /** `--max-tokens` — checked against BILLABLE tokens (see `LedgerAttempt.billable_tokens`'s own doc comment), the same metric `defaults.max_run_tokens` checks per-call inside one chain run. */
   maxTokens?: number;
 }
 
-export function cumulativeSpend(attempts: LedgerAttempt[]): { cost: number; tokens: number } {
-  return attempts.reduce((acc, a) => ({ cost: acc.cost + a.cost, tokens: acc.tokens + a.tokens }), { cost: 0, tokens: 0 });
+/**
+ * Per-attempt token figure for budget purposes: `billable_tokens` where the
+ * row has it, else `tokens` (an old-format row, predating that field — see
+ * `LedgerAttempt.billable_tokens`'s own doc comment). Never the other way
+ * around: a new row's `tokens` happens to equal its `billable_tokens` today,
+ * but `billable_tokens` is the one this function trusts on purpose.
+ */
+function tokensForBudget(a: LedgerAttempt): number {
+  return a.billable_tokens ?? a.tokens;
 }
 
-/** Whether the goal-scoped ceiling is already exhausted going into the NEXT iteration — a stronger, ledger-wide check than any single iteration's own budget. */
+export function cumulativeSpend(attempts: LedgerAttempt[]): { cost: number; tokens: number } {
+  return attempts.reduce((acc, a) => ({ cost: acc.cost + a.cost, tokens: acc.tokens + tokensForBudget(a) }), { cost: 0, tokens: 0 });
+}
+
+/**
+ * True when the ledger holds at least one attempt written before
+ * `billable_tokens` existed — `cumulativeSpend` is then silently mixing a
+ * display-total figure (that row's `tokens`) into a sum whose newer rows
+ * are billable. Used to print a one-time operator warning rather than let
+ * that mismatch pass unremarked; see `runLoop`'s call site.
+ */
+export function hasLegacyTokenRows(attempts: LedgerAttempt[]): boolean {
+  return attempts.some((a) => a.billable_tokens === undefined);
+}
+
+/** Whether the goal-scoped ceiling is already exhausted going into the NEXT iteration — a stronger, ledger-wide check than any single iteration's own budget. `spend.tokens` must already be BILLABLE tokens (see `LedgerAttempt.tokens`) — this function just compares, it does not know which metric it was handed. */
 export function overCumulativeBudget(budget: CumulativeBudget, spend: { cost: number; tokens: number }): boolean {
   if (budget.maxCost !== undefined && spend.cost >= budget.maxCost) return true;
   if (budget.maxTokens !== undefined && spend.tokens >= budget.maxTokens) return true;
@@ -261,6 +312,7 @@ export interface IterationResult {
   error: string | null;
   /** `null` when nothing was committed this iteration (a no-op, or a throw before any commit). */
   commit_sha: string | null;
+  /** BILLABLE tokens — see `LedgerAttempt.tokens`'s own doc comment; `runIteration` (`cli/commands/loop.ts`) reads this straight from `LedgerAttempt`, so the two must stay the same metric. */
   tokens: number;
   cost: number;
   /** `null` when the iteration errored or exited non-zero — the stop check only ever runs against a chain that accepted its own work, same as `fixLoop` only re-verifies after a phase that didn't already throw. */
@@ -324,6 +376,15 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
   if (existing) {
     deps.log(`loop: resuming goal ${deps.goalId} — ${existing.attempts.length} attempt(s) already recorded`);
   }
+  // One-time info line, not a per-iteration one: legacy rows already IN the
+  // ledger (from a resumed goal) do not change count as this run proceeds,
+  // so there is nothing to re-warn about after the first check.
+  if (deps.budget.maxTokens !== undefined && hasLegacyTokenRows(ledger.attempts)) {
+    deps.log(
+      `loop: goal ${deps.goalId} — ledger has attempt(s) recorded before billable-token tracking; ` +
+        "--max-tokens falls back to their display-total token count for those rows (see LedgerAttempt.billable_tokens)",
+    );
+  }
 
   let lastVerdict: StopVerdict | null =
     ledger.attempts.length > 0 ? { passed: false, failures: ledger.attempts[ledger.attempts.length - 1]!.failures, artifacts: [] } : null;
@@ -366,7 +427,11 @@ export async function runLoop(deps: LoopDeps): Promise<LoopResult> {
       exit_code: result.exit_code,
       error: result.error,
       commit_sha: result.commit_sha,
+      // Every row written from here on sets both to the same (billable)
+      // value — see `LedgerAttempt.tokens`/`billable_tokens`'s doc comments
+      // for why they only ever diverge on an old-format row.
       tokens: result.tokens,
+      billable_tokens: result.tokens,
       cost: result.cost,
       failures,
       started_at: startedAt,

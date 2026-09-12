@@ -71,6 +71,15 @@
  * `feature` (both mapping to Jira's Epic type by default) surfaces a real
  * Jira API error at publish time — a genuine platform difference, not
  * something this file tries to paper over.
+ *
+ * `linkToSpec` is the OTHER half of `IssueAuthoringProvider`'s hierarchy —
+ * a published tree's ROOT connected back to the spec it was refined FROM,
+ * which `linkChild` cannot express (the spec's own issue type, a Story by
+ * default, frequently cannot legally PARENT a root node's type). Uses
+ * Jira's plain issue-link API instead (`type` configurable via
+ * `watch.jira.link_type`, "Relates" by default), with a plain comment as
+ * its own fallback if that API is unavailable — see the method's own doc
+ * comment.
  */
 import type { JiraIssueTypeMap, JiraStatusMap } from "../data_types.ts";
 import { fetchRetryTransient } from "../utils.ts";
@@ -153,6 +162,9 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     private readonly apiToken: string,
     private readonly issueTypes: JiraIssueTypeMap,
     private readonly statusMap: JiraStatusMap = {},
+    // See `WatchJiraConfigSchema.link_type`'s own doc comment (`data_types.ts`)
+    // — the issue-link `type` name `linkToSpec` below creates.
+    private readonly linkType: string = "Relates",
   ) {}
 
   private authHeader(): string {
@@ -279,6 +291,70 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
    */
   async linkChild(parent: Issue, child: Issue): Promise<void> {
     await this.jira(`/rest/api/3/issue/${child.id}`, { method: "PUT", body: JSON.stringify({ fields: { parent: { key: parent.id } } }) });
+  }
+
+  /**
+   * `IssueAuthoringProvider.linkToSpec` — see its own doc comment
+   * (`issues/provider.ts`) for why this is a plain Jira "issue link"
+   * (`/rest/api/3/issueLink`) rather than `linkChild`'s hierarchy `parent`
+   * field: the spec's issue type (Story by default) frequently cannot
+   * legally PARENT a root node's type under Jira's issue-type hierarchy,
+   * while a generic issue link has no such restriction.
+   *
+   * `inwardIssue`/`outwardIssue` direction is arbitrary for a symmetric
+   * type like "Relates" — Jira does not surface it differently in the UI —
+   * so `issue` (the freshly published root) is the inward side and the
+   * spec is the outward side, consistently.
+   *
+   * BEST-EFFORT: this project's Jira instance may not have `linkType`
+   * enabled/named exactly this way (a renamed or removed link type, a
+   * permission scheme that disallows issue links for this project, ...) —
+   * a failure here must never fail the whole publish over what is, at
+   * bottom, a cosmetic cross-reference. Falls back to a plain comment
+   * naming the spec, so the relationship is visible SOMEWHERE even when
+   * the link API itself is unavailable.
+   *
+   * The fallback comment gets the SAME "never fail publish() over this"
+   * treatment as the link call itself: a rate limit or network blip on the
+   * comment call is just as cosmetic a failure as one on the link call, so
+   * it is caught and logged here rather than left to propagate out of
+   * `publish()` (`refine.ts`), which awaits this unguarded.
+   *
+   * `this.linkType` MUST name a SYMMETRIC link type ("Relates" and its
+   * project-renamed equivalents) — `inwardIssue`/`outwardIssue` above are
+   * fixed (the published root is always inward, the spec always outward)
+   * and not independently configurable, which is fine for a symmetric type
+   * (Jira does not surface the direction differently in the UI) but WRONG
+   * for a directional one (e.g. "blocks"/"is blocked by"): configuring
+   * `watch.jira.link_type` to a directional type would silently assert the
+   * opposite relationship from the one intended. See that field's own doc
+   * comment (`data_types.ts`) — direction is not exposed as a separate knob
+   * on purpose, to avoid a second config field only meaningful alongside a
+   * link type most projects never change from the "Relates" default.
+   */
+  async linkToSpec(specId: string, issue: Issue): Promise<void> {
+    try {
+      await this.jira("/rest/api/3/issueLink", {
+        method: "POST",
+        body: JSON.stringify({
+          type: { name: this.linkType },
+          inwardIssue: { key: issue.id },
+          outwardIssue: { key: specId },
+        }),
+      });
+    } catch (linkError) {
+      try {
+        await this.comment(issue, `Refined from ${specId}.`);
+      } catch (commentError) {
+        // Both the issue-link API and the comment fallback failed — the
+        // spec/root relationship is not recorded ANYWHERE on Jira this run,
+        // but that is still a cosmetic loss, not a reason to fail the whole
+        // publish (see this method's own doc comment).
+        console.error(
+          `spf watch: ${issue.id} — could not link to spec ${specId} (${linkError instanceof Error ? linkError.message : String(linkError)}) and the fallback comment also failed — ${commentError instanceof Error ? commentError.message : String(commentError)}`,
+        );
+      }
+    }
   }
 
   /** The read-back half of `linkChild` — same JQL-in-body pattern as `searchByLabel`, since a GET with query params silently returns nothing on this endpoint (see the module comment). What makes container roll-up (`rollUp` in `watch.ts`) work on Jira too. */

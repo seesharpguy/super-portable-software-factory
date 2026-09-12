@@ -10,12 +10,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   cumulativeSpend,
+  hasLegacyTokenRows,
   isStuck,
+  ledgerDir,
   loadLedger,
   overCumulativeBudget,
   pickBestAttempt,
@@ -23,6 +25,7 @@ import {
   runLoop,
   summarize,
   type IterationResult,
+  type Ledger,
   type LedgerAttempt,
   type LoopDeps,
   type StopCondition,
@@ -59,6 +62,28 @@ test("resolveGoalId: an explicit --goal-id passes through unchanged; omitted min
 test("cumulativeSpend: sums cost and tokens across every attempt", () => {
   const spend = cumulativeSpend([attempt({ index: 1, cost: 0.1, tokens: 100 }), attempt({ index: 2, cost: 0.25, tokens: 200 })]);
   assert.deepEqual(spend, { cost: 0.35, tokens: 300 });
+});
+
+// ── fix: a mixed ledger (old display-total rows alongside new billable rows) ──
+
+test("cumulativeSpend: a mixed ledger sums billable_tokens where present, falling back to tokens only for old-format rows", () => {
+  const spend = cumulativeSpend([
+    // Old-format row: predates billable_tokens entirely — display total (1000) is all it has.
+    attempt({ index: 1, cost: 0.1, tokens: 1000 }),
+    // New-format row: tokens and billable_tokens both set (same value going forward).
+    attempt({ index: 2, cost: 0.1, tokens: 50, billable_tokens: 50 }),
+  ]);
+  assert.deepEqual(spend, { cost: 0.2, tokens: 1050 }, "1000 (old row's only figure) + 50 (new row's billable figure), never a re-derived number");
+});
+
+test("hasLegacyTokenRows: true when at least one attempt predates billable_tokens", () => {
+  assert.equal(hasLegacyTokenRows([attempt({ index: 1, tokens: 1000 })]), true);
+  assert.equal(hasLegacyTokenRows([attempt({ index: 1, tokens: 50, billable_tokens: 50 })]), false);
+  assert.equal(
+    hasLegacyTokenRows([attempt({ index: 1, tokens: 50, billable_tokens: 50 }), attempt({ index: 2, tokens: 1000 })]),
+    true,
+    "one legacy row anywhere in the ledger is enough",
+  );
 });
 
 test("overCumulativeBudget: unset ceilings never trip, matching assertRunBudget's own no-op default", () => {
@@ -327,6 +352,65 @@ test("runLoop: resuming a killed loop picks up where the ledger left off, derivi
     assert.equal(second.ledger.attempts[1]!.adw_id, `${firstBase}-2`);
   } finally {
     h1.cleanup();
+  }
+});
+
+test("runLoop: resuming a ledger with an old-format (pre-billable_tokens) attempt logs one info line and folds its display-total tokens into --max-tokens", async () => {
+  const h = harness({
+    max: 5,
+    goalId: "mixed-ledger-goal",
+    budget: { maxTokens: 1005 },
+    resultFor: () => ({ exit_code: 0, error: null, commit_sha: "sha-2", tokens: 10, cost: 0.01, stop_verdict: { passed: false, failures: ["not yet"], artifacts: [] } }),
+  });
+  try {
+    // Seed a ledger on disk exactly as an older spf version would have left
+    // it — one attempt, no `billable_tokens` field at all, whose `tokens`
+    // (1000) was the DISPLAY total of its day.
+    const dir = ledgerDir(h.dataDir, "mixed-ledger-goal");
+    mkdirSync(dir, { recursive: true });
+    const legacyLedger: Ledger = {
+      goal_id: "mixed-ledger-goal",
+      base_adw_id: "abcd1234",
+      chain: "build-review",
+      goal: "make the homepage accessible",
+      stop: SCRIPT_STOP,
+      max: 5,
+      attempts: [
+        {
+          index: 1,
+          adw_id: "abcd1234-1",
+          outcome: "not-accepted",
+          exit_code: 0,
+          error: null,
+          commit_sha: "sha-1",
+          tokens: 1000,
+          cost: 0.05,
+          failures: ["not yet"],
+          started_at: "2024-01-01T00:00:00.000Z",
+          ended_at: "2024-01-01T00:00:01.000Z",
+        },
+      ],
+      best_attempt_index: 0,
+    };
+    writeFileSync(path.join(dir, "ledger.json"), JSON.stringify(legacyLedger, null, 2));
+
+    const result = await runLoop(h.deps);
+
+    assert.match(
+      h.logs.join("\n"),
+      /attempt\(s\) recorded before billable-token tracking/,
+      "one info line naming the mixed-format ledger, printed before the resumed run dispatches anything",
+    );
+    // Before iteration 2: sum = 1000 (legacy row's only figure) < 1005, so
+    // one more iteration is dispatched (its billable 10 tokens folded in).
+    // Before iteration 3: sum = 1000 + 10 = 1010 >= 1005 — ceiling trips,
+    // stopping the loop one iteration earlier than a re-derived (smaller)
+    // legacy figure would have allowed.
+    assert.equal(result.ledger.attempts.length, 2, "the ceiling check used 1000 + 10 = 1010, not a re-derived or zeroed legacy figure");
+    assert.equal(result.ledger.reason, "exhausted");
+    assert.equal(result.ledger.attempts[1]!.billable_tokens, 10, "the new row sets billable_tokens going forward");
+  } finally {
+    h.cleanup();
   }
 });
 

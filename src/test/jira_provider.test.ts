@@ -125,6 +125,81 @@ test("createIssue: a body containing real Markdown syntax produces real ADF mark
   }
 });
 
+// ── linkToSpec ───────────────────────────────────────────────────────────
+
+test('linkToSpec: POSTs a "Relates" issue link (the default) between the published issue and the spec key', async () => {
+  const { calls, restore } = mockFetch([{}]); // 201/204-ish, like a real Jira issueLink create
+  try {
+    const provider = makeProvider();
+    await provider.linkToSpec("WEB-1", { id: "WEB-2", title: "leaf", body: "", labels: [] });
+
+    assert.equal(calls.length, 1, "the link call succeeded — no fallback comment needed");
+    assert.equal(calls[0]!.method, "POST");
+    assert.match(calls[0]!.url, /\/rest\/api\/3\/issueLink$/);
+    assert.equal(calls[0]!.body.type.name, "Relates");
+    assert.deepEqual(calls[0]!.body.inwardIssue, { key: "WEB-2" }, "the published leaf");
+    assert.deepEqual(calls[0]!.body.outwardIssue, { key: "WEB-1" }, "the spec it was refined from");
+  } finally {
+    restore();
+  }
+});
+
+test("linkToSpec: honors a configured watch.jira.link_type instead of the default", async () => {
+  const { calls, restore } = mockFetch([{}]);
+  try {
+    const provider = new JiraProvider("https://acme.atlassian.net", "PROJ", "spf", "you@example.com", "jira-token", DEFAULT_ISSUE_TYPES, {}, "Split from");
+    await provider.linkToSpec("WEB-1", { id: "WEB-2", title: "leaf", body: "", labels: [] });
+    assert.equal(calls[0]!.body.type.name, "Split from");
+  } finally {
+    restore();
+  }
+});
+
+test("linkToSpec: falls back to a plain comment naming the spec when the issue-link API itself fails", async () => {
+  const { calls, restore } = mockFetch([{ status: 400, body: { errorMessages: ["link type not found"] } }, {}]);
+  try {
+    const provider = makeProvider();
+    await provider.linkToSpec("WEB-1", { id: "WEB-2", title: "leaf", body: "", labels: [] });
+
+    assert.equal(calls.length, 2, "the failed link attempt, then the fallback comment");
+    assert.match(calls[0]!.url, /\/rest\/api\/3\/issueLink$/);
+    assert.match(calls[1]!.url, /\/rest\/api\/3\/issue\/WEB-2\/comment$/);
+    assert.equal(calls[1]!.method, "POST");
+    assert.deepEqual(calls[1]!.body.body, {
+      type: "doc",
+      version: 1,
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Refined from WEB-1." }] }],
+    });
+  } finally {
+    restore();
+  }
+});
+
+test("linkToSpec: the fallback comment ALSO failing is logged, never thrown out of publish()", async () => {
+  const { calls, restore } = mockFetch([
+    { status: 400, body: { errorMessages: ["link type not found"] } },
+    { status: 500, body: { errorMessages: ["comment API down"] } },
+  ]);
+  const originalError = console.error;
+  const logged: string[] = [];
+  console.error = (msg: unknown) => logged.push(String(msg));
+  try {
+    const provider = makeProvider();
+    await assert.doesNotReject(
+      provider.linkToSpec("WEB-1", { id: "WEB-2", title: "leaf", body: "", labels: [] }),
+      "both the link call and its comment fallback failing must still resolve — a cosmetic cross-reference must never fail the whole publish",
+    );
+    assert.equal(calls.length, 2, "the failed link attempt, then the failed fallback comment attempt");
+    assert.ok(
+      logged.some((line) => line.includes("WEB-2") && line.includes("WEB-1")),
+      "the failure is logged, naming both the issue and the spec it could not link to",
+    );
+  } finally {
+    console.error = originalError;
+    restore();
+  }
+});
+
 // ── linkChild ────────────────────────────────────────────────────────────
 
 test("linkChild: PUTs the child's parent field to the parent's key", async () => {

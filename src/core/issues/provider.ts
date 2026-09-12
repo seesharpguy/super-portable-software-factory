@@ -314,6 +314,29 @@ export interface IssueAuthoringProvider {
    * roll-up, refine cannot function without authoring at all.
    */
   listChildren(parent: Issue): Promise<Issue[]>;
+  /**
+   * Best-effort: relate a freshly published tree's ROOT issue back to the
+   * spec issue (`specId`) it was refined FROM — `core/refine.ts`'s
+   * `publish()` calls this once per root node (a node with no `parent` of
+   * its own within the refined tree) when it was given a `specIssueId`.
+   *
+   * Deliberately NOT `linkChild`: that method sets the tracker's
+   * HIERARCHY field (Jira's `parent`, GitHub's sub-issues API), and a
+   * spec's own issue type (Story by default — `JiraIssueTypeMapSchema.spec`)
+   * frequently cannot legally PARENT a root node's type in Jira's
+   * issue-type hierarchy — see `JiraProvider`'s own doc comment on
+   * `publishSpecs()` for the same constraint. `linkToSpec` uses a plain,
+   * symmetric issue-to-issue reference instead (Jira's generic "issue
+   * link"), which has no such hierarchy restriction.
+   *
+   * OPTIONAL, not every tracker needs one: GitHub already gets a native,
+   * visible cross-reference for free the moment `renderBody`'s "## Parent"
+   * section renders a plain "#N" in the body — GitHub auto-links same-repo
+   * issue mentions into a real timeline "referenced this issue" event, no
+   * API call required. Jira does not do this for plain text, which is why
+   * `JiraProvider` implements this and `GitHubProvider` does not.
+   */
+  linkToSpec?(specId: string, issue: Issue): Promise<void>;
 }
 
 /**

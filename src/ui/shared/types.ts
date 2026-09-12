@@ -39,6 +39,22 @@ export interface Session {
   ended_at: string | null;
   total_tokens: number | null;
   total_cost: number | null;
+  /**
+   * The BILLABLE half of `total_tokens` — see `UsageBreakdown.billable_tokens`'s
+   * doc comment (`core/data_types.ts`) for why the two diverge.
+   *
+   * Two ways a row can predate real tracking, both meaning "fall back to
+   * `total_tokens`" (see `cli/commands/loop.ts`'s readback):
+   *  - `null`: this db has never run the migration that adds the column at
+   *    all (`optionalColumn` in `db.ts` substitutes `NULL AS billable_tokens`
+   *    against it) — only possible for a db a writer Tracer has never opened
+   *    since this column shipped.
+   *  - `0` while `total_tokens > 0`: the column exists (a Tracer's
+   *    `ALTER TABLE ... DEFAULT 0` ran) but this SPECIFIC row was written
+   *    before that, so it was backfilled to 0 rather than to the true
+   *    (unknowable, after the fact) billable figure.
+   */
+  billable_tokens: number | null;
   /** 1 once archived out of the review list. Review state, not run state. */
   archived: number | null;
 }

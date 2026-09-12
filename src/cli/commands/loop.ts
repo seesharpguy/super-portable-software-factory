@@ -38,6 +38,26 @@ import { isInteractive } from "../ask.ts";
 import { resolveIssueProvider } from "./watch.ts";
 
 /**
+ * BILLABLE tokens for one ledger row's readback — `--max-tokens`
+ * (`overCumulativeBudget`, `core/loop.ts`) must compare against the same
+ * metric `defaults.max_run_tokens` checks per-call inside one chain run
+ * (see `LedgerAttempt.tokens`'s doc comment), never the display total
+ * (`total_tokens`, cache reads included).
+ *
+ * `billable_tokens` is 0 — never `null` — for BOTH a row that predates the
+ * column (`ALTER TABLE ... DEFAULT 0` backfills existing rows) and a
+ * genuinely free iteration, so there is no way to tell those apart from the
+ * value alone; falling back to `total_tokens` whenever `billable_tokens` is
+ * falsy is the pragmatic rule (a real dispatch's billable figure is
+ * essentially never exactly 0, so this only ever fires for a pre-tracking
+ * row or a free one, where 0 either way is the right answer). Exported so
+ * this exact rule is unit-tested directly, not just exercised end to end.
+ */
+export function billableTokensFor(session: { billable_tokens?: number | null; total_tokens?: number | null } | null | undefined): number {
+  return session?.billable_tokens || session?.total_tokens || 0;
+}
+
+/**
  * Just enough of `Run` for `quality.resolveSuite`/`runSuite` (`RunLike` in
  * `core/quality.ts`) to work against a real filesystem/console without a
  * full agent-capable `Run` — this driver never opens an agent phase itself
@@ -189,7 +209,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
         const db = await SfDb.open(dataPaths.db, dataPaths.sessions_dir);
         try {
           const session = await db.session(iteration.adw_id);
-          tokens = session?.total_tokens ?? 0;
+          tokens = billableTokensFor(session);
           cost = session?.total_cost ?? 0;
         } finally {
           await db.close();

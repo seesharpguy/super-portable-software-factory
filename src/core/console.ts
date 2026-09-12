@@ -70,7 +70,15 @@ interface Tracer {
 export interface RunObserver {
   onPhaseStart?(phase: Phase): void;
   onPhaseEnd?(phase: Phase, seconds: number): void;
-  onUsage?(tokens: number, cost: number): void;
+  /**
+   * `tokens` is the DISPLAY total (every re-sent token, cache reads
+   * included — context occupancy); `billableTokens` is what
+   * `defaults.max_run_tokens` actually checks (see
+   * `UsageBreakdown.billable_tokens`'s doc comment in `data_types.ts`). A
+   * dashboard comparing spend against the ceiling must compare
+   * `billableTokens`, never `tokens` — see `run_dashboard.tsx`.
+   */
+  onUsage?(tokens: number, cost: number, billableTokens: number): void;
   onSessionEnd?(ok: boolean): void;
 }
 
@@ -129,16 +137,29 @@ export class Console {
     });
   }
 
-  async sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string): Promise<void> {
+  /**
+   * `costIsEstimate` (default `false`, byte-identical to before this param
+   * existed): true when `run.cost_is_estimate` found a `claude_code` agent
+   * pointed at a non-Anthropic `ANTHROPIC_BASE_URL` (see `runner.ts`'s
+   * `Run.recordDispatch` / `agents.ts`'s `isGatewayEstimatedDispatch`) —
+   * `total_cost_usd` from `claude`'s own CLI is
+   * Anthropic's price table applied client-side, which is a fact only when
+   * Anthropic itself served the request, and a labeled guess otherwise. The
+   * label is cosmetic only: `cost` itself is unchanged (still the real sum
+   * `UsageBreakdown.total_cost` accumulated), and nothing about the budget
+   * check (`assertRunBudget`) reads this flag.
+   */
+  async sessionFinished(ok: boolean, tokens: number, cost: number, dbPath: string, costIsEstimate: boolean = false): Promise<void> {
     if (this.finished) return;
     this.finished = true;
     const passed = this.results.filter((r) => r === "success").length;
     const status = ok ? paint("green", "✓ success") : paint("red", "✗ fail");
+    const costText = costIsEstimate ? `≈ $${cost.toFixed(4)} (claude_code estimate; gateway-billed)` : `$${cost.toFixed(4)}`;
     const rows = [
       ` ${paint("dim", "status")}   ${status}`,
       ` ${paint("dim", "phases")}   ${passed}/${this.results.length} passed`,
       ` ${paint("dim", "tokens")}   ${tokens.toLocaleString()}`,
-      ` ${paint("dim", "cost")}     $${cost.toFixed(4)}`,
+      ` ${paint("dim", "cost")}     ${costText}`,
       ` ${paint("dim", "adw_id")}   ${this.adwId}`,
       ` ${paint("dim", "db")}       ${dbPath}`,
       ` ${paint("dim", "next")}     ${paint("bold", `just phases ${this.adwId}`)}`,
@@ -146,7 +167,7 @@ export class Console {
     const rendered = panel(rows, "ADW complete", ok ? "green" : "red");
     this.sink(rendered);
     this.observer?.onSessionEnd?.(ok);
-    const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · $${cost.toFixed(4)}`;
+    const plain = `session ${this.adwId} ${ok ? "success" : "fail"} · ${passed}/${this.results.length} phases · ${tokens.toLocaleString()} tokens · ${costText}`;
     await this.tracer.event(
       makeEventRecord({
         adw_id: this.adwId,
@@ -164,7 +185,7 @@ export class Console {
         ["adw_id", this.adwId],
         ["phases", `${passed}/${this.results.length}`],
         ["tokens", tokens.toLocaleString()],
-        ["cost", `$${cost.toFixed(4)}`],
+        ["cost", costText],
       ],
     });
   }
@@ -212,9 +233,9 @@ export class Console {
     await this.emit(`  ${paint("dim", `· ${clip(message)}`)}`);
   }
 
-  /** `Run.addUsage()`'s only hook into `Console` — the running total lives on `Run`, not here, so this just forwards it to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. */
-  async notifyUsage(tokens: number, cost: number): Promise<void> {
-    this.observer?.onUsage?.(tokens, cost);
+  /** `Run.addUsage()`'s only hook into `Console` — the running totals live on `Run`, not here, so this just forwards them to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. `billableTokens` rides alongside `tokens` so a consumer comparing against `defaults.max_run_tokens` (a billable ceiling) never has to guess which number to use — see `RunObserver.onUsage`'s own doc comment. */
+  async notifyUsage(tokens: number, cost: number, billableTokens: number): Promise<void> {
+    this.observer?.onUsage?.(tokens, cost, billableTokens);
   }
 
   // ── agents ──────────────────────────────────────────────────────────────

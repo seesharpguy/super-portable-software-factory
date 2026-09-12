@@ -485,6 +485,7 @@ test("Tracer + SfDb ({kind:d1}): a full session lifecycle round-trips through a 
       assert.equal(session?.status, "success");
       assert.equal(session?.request, "do the thing");
       assert.equal(session?.adw_name, "build", "optionalColumn(sessions, adw_name) resolved the real column, not the NULL fallback");
+      assert.equal(session?.billable_tokens, 0, "the real (migrated) billable_tokens column, not the NULL fallback — 0 here because this fixture never calls sessionAddUsage");
 
       const summaries = await sfdb.sessions();
       const summary = summaries.find((s) => s.adw_id === adwId);
@@ -561,10 +562,11 @@ test("Tracer.event({kind:d1}): a session's very first event write does not throw
 test("SfDb.open({kind:d1}): optionalColumn falls back to NULL AS <col> for a table missing a migrated column, driven by a real PRAGMA table_info", async () => {
   await withD1Env(async () => {
     const memDb = new DatabaseSync(":memory:");
-    // A deliberately OLD schema — predates the `adw_name`/`archived` columns
-    // tracer.ts's MIGRATIONS array adds — so optionalColumn's PRAGMA table_
-    // info probe must report them absent and interpolate `NULL AS <col>`
-    // rather than emit a SELECT that throws "no such column".
+    // A deliberately OLD schema — predates the `adw_name`/`archived`/
+    // `billable_tokens` columns tracer.ts's MIGRATIONS array adds — so
+    // optionalColumn's PRAGMA table_info probe must report them absent and
+    // interpolate `NULL AS <col>` rather than emit a SELECT that throws
+    // "no such column".
     memDb.exec(`
       CREATE TABLE sessions (
         adw_id TEXT PRIMARY KEY, request TEXT, status TEXT, engineer TEXT,
@@ -592,6 +594,7 @@ test("SfDb.open({kind:d1}): optionalColumn falls back to NULL AS <col> for a tab
       const sfdb = await SfDb.open(D1_TEST_DB, eventsDir, { fetchImpl: sqliteBackedFetch(memDb) });
       const session = await sfdb.session("adw-old");
       assert.equal(session?.adw_name, null, "missing adw_name column resolves to NULL via optionalColumn, not a thrown error");
+      assert.equal(session?.billable_tokens, null, "missing billable_tokens column resolves to NULL too — cli/commands/loop.ts's billableTokensFor() falls back to total_tokens for exactly this");
       const summaries = await sfdb.sessions();
       assert.equal(summaries.length, 1);
       assert.equal(summaries[0]?.archived, null, "missing archived column also resolves to NULL");
