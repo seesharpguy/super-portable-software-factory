@@ -70,7 +70,15 @@ interface Tracer {
 export interface RunObserver {
   onPhaseStart?(phase: Phase): void;
   onPhaseEnd?(phase: Phase, seconds: number): void;
-  onUsage?(tokens: number, cost: number): void;
+  /**
+   * `tokens` is the DISPLAY total (every re-sent token, cache reads
+   * included — context occupancy); `billableTokens` is what
+   * `defaults.max_run_tokens` actually checks (see
+   * `UsageBreakdown.billable_tokens`'s doc comment in `data_types.ts`). A
+   * dashboard comparing spend against the ceiling must compare
+   * `billableTokens`, never `tokens` — see `run_dashboard.tsx`.
+   */
+  onUsage?(tokens: number, cost: number, billableTokens: number): void;
   onSessionEnd?(ok: boolean): void;
 }
 
@@ -224,9 +232,9 @@ export class Console {
     await this.emit(`  ${paint("dim", `· ${clip(message)}`)}`);
   }
 
-  /** `Run.addUsage()`'s only hook into `Console` — the running total lives on `Run`, not here, so this just forwards it to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. */
-  async notifyUsage(tokens: number, cost: number): Promise<void> {
-    this.observer?.onUsage?.(tokens, cost);
+  /** `Run.addUsage()`'s only hook into `Console` — the running totals live on `Run`, not here, so this just forwards them to the observer. No line prints for this on its own; the totals already show up in `sessionFinished`'s panel. `billableTokens` rides alongside `tokens` so a consumer comparing against `defaults.max_run_tokens` (a billable ceiling) never has to guess which number to use — see `RunObserver.onUsage`'s own doc comment. */
+  async notifyUsage(tokens: number, cost: number, billableTokens: number): Promise<void> {
+    this.observer?.onUsage?.(tokens, cost, billableTokens);
   }
 
   // ── agents ──────────────────────────────────────────────────────────────

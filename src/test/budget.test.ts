@@ -38,8 +38,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as v from "valibot";
-import { ConfigDefaultsSchema, SFConfigSchema, UsageBreakdown, type SFConfig } from "../core/data_types.js";
-import { BudgetExceeded, assertRunBudget, formatUsd, isGatewayEstimatedCost, loadConfig } from "../core/agents.js";
+import { AgentConfigSchema, ConfigDefaultsSchema, SFConfigSchema, UsageBreakdown, type AgentConfig, type SFConfig } from "../core/data_types.js";
+import { BudgetExceeded, assertRunBudget, formatUsd, isGatewayEstimatedCost, isGatewayEstimatedDispatch, loadConfig } from "../core/agents.js";
 
 /**
  * A `Run`-shaped budget subject with dictated usage — see `RunBudgetState`.
@@ -266,4 +266,52 @@ test("isGatewayEstimatedCost: false for a claude_code agent whose ANTHROPIC_BASE
 test("isGatewayEstimatedCost: true for a claude_code agent pointed at a custom (gateway) ANTHROPIC_BASE_URL", () => {
   const cfg = makeCfgWithAgent("claude_code");
   assert.equal(isGatewayEstimatedCost(cfg, { ANTHROPIC_BASE_URL: "https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic" }), true);
+});
+
+// ── isGatewayEstimatedDispatch: the per-DISPATCH primitive Run.recordDispatch
+// actually uses, as opposed to isGatewayEstimatedCost's whole-roster check ──
+
+function makeAgentConfig(codingAgent: "flue" | "claude_code" | "opencode"): AgentConfig {
+  return v.parse(AgentConfigSchema, {
+    name: "builder",
+    coding_agent: codingAgent,
+    prompt_engineering: { system: "s.md", user: "u.md" },
+  }) as AgentConfig;
+}
+
+test("isGatewayEstimatedDispatch: false for a non-claude_code agent, no matter the base URL", () => {
+  const agent = makeAgentConfig("flue");
+  assert.equal(isGatewayEstimatedDispatch(agent, { ANTHROPIC_BASE_URL: "https://gateway.example.com" }), false);
+});
+
+test("isGatewayEstimatedDispatch: false for a claude_code agent against Anthropic's own API (unset, or explicit, with or without trailing slash)", () => {
+  const agent = makeAgentConfig("claude_code");
+  assert.equal(isGatewayEstimatedDispatch(agent, {}), false);
+  assert.equal(isGatewayEstimatedDispatch(agent, { ANTHROPIC_BASE_URL: "https://api.anthropic.com" }), false);
+  assert.equal(isGatewayEstimatedDispatch(agent, { ANTHROPIC_BASE_URL: "https://api.anthropic.com/" }), false);
+});
+
+test("isGatewayEstimatedDispatch: true for a claude_code agent pointed at a gateway", () => {
+  const agent = makeAgentConfig("claude_code");
+  assert.equal(isGatewayEstimatedDispatch(agent, { ANTHROPIC_BASE_URL: "https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic" }), true);
+});
+
+test("isGatewayEstimatedDispatch: a roster containing a gateway-bound claude_code agent does not make a DIFFERENT agent's dispatch estimated — the roster-wide isGatewayEstimatedCost and the per-dispatch check answer different questions", () => {
+  const env = { ANTHROPIC_BASE_URL: "https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic" };
+  const rosterCfg = v.parse(SFConfigSchema, {
+    agents: [
+      { name: "scout", coding_agent: "flue", prompt_engineering: { system: "s.md", user: "u.md" } },
+      { name: "builder", coding_agent: "claude_code", prompt_engineering: { system: "s.md", user: "u.md" } },
+    ],
+  }) as SFConfig;
+  // The roster CONTAINS a gateway-bound claude_code agent, so the whole-roster
+  // check says "could" —
+  assert.equal(isGatewayEstimatedCost(rosterCfg, env), true);
+  // — but a run that only ever dispatches "scout" (flue) never actually calls
+  // claude_code through the gateway, so the per-dispatch primitive must say
+  // "no" for that agent specifically. `Run.recordDispatch` (runner.ts) is
+  // wired to this, not to `isGatewayEstimatedCost`, precisely so a run like
+  // that never mislabels its real cost as an estimate.
+  const scout = makeAgentConfig("flue");
+  assert.equal(isGatewayEstimatedDispatch(scout, env), false);
 });

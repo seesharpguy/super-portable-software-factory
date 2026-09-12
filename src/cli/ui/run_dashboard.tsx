@@ -45,7 +45,8 @@ interface LivePhase {
 interface DashboardHandle {
   pushHistory(text: string): void;
   setLivePhase(phase: LivePhase | null): void;
-  setUsage(tokens: number, cost: number): void;
+  /** `billableTokens` is what `maxTokens` (`defaults.max_run_tokens`) is actually checked against; `tokens` is the display total (cache reads included) — see the live line's own comment below. */
+  setUsage(tokens: number, cost: number, billableTokens: number): void;
 }
 
 function formatUsd(n: number): string {
@@ -67,7 +68,7 @@ function DashboardRoot(props: {
   maxTokens?: number;
   handleRef: { current: DashboardHandle | null };
   initialLive: LivePhase | null;
-  initialUsage: { tokens: number; cost: number };
+  initialUsage: { tokens: number; cost: number; billableTokens: number };
 }): ReactElement {
   const [history, setHistory] = useState<HistoryLine[]>([]);
   const [live, setLive] = useState<LivePhase | null>(props.initialLive);
@@ -80,11 +81,17 @@ function DashboardRoot(props: {
       setHistory((h) => [...h, { key, text }]);
     },
     setLivePhase: setLive,
-    setUsage: (tokens, cost) => setUsage({ tokens, cost }),
+    setUsage: (tokens, cost, billableTokens) => setUsage({ tokens, cost, billableTokens }),
   };
 
   const overCost = props.maxCost !== undefined && usage.cost >= props.maxCost * 0.8;
-  const overTokens = props.maxTokens !== undefined && usage.tokens >= props.maxTokens * 0.8;
+  // Compared against BILLABLE tokens, never the display total — `maxTokens`
+  // is `defaults.max_run_tokens`, which `assertRunBudget` (agents.ts) checks
+  // against `billable_tokens`, not `tokens` (cache reads included). Comparing
+  // the total here would trip "approaching ceiling" on cache-driven bulk
+  // that the real ceiling check never sees. See `UsageBreakdown.billable_tokens`'s
+  // doc comment (`data_types.ts`) for the full reasoning.
+  const overTokens = props.maxTokens !== undefined && usage.billableTokens >= props.maxTokens * 0.8;
 
   return (
     <Box flexDirection="column">
@@ -99,9 +106,10 @@ function DashboardRoot(props: {
       ) : null}
       <Box>
         <Text dimColor>
-          spend: {usage.tokens.toLocaleString()} tokens · {formatUsd(usage.cost)}
+          spend: {usage.billableTokens.toLocaleString()} tokens · {formatUsd(usage.cost)}
           {props.maxCost !== undefined ? ` / ${formatUsd(props.maxCost)}` : ""}
           {props.maxTokens !== undefined ? ` (of ${props.maxTokens.toLocaleString()} tokens)` : ""}
+          {` · ${usage.tokens.toLocaleString()} tokens context incl. cache reads`}
         </Text>
         {overCost || overTokens ? <Text color="yellow"> — approaching ceiling</Text> : null}
       </Box>
@@ -123,7 +131,7 @@ export interface RunDashboard {
 export function mountRunDashboard(opts: { maxCost?: number; maxTokens?: number }): RunDashboard {
   const handleRef: { current: DashboardHandle | null } = { current: null };
   let currentPhase: LivePhase | null = null;
-  let currentUsage = { tokens: 0, cost: 0 };
+  let currentUsage = { tokens: 0, cost: 0, billableTokens: 0 };
   // `undefined` while paused: Ink refuses a second `render()` on the same
   // stdout while a prior instance is still live (the same restriction
   // `ink_asker.tsx`'s confirm-timeout comment names), and the sign-off
@@ -176,9 +184,9 @@ export function mountRunDashboard(opts: { maxCost?: number; maxTokens?: number }
       currentPhase = null;
       if (app) handleRef.current?.setLivePhase(null);
     },
-    onUsage(tokens, cost) {
-      currentUsage = { tokens, cost };
-      if (app) handleRef.current?.setUsage(tokens, cost);
+    onUsage(tokens, cost, billableTokens) {
+      currentUsage = { tokens, cost, billableTokens };
+      if (app) handleRef.current?.setUsage(tokens, cost, billableTokens);
     },
   };
 

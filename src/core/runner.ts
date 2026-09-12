@@ -15,7 +15,7 @@ import * as agents from "./agents.ts";
 import { makeGit, type GitHandle } from "./git_helper.ts";
 import { Console, type RunObserver } from "./console.ts";
 import { Tracer } from "./tracer.ts";
-import { makeEventRecord, resolveObservabilityDb, type AgentCall, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
+import { makeEventRecord, resolveObservabilityDb, type AgentCall, type AgentConfig, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
 import type { TierResolution } from "./tiering.ts";
 import { ensureDir, nowIso } from "./utils.ts";
 import type { Notifier } from "./notify/notifier.ts";
@@ -112,16 +112,27 @@ export class Run {
   /** The BILLABLE half of `tokens` — see `UsageBreakdown.billable_tokens`'s doc comment. What `assertRunBudget` actually checks `defaults.max_run_tokens` against; `tokens` stays the display total. */
   billable_tokens = 0;
   /**
-   * True when this run dispatches at least one `claude_code` agent AND
-   * `ANTHROPIC_BASE_URL` points somewhere other than Anthropic's own API —
-   * i.e. a gateway/proxy is standing in for Anthropic. Computed once, here,
-   * from the resolved config (see `agents.ts`'s `isGatewayEstimatedCost`),
-   * and read by `Console.sessionFinished` to label the run's printed cost
-   * as an estimate rather than a fact: `claude`'s own `total_cost_usd` is
-   * ANTHROPIC's price table applied to whatever the CLI thinks it called,
-   * which is honest only when Anthropic itself served the request.
+   * True once this run has DISPATCHED at least one `claude_code` agent
+   * while `ANTHROPIC_BASE_URL` pointed somewhere other than Anthropic's own
+   * API — i.e. a gateway/proxy stood in for Anthropic on a call that
+   * actually happened. Read by `Console.sessionFinished` to label the run's
+   * printed cost as an estimate rather than a fact: `claude`'s own
+   * `total_cost_usd` is ANTHROPIC's price table applied to whatever the CLI
+   * thinks it called, which is honest only when Anthropic itself served the
+   * request.
+   *
+   * Starts `false` and is flipped by `recordDispatch()` below, called once
+   * per agent dispatch (`agents.ts`'s `execute()`, right before the real
+   * coding-agent call) — computed from what this run actually DISPATCHED,
+   * never from the roster's static shape (see `agents.ts`'s
+   * `isGatewayEstimatedDispatch` vs. `isGatewayEstimatedCost` doc comments
+   * for why that distinction matters: a chain can configure a `claude_code`
+   * agent it never actually calls this run, and labeling a real cost as
+   * "estimated" because the roster merely CONTAINS such an agent would be
+   * its own kind of dishonesty). Sticky: once a qualifying dispatch has
+   * happened, a later non-qualifying one must never flip it back to false.
    */
-  cost_is_estimate: boolean;
+  cost_is_estimate = false;
   repo_root: string; // where every agent is spawned to work — always absolute
   /** Every git operation for this run, bound to repo_root. Never call git_helper directly. */
   git: GitHandle;
@@ -149,7 +160,6 @@ export class Run {
     this.notify = init.notifier ?? null;
     this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw", init.sink, init.observer);
     this.engineer = init.engineer;
-    this.cost_is_estimate = agents.isGatewayEstimatedCost(init.cfg);
     this.seq = init.startSeq;
     this.repo_root = init.repoRoot;
     this.spf_dir = init.sfDir;
@@ -167,13 +177,23 @@ export class Run {
     writeFileSync(this.agentMapPath, JSON.stringify(this.agent_map, null, 2));
   }
 
+  /**
+   * Called once per agent dispatch, right before the real coding-agent call
+   * (`agents.ts`'s `execute()`) — see `cost_is_estimate`'s own doc comment
+   * for why this, not the roster, is what decides the label. Sticky: only
+   * ever flips `cost_is_estimate` from false to true, never back.
+   */
+  recordDispatch(agent: AgentConfig): void {
+    if (agents.isGatewayEstimatedDispatch(agent)) this.cost_is_estimate = true;
+  }
+
   // ── usage (run totals mirror what the tracer accumulates in the trace db) ─
   async addUsage(tokens: number, cost: number, billableTokens: number): Promise<void> {
     this.tokens += tokens;
     this.cost += cost;
     this.billable_tokens += billableTokens;
     await this.tracer.sessionAddUsage(this.adw_id, tokens, cost, billableTokens);
-    await this.console.notifyUsage(this.tokens, this.cost);
+    await this.console.notifyUsage(this.tokens, this.cost, this.billable_tokens);
   }
 
   // ── the phase primitive ─────────────────────────────────────────────────

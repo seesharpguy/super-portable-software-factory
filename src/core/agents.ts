@@ -90,10 +90,6 @@ export function formatUsd(value: number): string {
 const ANTHROPIC_DEFAULT_BASE_URL_RE = /^https:\/\/api\.anthropic\.com\/?$/i;
 
 /**
- * True when this run will dispatch at least one `claude_code` agent AND the
- * environment's `ANTHROPIC_BASE_URL` points somewhere other than Anthropic's
- * own API.
- *
  * WHY THIS MATTERS: `agent_cc.ts`'s `run()` reports `final.total_cost_usd`
  * (the `claude` CLI's OWN number) into `UsageBreakdown.total_cost` verbatim
  * — that figure is Anthropic's price table applied to whichever model the
@@ -106,18 +102,52 @@ const ANTHROPIC_DEFAULT_BASE_URL_RE = /^https:\/\/api\.anthropic\.com\/?$/i;
  * `Console.sessionFinished` reads this to change the run summary's "cost"
  * line from a bare dollar figure to a labeled estimate rather than silently
  * presenting a guess as ground truth.
+ */
+function usesNonAnthropicGateway(env: Record<string, string | undefined>): boolean {
+  const baseUrl = env["ANTHROPIC_BASE_URL"];
+  if (!baseUrl || !baseUrl.trim()) return false;
+  return !ANTHROPIC_DEFAULT_BASE_URL_RE.test(baseUrl.trim());
+}
+
+/**
+ * True when THIS ONE AGENT, if dispatched right now, would report a
+ * gateway-estimated cost — a `claude_code` agent AND a non-Anthropic
+ * `ANTHROPIC_BASE_URL`. The per-agent primitive `Run.recordDispatch`
+ * (`runner.ts`) calls AT DISPATCH TIME, in `execute()` below, right before
+ * the real coding-agent call — so `run.cost_is_estimate` reflects what this
+ * run actually DISPATCHED, never what the roster merely makes possible (see
+ * `isGatewayEstimatedCost`'s own doc comment for why that distinction is
+ * the whole point of this function existing separately).
  *
  * `env` defaults to `process.env` (already carrying `cfg.env`'s own
  * defaults — see `applyConfigEnv`, applied once at CLI startup before any
  * `Run` is constructed) but is overridable so a test never touches the
  * real environment.
  */
+export function isGatewayEstimatedDispatch(agent: AgentConfig, env: Record<string, string | undefined> = process.env): boolean {
+  return agent.coding_agent === "claude_code" && usesNonAnthropicGateway(env);
+}
+
+/**
+ * Whole-ROSTER check: true when ANY configured agent (dispatched or not)
+ * is a `claude_code` agent AND `ANTHROPIC_BASE_URL` is non-Anthropic.
+ *
+ * NOT what `Run.cost_is_estimate` is computed from — a chain can configure
+ * a `claude_code` agent it never actually dispatches this run (a
+ * conditional phase, a different `--agent` override, ...), and labeling a
+ * real, non-gateway cost as "estimated" because the ROSTER merely contains
+ * such an agent would be its own kind of dishonesty. `Run` instead starts
+ * `cost_is_estimate` at `false` and `recordDispatch()` (`runner.ts`, driven
+ * by `isGatewayEstimatedDispatch` above) flips it true only when a
+ * qualifying dispatch actually happens. This whole-roster version is kept
+ * as the general "could this config ever need the estimate label" check
+ * (`spf estimate`-shaped questions, and this file's own test suite) — never
+ * wire it back into the per-run label.
+ */
 export function isGatewayEstimatedCost(cfg: SFConfig, env: Record<string, string | undefined> = process.env): boolean {
   const usesClaudeCode = cfg.agents.some((a) => a.coding_agent === "claude_code");
   if (!usesClaudeCode) return false;
-  const baseUrl = env["ANTHROPIC_BASE_URL"];
-  if (!baseUrl || !baseUrl.trim()) return false;
-  return !ANTHROPIC_DEFAULT_BASE_URL_RE.test(baseUrl.trim());
+  return usesNonAnthropicGateway(env);
 }
 
 /**
@@ -739,6 +769,8 @@ interface RunForAgents {
     note: (message: string) => Promise<void>;
   };
   addUsage: (tokens: number, cost: number, billableTokens: number) => Promise<void>;
+  /** See `Run.recordDispatch`'s own doc comment (`runner.ts`) and `isGatewayEstimatedDispatch` above — called once per real dispatch, before it happens. */
+  recordDispatch: (agent: AgentConfig) => void;
   saveAgentMap: (agent: string, entry: { session_id: string; model: string; coding_agent: string }) => void;
 }
 
@@ -1026,6 +1058,9 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
     const onSpawn = (pid: number) => void run.tracer.processStart(run.adw_id, "agent", agent.name, pid, `${agent.coding_agent} ${agent.name} ${agent.model}`).catch(() => {});
     const onExit = (pid: number) => void run.tracer.processEnd(run.adw_id, pid).catch(() => {});
     if (spec) await sandbox.reconcileWorkspace(spec);
+    // Recorded right before the real dispatch, not derived from the roster
+    // up front — see `isGatewayEstimatedDispatch`'s doc comment for why.
+    run.recordDispatch(agent);
     let result: FlueResultLike;
     if (agent.coding_agent === "claude_code") {
       result = await agentCc.run(request, forward, onSpawn, onExit);
