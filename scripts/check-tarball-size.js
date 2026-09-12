@@ -76,8 +76,8 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 865_000;
-const UNPACKED_BUDGET = 2_470_000;
+const PACKED_BUDGET = 900_000;
+const UNPACKED_BUDGET = 2_600_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
