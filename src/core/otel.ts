@@ -429,7 +429,15 @@ function numOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** UsageBreakdown's token fields -> attribute suffixes. Numbers only, by construction. */
+/**
+ * UsageBreakdown's token fields -> attribute suffixes. Numbers only, by
+ * construction. `billable_tokens` rides alongside `total_tokens` — the SAME
+ * split `run_dashboard.tsx`'s live spend line and `estimate.ts`'s cutoff
+ * projection now both carry (see `UsageBreakdown.billable_tokens`'s doc
+ * comment in `data_types.ts`) — so a Langfuse/OTEL consumer graphing spend
+ * against `defaults.max_run_tokens` has the metric the real ceiling check
+ * actually uses, not just the display total (cache reads included).
+ */
 const TOKEN_FIELDS: Array<[string, string]> = [
   ["input_tokens", "spf.tokens.input"],
   ["output_tokens", "spf.tokens.output"],
@@ -437,6 +445,7 @@ const TOKEN_FIELDS: Array<[string, string]> = [
   ["cache_write_tokens", "spf.tokens.cache_write"],
   ["reasoning_tokens", "spf.tokens.reasoning"],
   ["total_tokens", "spf.tokens.total"],
+  ["billable_tokens", "spf.tokens.billable"],
 ];
 const COST_FIELDS: Array<[string, string]> = [
   ["input_cost", "spf.cost.input"],

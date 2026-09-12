@@ -781,7 +781,7 @@ test("ROUND TRIP: a fake run's deterministic ids and attributes survive the real
         type: "agent_end",
         name: "builder",
         tokens: 500,
-        payload: { cost: 0.07, usage: { input_tokens: 400, output_tokens: 100, cache_read_tokens: 64, total_tokens: 500 } },
+        payload: { cost: 0.07, usage: { input_tokens: 400, output_tokens: 100, cache_read_tokens: 64, total_tokens: 500, billable_tokens: 436 } },
       }),
       "evt_2",
       "2026-02-01T00:00:05.000Z",
@@ -811,6 +811,7 @@ test("ROUND TRIP: a fake run's deterministic ids and attributes survive the real
     assert.deepEqual(agentAttrs["gen_ai.request.model"], { stringValue: "vllm/nemotron-lora-placeholder" });
     assert.deepEqual(agentAttrs["spf.lora_adapter"], { stringValue: "nemotron-lora-placeholder" }, "the org's -lora- naming convention resolves on the real wire");
     assert.deepEqual(agentAttrs["spf.tokens.total"], { intValue: 500 });
+    assert.deepEqual(agentAttrs["spf.tokens.billable"], { intValue: 436 }, "the same metric defaults.max_run_tokens checks against — Langfuse/OTEL must see it, not just the display total");
     assert.deepEqual(agentAttrs["gen_ai.usage.cache_read.input_tokens"], { intValue: 64 }, "the vLLM/OpenAI-compatible cache-read pass-through, under its GenAI semconv name");
     assert.deepEqual(agentAttrs["spf.cost.total"], { doubleValue: 0.07 });
 
