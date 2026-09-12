@@ -42,8 +42,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.83.0",
-    "@flue/opentelemetry": "2.0.4",
-    "@flue/runtime": "2.0.3",
+    "@flue/opentelemetry": "2.0.5",
+    "@flue/runtime": "2.0.5",
     "@hono/node-server": "^2.1.1",
     "@inkjs/ui": "^2.0.0",
     "@opentelemetry/api": "1.9.1",
