@@ -268,26 +268,48 @@ const EFFORT_MAP: Record<ThinkingLevel, string> = {
   max: "max",
 };
 
+/** This call's own SPF identity, when the caller has it — see `data_types.ts`'s `AgentRequest.adw_id`/`agent_name` doc. Both optional; an absent one simply omits its header line. */
+export interface GatewayCallIdentity {
+  adwId?: string;
+  agentName?: string;
+}
+
 /**
  * Merges `TRACEPARENT`/`ANTHROPIC_CUSTOM_HEADERS` into `baseEnv` for
- * outbound OTel propagation, or returns `baseEnv` UNCHANGED when
- * `otel` is absent (the common case — `observability.otel` not configured).
+ * outbound OTel + gateway-header propagation, or returns `baseEnv`
+ * UNCHANGED when NEITHER `otel` nor `gateway` has anything to contribute
+ * (no otel configured AND no adw_id/agent_name on this request — the
+ * byte-identical case for a bare, ungated `claude` install).
  * `ANTHROPIC_CUSTOM_HEADERS`'s verified format is newline-separated
  * `Name: Value` pairs (see this module's own header for the citation); an
  * operator-supplied value already present in `baseEnv` is kept and appended
  * to, not overwritten — a real header injected via config/settings must
  * still reach the wire alongside this module's own.
+ *
+ * `x-correlation-id`/`x-spf-agent` (from `gateway`) are added on EVERY call
+ * that has them, regardless of whether `otel` is configured — see
+ * `data_types.ts`'s `AgentRequest.adw_id` doc for why that pair is not
+ * gated on `observability.otel` the way `otel`/`traceparent` is. `traceparent`
+ * itself is added only when `otel` is present, unchanged from before.
+ * `x-request-id` is NEVER added — Envoy/Switchyard own that header
+ * end-to-end; this module used to send it here (BLOCKER B) and no longer
+ * does.
  */
 export function injectOtelEnv(
   baseEnv: Record<string, string>,
   otel: AgentRequest["otel"] | undefined,
+  gateway: GatewayCallIdentity = {},
 ): Record<string, string> {
-  if (!otel) return baseEnv;
-  const ownHeaders = [`traceparent: ${otel.traceparent}`, `x-request-id: ${otel.x_request_id}`].join("\n");
+  const headerLines: string[] = [];
+  if (otel) headerLines.push(`traceparent: ${otel.traceparent}`);
+  if (gateway.adwId) headerLines.push(`x-correlation-id: ${gateway.adwId}`);
+  if (gateway.agentName) headerLines.push(`x-spf-agent: ${gateway.agentName}`);
+  if (headerLines.length === 0) return baseEnv;
   const existing = baseEnv.ANTHROPIC_CUSTOM_HEADERS;
+  const ownHeaders = headerLines.join("\n");
   return {
     ...baseEnv,
-    TRACEPARENT: otel.traceparent,
+    ...(otel ? { TRACEPARENT: otel.traceparent } : {}),
     ANTHROPIC_CUSTOM_HEADERS: existing ? `${existing}\n${ownHeaders}` : ownHeaders,
   };
 }
@@ -391,23 +413,25 @@ export async function run(
   const isOllamaLaunch = isOllamaLaunchCmd(cmdSpec);
   const needsOllamaLaunchSeparator = isOllamaLaunch && !cmdArgs.includes("--");
   const fullArgs = needsOllamaLaunchSeparator ? [...cmdArgs, "--", ...args] : [...cmdArgs, ...args];
-  // Outbound OTel propagation (SPF's otel-sdk extension): `request.otel` is
-  // set only when `observability.otel` is configured for this run (see
-  // `agents.ts`'s `send()`) — absent otherwise, so `env` below is
-  // byte-identical to before this existed for every repo that hasn't
-  // configured otel. `TRACEPARENT` is the standard W3C env var the `claude`
-  // CLI's own subprocesses/telemetry already look for; `ANTHROPIC_CUSTOM_
-  // HEADERS` additionally puts `traceparent` (redundant with the env var,
-  // but this is the only way to reach the ACTUAL outbound HTTP request the
-  // CLI itself makes to its configured `ANTHROPIC_BASE_URL`) and
-  // `x-request-id` (this agent call's own span id) onto that request's
-  // headers. Format verified against Claude Code's own docs (https://
+  // Outbound OTel + gateway-header propagation: `request.otel` is set only
+  // when `observability.otel` is configured for this run (see `agents.ts`'s
+  // `send()`); `request.adw_id`/`request.agent_name` are set on EVERY call
+  // regardless (see `data_types.ts`'s doc — the gateway needs them whether
+  // or not SPF's own otel export is on). `env` below is byte-identical to
+  // before this existed for a request with neither. `TRACEPARENT` is the
+  // standard W3C env var the `claude` CLI's own subprocesses/telemetry
+  // already look for; `ANTHROPIC_CUSTOM_HEADERS` additionally puts
+  // `traceparent`/`x-correlation-id`/`x-spf-agent` onto the ACTUAL outbound
+  // HTTP request the CLI itself makes to its configured `ANTHROPIC_BASE_URL`
+  // — NEVER `x-request-id` (Envoy/Switchyard own that header end-to-end;
+  // this module used to send it here — BLOCKER B — and no longer does).
+  // Format verified against Claude Code's own docs (https://
   // code.claude.com/docs/en/env-vars, fetched live for this feature —
   // requires CLI >= 2.1.227): "Custom headers to add to requests (`Name:
   // Value` format, newline-separated for multiple headers)". An
   // operator-supplied `ANTHROPIC_CUSTOM_HEADERS` already present in
   // `request.env` is PRESERVED, not clobbered — this appends to it.
-  const env = injectOtelEnv(request.env ?? operatorEnv(), request.otel);
+  const env = injectOtelEnv(request.env ?? operatorEnv(), request.otel, { adwId: request.adw_id, agentName: request.agent_name });
   const child = spawn(cmd, fullArgs, { cwd: request.cwd, env });
   // The prompt travels as a positional argv element, not stdin — closing it
   // immediately avoids a real, observed ~3s "no stdin data received" stall

@@ -18,7 +18,7 @@ import * as agentOpencode from "../../core/agent_opencode.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
-import { ollamaBaseUrl } from "../../core/ollama_provider.ts";
+import { ollamaApiKey, ollamaBaseUrl } from "../../core/ollama_provider.ts";
 import { cloudflareAiBaseUrl } from "../../core/cloudflare_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
@@ -571,13 +571,35 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     // latency either way — strictly cheaper for a pure reachability check,
     // and there's no live-server dependency in this choice: doctor's probe
     // itself tolerates either endpoint being down (see `probeGet`).
-    const result = await withProbeStatus("OLLAMA_BASE_URL reachability", () => probeGet(`${ollamaBase}/models`));
+    //
+    // MINOR-F (MINOR 3: now via ollamaApiKey(), not a raw env read) — send a
+    // bearer on every probe, same as the Cloudflare Workers AI probe below
+    // AND same as a real dispatch: `ollamaApiKey()` (ollama_provider.ts) is
+    // the SAME function `registerOllamaModel`'s `auth.apiKey.resolve()`
+    // calls, so this probe and a real dispatch send byte-identical bearers
+    // for the same `OLLAMA_API_KEY` env state — including the dummy
+    // placeholder when it's unset, which a prior version of this probe
+    // omitted entirely (no `Authorization` header at all), a real
+    // divergence from what dispatch actually sends. A bare local Ollama
+    // server (the common case) checks nothing and answers identically
+    // either way; a gateway in front of it (e.g. Briefs' Envoy AI Gateway)
+    // 401/403s an unauthenticated, dummy, or wrong-key probe, which is
+    // exactly the misconfiguration doctor exists to surface, not silently
+    // mask as a generic "reachable: HTTP 401".
+    const ollamaApiKeyEnv = (process.env["OLLAMA_API_KEY"] ?? "").trim();
+    const ollamaHeaders: Record<string, string> = { authorization: `Bearer ${ollamaApiKey()}` };
+    const result = await withProbeStatus("OLLAMA_BASE_URL reachability", () => probeGet(`${ollamaBase}/models`, ollamaHeaders));
+    const isAuthFailure = result.ok && (result.status === 401 || result.status === 403);
     check(
       report,
       "OLLAMA_BASE_URL reachability",
       true, // informational/warning only — see the ANTHROPIC_BASE_URL check above for why
-      result.ok ? `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}` : `unreachable: GET ${ollamaBase}/models -> ${result.error}`,
-      result.ok ? "info" : "warn",
+      !result.ok
+        ? `unreachable: GET ${ollamaBase}/models -> ${result.error}`
+        : isAuthFailure
+          ? `HTTP ${result.status} from GET ${ollamaBase}/models — a gateway in front of Ollama is rejecting this request; set OLLAMA_API_KEY to the client key it expects${ollamaApiKeyEnv ? " (one is set, but was rejected — check its value)" : " (none is currently set — the dummy placeholder bearer a keyless dispatch sends was rejected too)"}`
+          : `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}`,
+      !result.ok || isAuthFailure ? "warn" : "info",
     );
   }
 

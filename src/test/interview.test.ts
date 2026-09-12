@@ -251,7 +251,7 @@ test("flue + openrouter: no pinned-agent overrides needed, provider key collecte
   assert.ok(!("watch" in config));
 });
 
-test("flue + ollama: keyless provider skips the API-key prompt, but still asks for OLLAMA_BASE_URL", async () => {
+test("flue + ollama: keyless provider skips PROVIDER_ENV_KEYS' key prompt, but still asks for OLLAMA_BASE_URL and the optional OLLAMA_API_KEY gateway prompt", async () => {
   const ctx = gatherContext(dir, new Map());
   const asker = createFakeAsker({
     select: { "backend runs": "flue", Provider: "ollama" },
@@ -265,9 +265,13 @@ test("flue + ollama: keyless provider skips the API-key prompt, but still asks f
       "Configure advanced": false,
       "Write .spf": true,
     },
-    // Deliberately no `secret` entries: a keyless provider must never call
-    // asker.secret() at all — PROVIDER_ENV_KEYS.ollama is `[]`, so indexing
-    // [0] for a prompt label would be `undefined`, not skip the prompt.
+    // Deliberately no `secret` entries: PROVIDER_ENV_KEYS.ollama is `[]`, so
+    // its own keyed-provider prompt (indexing envKeys[0]) is skipped for
+    // ollama. MINOR-F's own OLLAMA_API_KEY prompt (asked separately, inside
+    // the "keyless" branch — see interview.ts) IS still asked, but left
+    // blank here (the fake asker's default for an unlisted `secret` label is
+    // "") to prove it's genuinely optional: a bare local Ollama server needs
+    // no key, so leaving it blank must not fail this interview or invent one.
   });
 
   const result = await runInterview(asker, ctx);
@@ -275,8 +279,16 @@ test("flue + ollama: keyless provider skips the API-key prompt, but still asks f
   const config = result!.config as any;
   assert.equal(config.defaults.coding_agent, "flue");
   assert.equal(config.defaults.model, "ollama/llama3");
-  assert.deepEqual(result!.env, { OLLAMA_BASE_URL: "http://localhost:11434/v1" }, "no API key, but the base URL prompt's default is written");
-  assert.deepEqual(result!.envExampleKeys, ["OLLAMA_BASE_URL"], "OLLAMA_BASE_URL is the only key name to record for a keyless provider");
+  assert.deepEqual(
+    result!.env,
+    { OLLAMA_BASE_URL: "http://localhost:11434/v1" },
+    "no API key answered -> OLLAMA_API_KEY is never written to env, only the base URL prompt's default",
+  );
+  assert.deepEqual(
+    result!.envExampleKeys,
+    ["OLLAMA_BASE_URL", "OLLAMA_API_KEY"],
+    "OLLAMA_API_KEY is still RECORDED as an example key (so .env.example documents it as optional) even though it was left blank",
+  );
   // Unlike the openrouter case above, ollama DOES need the pinned-roster
   // fix: planner/reviewer/documenter pin their own fireworks/gemini/openai
   // model strings in the packaged roster, which would otherwise always win
@@ -291,6 +303,30 @@ test("flue + ollama: keyless provider skips the API-key prompt, but still asks f
     ],
     "planner/reviewer/documenter are pinned to the chosen ollama model, same fix as the claude_code branch",
   );
+});
+
+test("flue + ollama: an answered OLLAMA_API_KEY is written to env — the gateway-bearer case (MINOR-F)", async () => {
+  const ctx = gatherContext(dir, new Map());
+  const asker = createFakeAsker({
+    select: { "backend runs": "flue", Provider: "ollama" },
+    text: { "Model id": "llama3" },
+    confirm: {
+      'Add a "typecheck"': false,
+      'Add a "lint"': false,
+      'Add a "build"': false,
+      'Add a "test"': false,
+      "Enable spf watch": false,
+      "Configure advanced": false,
+      "Write .spf": true,
+    },
+    secret: { OLLAMA_API_KEY: "briefs-gateway-client-key-123" },
+  });
+
+  const result = await runInterview(asker, ctx);
+  assert.ok(result);
+  assert.equal(result!.env.OLLAMA_API_KEY, "briefs-gateway-client-key-123");
+  assert.equal(result!.env.OLLAMA_BASE_URL, "http://localhost:11434/v1");
+  assert.deepEqual(result!.envExampleKeys, ["OLLAMA_BASE_URL", "OLLAMA_API_KEY"]);
 });
 
 test("flue + ollama: a custom OLLAMA_BASE_URL answer is written verbatim", async () => {

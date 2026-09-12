@@ -959,6 +959,8 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       flue_db_path: path.join(run.data_dir, "flue.db"),
       env: agentEnv(agent),
       sandbox: spec,
+      adw_id: run.adw_id,
+      agent_name: agent.name,
       otel:
         otelCtx && otelBlock
           ? {
