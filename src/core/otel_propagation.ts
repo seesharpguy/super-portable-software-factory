@@ -36,18 +36,46 @@
  * instance") — Flue's own spans (`invoke_agent`, `chat <model>`,
  * `execute_tool`) now have somewhere real to go, which they did not before.
  *
- * A SEPARATE TRACE FROM SPF's OWN SPANS, ON PURPOSE. This global provider's
- * spans use the SDK's own random `IdGenerator` — they are NOT stitched into
- * `otel.ts`'s deterministic-sha256-id trace. Unifying the two would mean
- * either handing `otel.ts`'s bespoke ids to a real `IdGenerator` (which
- * takes no arguments — see `otel.ts`'s own header for why that already
- * doesn't work for its own per-run exporter) or making `otel.ts` route
- * through the global provider instead of its own direct-to-`ReadableSpan`
- * construction, which would reopen the exact hand-rolled-adjacent risk v2
- * of `otel.ts` exists to close. Two separate, correctly-formed traces that a
- * backend can still correlate by time window and `spf.adw_id`/`gen_ai.*`
- * attributes is the honest v1 of this feature, not a bug to fix later
- * without saying so.
+ * FLUE SPANS JOIN SPF's DETERMINISTIC TRACE (v3; issue #80). The naive
+ * approach — extracting SPF's agent-call traceparent into the active
+ * context around `dispatch()` — was tried and REJECTED by design review:
+ * flue's node runtime executes submissions in ONE process-lifetime claim
+ * loop (`builtin-providers ... claimLoop()`, started by the first
+ * dispatch's `finally`), whose async context is captured once at loop
+ * creation. A dispatch-time context wrap therefore joins only the FIRST
+ * flue agent in a process and silently MIS-ATTRIBUTES every later agent's
+ * spans into the first agent's trace — worse than a separate trace.
+ *
+ * The mechanism below instead uses the instrumentation's own
+ * `resolveRootContext(event, ctx)` option (typed in
+ * `@flue/opentelemetry`'s public d.mts; verified in its dist: consulted
+ * per span exactly when a span has neither an explicit parent nor an
+ * active-context SpanContext — i.e. per span, per submission, no matter
+ * what context the claim loop was captured in). SPF keeps a small
+ * instance-id -> traceparent map (`registerFlueSessionTrace`, populated by
+ * `agent_flue.ts`'s `run()` around each agent call), and the resolver
+ * matches on `ctx.id` — flue's documented "stable agent instance id during
+ * agent processing", which is the id SPF mints and hands to
+ * `init(SfAgent, { id })`. Extraction goes through the globally
+ * registered propagator against ROOT_CONTEXT, so no leaked loop context
+ * can stick. Consequences, all intended:
+ *   - Flue's spans inherit SPF's sha256 trace id, parented under the
+ *     right agent-call span PER SESSION — correct under multiple agents
+ *     per process, concurrent agents, and claim-loop restarts alike. Span
+ *     ids are SDK-random; only the trace id is shared.
+ *   - The http/undici client spans' injected `traceparent` carries the
+ *     deterministic id too, so Switchyard/vLLM hops land as descendants of
+ *     SPF's trace — parity with `claude_code`'s `ANTHROPIC_CUSTOM_HEADERS`
+ *     path. `x-request-id` stays the this-span id for request-keyed
+ *     correlation, unchanged.
+ *   - Unmapped sessions (never registered, restarted process with a
+ *     durable backlog, post-`unregister` straggler bookkeeping spans)
+ *     resolve to an unparented root — flue's spans root a separate SDK
+ *     trace exactly as v1 did, correlatable by `x-request-id`/`spf.adw_id`/
+ *     time window. Degraded join, never an error and never MIS-attributed.
+ *   - flue's internal `executionContext.traceCarrier` (typed but not on
+ *     the public `AgentDispatchRequest` surface) stays unused — noted here
+ *     as flue's own escape hatch, not something SPF reaches into.
  *
  * REGISTRATION TIMING. `installFluePropagation()` is called from
  * `agent_flue.ts`'s `run()`, before `ensureRuntime()`/dispatch — i.e. before
@@ -70,7 +98,7 @@
  * agent dispatches this process makes) happens to arrive first.
  */
 
-import { propagation, trace as traceApi, context as contextApi, isSpanContextValid, type Context, type TextMapPropagator, type TextMapSetter } from "@opentelemetry/api";
+import { defaultTextMapGetter, propagation, ROOT_CONTEXT, trace as traceApi, context as contextApi, isSpanContextValid, type Context, type TextMapPropagator, type TextMapSetter } from "@opentelemetry/api";
 import { AsyncHooksContextManager } from "@opentelemetry/context-async-hooks";
 import { CompositePropagator, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
@@ -106,6 +134,59 @@ export class XRequestIdPropagator implements TextMapPropagator {
   }
 }
 
+/**
+ * Instance-id -> agent-call traceparent registrations backing
+ * `resolveFlueRootContext` — see the module header for the full mechanism
+ * and WHY this is a map consulted per span rather than a dispatch-time
+ * context wrap (flue's single claim loop makes the latter mis-attribute
+ * every agent after the first). One entry per in-flight `agent_flue.run()`
+ * call.
+ */
+const flueSessionTraces = new Map<string, string>();
+
+/**
+ * Registers `traceparent` (SPF's deterministic agent-call span, as a W3C
+ * carrier string) as the trace root for flue spans belonging to `sessionId`
+ * — flue's instance id, minted by SPF and handed to `init(SfAgent, { id })`.
+ * Overwrites a prior registration for the same id (a same-phase retry is
+ * the same logical call; the current call wins).
+ */
+export function registerFlueSessionTrace(sessionId: string, traceparent: string): void {
+  flueSessionTraces.set(sessionId, traceparent);
+}
+
+/**
+ * Idempotent — called from `run()`'s `finally`. Post-settlement bookkeeping
+ * spans flue mints after this point simply resolve to an unparented root
+ * (separate trace), which is preferable to leaking a registration whose id
+ * a REUSED session id could collide with on a later phase.
+ */
+export function unregisterFlueSessionTrace(sessionId: string): void {
+  flueSessionTraces.delete(sessionId);
+}
+
+/**
+ * The `resolveRootContext` implementation handed to
+ * `createOpenTelemetryInstrumentation` — consulted per root-span creation
+ * (see the module header). Matches on `ctx.id` (flue's documented stable
+ * agent instance id during processing) and returns SPF's agent-call span
+ * as an extracted REMOTE parent, pulled from ROOT_CONTEXT so no ambient
+ * claim-loop context can leak in. Returns `undefined` (flue mints an
+ * unparented root span of its own) for an unmapped session id, a malformed
+ * traceparent, an absent ctx — and, with no global propagator installed,
+ * for everything. Exported for tests.
+ */
+export function resolveFlueRootContext(
+  _event: unknown,
+  ctx: { id?: string } | undefined,
+): Context | undefined {
+  const traceparent = ctx?.id ? flueSessionTraces.get(ctx.id) : undefined;
+  if (!traceparent) return undefined;
+  const extracted = propagation.extract(ROOT_CONTEXT, { traceparent }, defaultTextMapGetter);
+  const spanContext = traceApi.getSpanContext(extracted);
+  return spanContext && isSpanContextValid(spanContext) ? extracted : undefined;
+}
+
 export interface FluePropagationConfig {
   endpoint: string;
   headers?: Record<string, string>;
@@ -127,7 +208,6 @@ export function installFluePropagation(cfg: FluePropagationConfig | undefined | 
   if (!cfg || !cfg.endpoint) return;
   try {
     if (!installed) {
-      installed = true;
       const provider = new BasicTracerProvider({
         spanProcessors: [
           new BatchSpanProcessor(
@@ -139,10 +219,16 @@ export function installFluePropagation(cfg: FluePropagationConfig | undefined | 
       contextApi.setGlobalContextManager(new AsyncHooksContextManager().enable());
       propagation.setGlobalPropagator(new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new XRequestIdPropagator()] }));
       registerInstrumentations({ instrumentations: [new HttpInstrumentation(), new UndiciInstrumentation()] });
+      // Set AFTER the fallible registrations above: on a construction-time
+      // throw, the next call must be free to retry — latching `installed`
+      // first would permanently disable the process with one stderr line,
+      // and flue's instrumentation (created at most once below) would
+      // capture the no-op tracer as its provider.
+      installed = true;
     }
     if (!flueInstrumented) {
       flueInstrumented = true;
-      instrument(createOpenTelemetryInstrumentation({ content: false }));
+      instrument(createOpenTelemetryInstrumentation({ content: false, resolveRootContext: resolveFlueRootContext }));
     }
   } catch (error) {
     log(`spf: otel flue propagation setup failed (${(error as Error)?.message ?? String(error)}) — provider calls will not carry a traceparent; runs are unaffected`);

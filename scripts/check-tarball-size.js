@@ -66,10 +66,12 @@
  * as every prior raise.
  *
  * Raised again for the otel-sdk batch (#78 OTLP SDK exporter, process
- * metrics, outbound propagation) plus its opencode-propagation follow-up
- * (#79): the real OTel SDK deps and the per-backend propagation code/docs
- * grew the tarball to 823.1kB packed / 2348.3kB unpacked, 209 files:
- * ≤865 KB packed, ≤2.47 MB unpacked — ~5% headroom, same rationale.
+ * metrics, outbound propagation) plus its follow-ups (#79 opencode
+ * propagation, #80 flue trace unification — more propagation code, headers,
+ * tests, and docs): the real OTel SDK deps and the per-backend propagation
+ * code grew the tarball to 816.2kB packed / 2328.6kB unpacked, 207 files
+ * (re-measured on #80 rebased onto #83's merge): ≤865 KB packed, ≤2.47 MB
+ * unpacked — ~5% headroom, same rationale.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
