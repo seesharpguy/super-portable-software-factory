@@ -1193,6 +1193,20 @@ export const WatchJiraConfigSchema = v.object({
   project_key: v.optional(v.string(), ""), // e.g. "PROJ"
   issue_types: v.optional(JiraIssueTypeMapSchema, () => v.parse(JiraIssueTypeMapSchema, {})),
   status_map: v.optional(JiraStatusMapSchema, () => v.parse(JiraStatusMapSchema, {})),
+  /**
+   * The Jira issue-link `type` name `refine.ts`'s `publish()` uses to
+   * connect a freshly-published tree's ROOT issue(s) back to the spec they
+   * were refined from (`JiraProvider.linkToSpec`) — a plain, symmetric
+   * "issue link" (Jira's generic relate-two-issues mechanism), never the
+   * hierarchical `parent` field `linkChild` sets: the spec's own issue type
+   * defaults to Story (`issue_types.spec`), and a root node is often an
+   * Epic/Task — Jira's issue-type hierarchy frequently refuses a Story as
+   * one of those types' PARENT, so the hierarchy field is not a safe choice
+   * here regardless of which type actually published. "Relates" is a
+   * built-in link type on every Jira Cloud project; override this only if a
+   * project's admin has renamed or restricted it.
+   */
+  link_type: v.optional(v.string(), "Relates"),
 });
 export type WatchJiraConfig = v.InferOutput<typeof WatchJiraConfigSchema>;
 

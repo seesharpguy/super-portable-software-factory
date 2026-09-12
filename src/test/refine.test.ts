@@ -31,6 +31,7 @@ function makeCfg(watch: Partial<SFConfig["watch"]>): SFConfig {
 class FakeTracker implements IssueAuthoringProvider {
   created: Array<{ title: string; body: string; labels: string[]; kind: IssueAuthoringKind }> = [];
   links: Array<{ parent: string; child: string }> = [];
+  specLinks: Array<{ specId: string; issue: string }> = [];
   private byId = new Map<string, Issue>();
   nextId = 1;
 
@@ -44,6 +45,11 @@ class FakeTracker implements IssueAuthoringProvider {
 
   async linkChild(parent: Issue, child: Issue): Promise<void> {
     this.links.push({ parent: parent.id, child: child.id });
+  }
+
+  /** Records what `publish()`'s new root->spec branch calls — see this file's own "links the tree's root to the spec issue" tests. */
+  async linkToSpec(specId: string, issue: Issue): Promise<void> {
+    this.specLinks.push({ specId, issue: issue.id });
   }
 
   /** Not exercised by this file's own tests (those live in watch.test.ts's roll-up coverage) — kept correct anyway since a fake that half-implements its interface is worse than one that doesn't compile. */
@@ -60,7 +66,7 @@ test("resolveAuthoringProvider: constructs a JiraProvider when issue_provider is
   process.env["JIRA_API_TOKEN"] = "jira-token";
   try {
     const provider = resolveAuthoringProvider(
-      makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } }),
+      makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {}, link_type: "Relates" } }),
     );
     assert.ok(provider instanceof JiraProvider);
   } finally {
@@ -73,7 +79,7 @@ test("resolveAuthoringProvider: constructs a JiraProvider when issue_provider is
 
 test("resolveAuthoringProvider: rejects a jira config missing base_url or project_key", () => {
   assert.throws(
-    () => resolveAuthoringProvider(makeCfg({ issue_provider: "jira", jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } })),
+    () => resolveAuthoringProvider(makeCfg({ issue_provider: "jira", jira: { base_url: "", project_key: "", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {}, link_type: "Relates" } })),
     /watch\.jira\.base_url and watch\.jira\.project_key/,
   );
 });
@@ -86,7 +92,7 @@ test("resolveAuthoringProvider: rejects when JIRA_EMAIL or JIRA_API_TOKEN is uns
     assert.throws(
       () =>
         resolveAuthoringProvider(
-          makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {} } }),
+          makeCfg({ issue_provider: "jira", jira: { base_url: "https://acme.atlassian.net", project_key: "PROJ", issue_types: { epic: "Epic", feature: "Epic", story: "Story", bug: "Bug", task: "Task", spec: "Story" }, status_map: {}, link_type: "Relates" } }),
         ),
       /JIRA_EMAIL and JIRA_API_TOKEN/,
     );
@@ -278,6 +284,56 @@ test("publish: renders '## Parent: #<id>' when a spec issue id is given, and omi
   const tracker2 = new FakeTracker();
   const withoutSpec = await publish(tracker2, [node({ key: "S1", kind: "story", title: "A leaf" })], { labelPrefix: "spf" });
   assert.doesNotMatch(withoutSpec[0]!.issue.body, /## Parent/);
+});
+
+// ── publish(): linking the tree's root back to the spec (linkToSpec) ─────
+//
+// `node.parent` only ever names ANOTHER NODE in this same tree — the tree's
+// own root(s) have none, so the `linkChild` branch above never runs for
+// them, and before this the ONLY trace of "refined from #42" was the body
+// text a few lines up. `linkToSpec` closes that gap for a tracker that
+// implements it (Jira; see `jira_provider.test.ts`), without touching
+// GitHub (its plain "#42" body text already auto-links there).
+
+test("publish: a single top-level leaf (root === leaf, the common one-task-per-spec case) gets linked to the spec via linkToSpec", async () => {
+  const tracker = new FakeTracker();
+  const created = await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf" })], { labelPrefix: "spf", specIssueId: "WEB-1" });
+  assert.deepEqual(tracker.specLinks, [{ specId: "WEB-1", issue: created[0]!.issue.id }]);
+});
+
+test("publish: a container root is linked to the spec too — only the tree's own root(s), not every node", async () => {
+  const tracker = new FakeTracker();
+  const issues = [
+    node({ key: "S1", kind: "story", title: "Owner invites by email", parent: "F1" }),
+    node({ key: "F1", kind: "feature", title: "Team invitations" }),
+  ];
+  const created = await publish(tracker, issues, { labelPrefix: "spf", specIssueId: "WEB-1" });
+
+  const rootId = created.find((c) => c.key === "F1")!.issue.id;
+  assert.deepEqual(tracker.specLinks, [{ specId: "WEB-1", issue: rootId }], "only the root (F1) is linked to the spec — S1 is already linked to F1 via linkChild");
+});
+
+test("publish: no specIssueId given -> linkToSpec is never called", async () => {
+  const tracker = new FakeTracker();
+  await publish(tracker, [node({ key: "S1", kind: "story", title: "A leaf" })], { labelPrefix: "spf" });
+  assert.deepEqual(tracker.specLinks, []);
+});
+
+test("publish: a tracker with no linkToSpec at all (optional on the interface) never throws, even with a specIssueId given", async () => {
+  class TrackerWithoutLinkToSpec implements IssueAuthoringProvider {
+    nextId = 1;
+    async createIssue(input: { title: string; body: string; labels: string[]; kind: IssueAuthoringKind }): Promise<Issue> {
+      const id = String(this.nextId++);
+      return { id, title: input.title, body: input.body, labels: input.labels };
+    }
+    async linkChild(): Promise<void> {}
+    async listChildren(): Promise<Issue[]> {
+      return [];
+    }
+  }
+  await assert.doesNotReject(() =>
+    publish(new TrackerWithoutLinkToSpec(), [node({ key: "S1", kind: "story", title: "A leaf" })], { labelPrefix: "spf", specIssueId: "WEB-1" }),
+  );
 });
 
 // ── gates.refinementWellFormed ───────────────────────────────────────────

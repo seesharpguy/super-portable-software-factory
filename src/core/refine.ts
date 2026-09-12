@@ -54,7 +54,16 @@ export function resolveAuthoringProvider(cfg: SFConfig): IssueAuthoringProvider 
         'JIRA_EMAIL and JIRA_API_TOKEN must both be set — the refine lane needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens)',
       );
     }
-    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types, cfg.watch.jira.status_map);
+    return new JiraProvider(
+      cfg.watch.jira.base_url,
+      cfg.watch.jira.project_key,
+      cfg.watch.label_prefix,
+      email,
+      token,
+      cfg.watch.jira.issue_types,
+      cfg.watch.jira.status_map,
+      cfg.watch.jira.link_type,
+    );
   }
   if (cfg.watch.issue_provider !== "github") {
     throw new Error(
@@ -275,6 +284,17 @@ export async function publish(tracker: IssueAuthoringProvider, issues: RefinedIs
       // first; a missing entry here would mean the gate let an
       // unresolved parent through, which refinementWellFormed rejects.
       if (parent) await tracker.linkChild(parent.issue, issue);
+    } else if (opts.specIssueId) {
+      // THE GAP THIS CLOSES: `node.parent` only ever names another node
+      // IN THIS TREE — the tree's own root(s) have none, so the branch
+      // above never runs for them, and nothing else in this loop connects
+      // a root back to the spec it was refined FROM. Before this, the only
+      // trace of that relationship was `renderBody`'s "## Parent" TEXT
+      // (still rendered, unchanged) — real on GitHub (auto-linked "#N"),
+      // invisible on Jira (plain text, no cross-reference). `linkToSpec` is
+      // optional and best-effort on purpose — see its own doc comment
+      // (`issues/provider.ts`) for why this is never `linkChild`.
+      await tracker.linkToSpec?.(opts.specIssueId, issue);
     }
   }
   return created;

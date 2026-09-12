@@ -122,7 +122,16 @@ export function resolveIssueProvider(cfg: SFConfig): IssueProvider | null {
       console.error('JIRA_EMAIL and JIRA_API_TOKEN must both be set — spf watch needs an Atlassian account email plus an API token (id.atlassian.com -> Security -> API tokens). See README.md\'s "spf watch" section.');
       return null;
     }
-    return new JiraProvider(cfg.watch.jira.base_url, cfg.watch.jira.project_key, cfg.watch.label_prefix, email, token, cfg.watch.jira.issue_types, cfg.watch.jira.status_map);
+    return new JiraProvider(
+      cfg.watch.jira.base_url,
+      cfg.watch.jira.project_key,
+      cfg.watch.label_prefix,
+      email,
+      token,
+      cfg.watch.jira.issue_types,
+      cfg.watch.jira.status_map,
+      cfg.watch.jira.link_type,
+    );
   }
   console.error(`watch.issue_provider ${JSON.stringify(cfg.watch.issue_provider)} is not supported`);
   return null;
