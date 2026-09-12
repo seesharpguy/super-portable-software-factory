@@ -320,6 +320,19 @@ export async function runInterview(asker: Asker, ctx: DetectedContext): Promise<
         envExampleKeys.push("OLLAMA_BASE_URL");
         asker.note("spf doctor checks this one — a probe against OLLAMA_BASE_URL/models runs on every `spf doctor`.");
 
+        // MINOR-F: optional per-gateway bearer — NOT added to
+        // PROVIDER_ENV_KEYS.ollama (see its doc comment: a bare local Ollama
+        // server needs no key at all, so this must stay optional, never
+        // required). A gateway in front of Ollama (e.g. Briefs' Envoy AI
+        // Gateway) does enforce a per-client key, though, which
+        // ollama_provider.ts's `ollamaApiKey()` sends as the bearer when
+        // set. Collected as an optional secret, same shape as the
+        // Cloudflare API token prompt below — blank is fine, left
+        // unanswered here just means the dummy placeholder keeps being used.
+        const ollamaApiKey = await asker.secret("OLLAMA_API_KEY", { current: ctx.existingEnv.get("OLLAMA_API_KEY") });
+        if (ollamaApiKey) env["OLLAMA_API_KEY"] = ollamaApiKey;
+        envExampleKeys.push("OLLAMA_API_KEY");
+
         // Same problem the claude_code branch already solves above: the
         // packaged roster pins planner/reviewer/documenter to their own
         // fireworks/gemini/openai model strings, which always win over

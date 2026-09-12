@@ -10,12 +10,17 @@ import {
   providerForTest,
   registerOllamaModel,
   resetOllamaRegistrationForTest,
-  gatewayHeaders,
   freshTraceparent,
-  withGatewayHeaders,
   X_REQUEST_ID_HEADER,
-  type FetchLike,
 } from "../core/ollama_provider.js";
+
+// This file never calls `installFluePropagation` — `isFluePropagationInstalled()`
+// stays false for its whole (isolated, per-file) process, so every test here
+// exercises the NOT INSTALLED path: `resolve()` mints its own traceparent,
+// and `registerOllamaModel`'s ctx is stamped onto `Model.headers` as static
+// `x-correlation-id`/`x-spf-agent`. The INSTALLED-path tests (BLOCKER A) and
+// the real end-to-end header capture live in `ollama_gateway_e2e.test.ts`,
+// which DOES install propagation and so needs its own process.
 
 // A minimal stand-in for pi-ai's `AuthContext` — our resolver ignores it
 // entirely (it has no ambient env/file lookups to do), but the `resolve()`
@@ -82,13 +87,38 @@ test("registerOllamaModel: flue's registry resolves the SAME model object our pr
   assert.equal(resolved, onProvider, "flue's registry and our provider must hand back the identical object, not merely an equal one");
 });
 
-test("registerOllamaModel: idempotent for an already-registered id", async () => {
+test("registerOllamaModel: a repeat registration for an already-known id re-runs (MAJOR-D) — new Provider object, but the model list is unchanged", async () => {
+  // Pre-fix behavior was "a repeat registration never calls setProvider
+  // again" (verified via object identity); MAJOR-D's fix is exactly the
+  // opposite of that for a good reason (see registerOllamaModel's own doc):
+  // otherwise a model id's `x-correlation-id`/`x-spf-agent` would freeze at
+  // whatever the FIRST caller supplied, forever, for every later agent/adw_id
+  // that happens to share the same model id in one process.
   await registerOllamaModel("model-a");
   const providerAfterFirst = providerForTest();
 
   await registerOllamaModel("model-a");
 
-  assert.equal(providerForTest(), providerAfterFirst, "a repeat registration never calls setProvider again — same object identity");
+  assert.notEqual(providerForTest(), providerAfterFirst, "a repeat registration DOES re-run setProvider now — a fresh Provider object");
+  const idsOnProvider = providerForTest()!
+    .getModels()
+    .map((m) => m.id)
+    .sort();
+  assert.deepEqual(idsOnProvider, ["model-a"], "the model union itself is unaffected by a repeat of an id already in it");
+});
+
+test("registerOllamaModel(ctx): a repeat registration of the SAME id with a DIFFERENT ctx re-stamps its Model.headers — the MAJOR-D fix", async () => {
+  await registerOllamaModel("model-a", { adwId: "adw_first", agentName: "agent_one" });
+  let model = flueResolveModel("ollama/model-a");
+  assert.deepEqual(model.headers, { "x-correlation-id": "adw_first", "x-spf-agent": "agent_one" });
+
+  await registerOllamaModel("model-a", { adwId: "adw_second", agentName: "agent_two" });
+  model = flueResolveModel("ollama/model-a");
+  assert.deepEqual(
+    model.headers,
+    { "x-correlation-id": "adw_second", "x-spf-agent": "agent_two" },
+    "the SECOND registration's ctx wins — a prior version silently kept the FIRST caller's headers forever",
+  );
 });
 
 test("registerOllamaModel: concurrent calls for the same new id both resolve to one registration, not a second no-op", async () => {
@@ -179,7 +209,7 @@ test("auth.apiKey.resolve: reads OLLAMA_API_KEY fresh — set AFTER registration
   assert.equal(resolved!.auth.apiKey, "set-after-registration");
 });
 
-// ── (3a) freshTraceparent / gatewayHeaders: per-call, well-formed, no x-request-id ──
+// ── (3a) freshTraceparent: per-call, well-formed, no x-request-id ──────────
 
 test("freshTraceparent: well-formed W3C traceparent (00-<32 hex>-<16 hex>-<2 hex>), no active OTel span installed", () => {
   const tp = freshTraceparent();
@@ -194,7 +224,7 @@ test("freshTraceparent: two consecutive calls produce two DIFFERENT, both well-f
   assert.notEqual(first, second, "each call must mint a fresh id pair, not reuse a cached one");
 });
 
-test("auth.apiKey.resolve: two consecutive resolves (one per simulated dispatch) carry two different, well-formed traceparents", async () => {
+test("auth.apiKey.resolve: NOT INSTALLED — two consecutive resolves (one per simulated dispatch) carry two different, well-formed traceparents", async () => {
   await registerOllamaModel("model-a");
   const apiKeyAuth = providerForTest()!.auth.apiKey!;
   const first = await apiKeyAuth.resolve({ ctx: fakeAuthContext, credential: undefined });
@@ -204,24 +234,15 @@ test("auth.apiKey.resolve: two consecutive resolves (one per simulated dispatch)
   assert.match(tp1, TRACEPARENT_RE);
   assert.match(tp2, TRACEPARENT_RE);
   assert.notEqual(tp1, tp2, "resolve() must mint a fresh traceparent on every dispatch, not cache one at registration time");
-  assert.equal("x-request-id" in first!.auth.headers!, false, "resolve() must never set x-request-id");
-});
-
-test("gatewayHeaders: always a traceparent; x-correlation-id/x-spf-agent only when ctx supplies them; x-request-id never present", () => {
-  const bare = gatewayHeaders();
-  assert.match(bare["traceparent"]!, TRACEPARENT_RE);
-  assert.equal("x-correlation-id" in bare, false);
-  assert.equal("x-spf-agent" in bare, false);
-  assert.equal(X_REQUEST_ID_HEADER in bare, false);
-
-  const full = gatewayHeaders({ adwId: "adw_123", agentName: "spec_writer" });
-  assert.equal(full["x-correlation-id"], "adw_123");
-  assert.equal(full["x-spf-agent"], "spec_writer");
-  assert.match(full["traceparent"]!, TRACEPARENT_RE);
-  assert.equal(X_REQUEST_ID_HEADER in full, false);
+  assert.equal(X_REQUEST_ID_HEADER in first!.auth.headers!, false, "resolve() must never set x-request-id");
+  assert.equal("x-correlation-id" in first!.auth.headers!, false, "resolve() never sets these either — they ride Model.headers instead");
+  assert.equal("x-spf-agent" in first!.auth.headers!, false);
 });
 
 // ── registerOllamaModel(modelId, ctx): static x-correlation-id/x-spf-agent per Model ──
+// (NOT INSTALLED path only — see this file's header. The INSTALLED path,
+// where these two come from GatewayHeadersPropagator instead and Model.headers
+// must stay empty to avoid a duplicate, lives in ollama_gateway_e2e.test.ts.)
 
 test("registerOllamaModel(ctx): stamps x-correlation-id/x-spf-agent onto the model's static headers", async () => {
   await registerOllamaModel("model-a", { adwId: "adw_abc", agentName: "researcher" });
@@ -246,60 +267,9 @@ test("registerOllamaModel(ctx): a union re-registration (a second, new model id)
   assert.deepEqual(b.headers, { "x-correlation-id": "adw_second", "x-spf-agent": "agent_two" });
 });
 
-// ── withGatewayHeaders: the pure, unit-testable fetch-wrapper primitive ─────
-
-test("withGatewayHeaders: adds traceparent/x-correlation-id/x-spf-agent to the request the wrapped fetch actually receives — no network", async () => {
-  const calls: Array<{ input: unknown; init?: Record<string, unknown> }> = [];
-  const stubFetch: FetchLike = async (input, init) => {
-    calls.push({ input, init });
-    return { ok: true };
-  };
-
-  const wrapped = withGatewayHeaders(stubFetch, { adwId: "adw_xyz", agentName: "coder" });
-  await wrapped("https://inference.briefs.co/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" } });
-
-  assert.equal(calls.length, 1);
-  const sentHeaders = calls[0]!.init!["headers"] as Record<string, string>;
-  assert.match(sentHeaders["traceparent"]!, TRACEPARENT_RE);
-  assert.equal(sentHeaders["x-correlation-id"], "adw_xyz");
-  assert.equal(sentHeaders["x-spf-agent"], "coder");
-  assert.equal(sentHeaders["content-type"], "application/json", "unrelated caller headers pass through untouched");
-  assert.equal(X_REQUEST_ID_HEADER in sentHeaders, false);
-  assert.equal(calls[0]!.init!["method"], "POST", "non-header init fields pass through untouched");
-});
-
-test("withGatewayHeaders: strips an x-request-id the caller already set — never forwarded, case-insensitively", async () => {
-  const calls: Array<{ init?: Record<string, unknown> }> = [];
-  const stubFetch: FetchLike = async (_input, init) => {
-    calls.push({ init });
-    return { ok: true };
-  };
-
-  const wrapped = withGatewayHeaders(stubFetch, {});
-  await wrapped("https://inference.briefs.co/v1/chat/completions", { headers: { "X-Request-Id": "should-never-reach-the-gateway" } });
-
-  const sentHeaders = calls[0]!.init!["headers"] as Record<string, string>;
-  assert.equal(X_REQUEST_ID_HEADER in sentHeaders, false);
-  assert.equal("X-Request-Id" in sentHeaders, false);
-});
-
-test("withGatewayHeaders: two consecutive calls through the SAME wrapper carry two different traceparents", async () => {
-  const calls: Array<{ init?: Record<string, unknown> }> = [];
-  const stubFetch: FetchLike = async (_input, init) => {
-    calls.push({ init });
-    return { ok: true };
-  };
-
-  const wrapped = withGatewayHeaders(stubFetch, { adwId: "adw_same_run" });
-  await wrapped("https://inference.briefs.co/v1/chat/completions", {});
-  await wrapped("https://inference.briefs.co/v1/chat/completions", {});
-
-  const tp1 = (calls[0]!.init!["headers"] as Record<string, string>)["traceparent"];
-  const tp2 = (calls[1]!.init!["headers"] as Record<string, string>)["traceparent"];
-  assert.match(tp1!, TRACEPARENT_RE);
-  assert.match(tp2!, TRACEPARENT_RE);
-  assert.notEqual(tp1, tp2);
-  // x-correlation-id is stable across calls in the same run — only the trace context is per-call.
-  assert.equal((calls[0]!.init!["headers"] as Record<string, string>)["x-correlation-id"], "adw_same_run");
-  assert.equal((calls[1]!.init!["headers"] as Record<string, string>)["x-correlation-id"], "adw_same_run");
-});
+// `withGatewayHeaders`/`gatewayHeaders` are DELETED (MAJOR-E, YAGNI): unused
+// in the live dispatch path — Flue's `useModel()` exposes no per-call
+// fetch/headers hook (`@flue/runtime`'s public `UseModelOptions` is just
+// `{thinkingLevel?, compaction?}`), so there was never a real call site for
+// a fetch-wrapper primitive, only tests of the primitive itself. Deleted
+// along with their tests rather than fixed, per that finding.

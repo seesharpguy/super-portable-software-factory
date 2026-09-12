@@ -44,6 +44,7 @@
 
 import type { CreateProviderOptions, Model, Provider } from "@earendil-works/pi-ai";
 import { context as contextApi, isSpanContextValid, trace as traceApi } from "@opentelemetry/api";
+import { isFluePropagationInstalled, X_CORRELATION_ID_HEADER, X_SPF_AGENT_HEADER } from "./otel_propagation.ts";
 import { newId } from "./utils.ts";
 
 // Ollama has no auth of its own — `pi-ai`'s auth resolution always calls
@@ -62,10 +63,17 @@ const DUMMY_API_KEY = "ollama-local-unused";
  * Briefs gateway (Envoy AI Gateway) enforces a per-client bearer and 401s
  * the dummy key `DUMMY_API_KEY` was designed for a bare local server that
  * checks nothing. Falls back to the dummy exactly as before when unset, so
- * a bare local Ollama server (the common case this module was built for)
- * is byte-identical to pre-gateway behavior. Read fresh inside `resolve()`
- * (see its call site below) — never cached — so a key exported mid-process
- * (or changed) takes effect on the very next dispatch with no re-registration.
+ * THIS function's own return value — the resolved `Authorization` bearer —
+ * is byte-identical to pre-gateway behavior for a bare local Ollama server
+ * (the common case this module was built for). MINOR-H: that is narrower
+ * than "the whole request is unchanged" — it is not, even with
+ * `OLLAMA_API_KEY` unset: a `traceparent` (and, once `agent_flue.ts` has an
+ * adw_id/agent_name to give it, `x-correlation-id`/`x-spf-agent`) is ALWAYS
+ * sent now, gateway or no gateway (see the "Gateway headers" section below).
+ * A bare local Ollama server ignores headers it doesn't recognize, so this
+ * is harmless — just not byte-identical. Read fresh inside `resolve()` (see
+ * its call site below) — never cached — so a key exported mid-process (or
+ * changed) takes effect on the very next dispatch with no re-registration.
  */
 function ollamaApiKey(): string {
   const key = (process.env.OLLAMA_API_KEY ?? "").trim();
@@ -80,46 +88,54 @@ function ollamaApiKey(): string {
 // NEVER see `x-request-id` (Envoy/Switchyard own that header end-to-end;
 // a client-supplied or client-preserved one breaks their own sampling).
 //
-// Two different mechanisms carry these three headers to the wire, because
-// they need two different lifetimes:
+// Two DIFFERENT mechanisms carry these three headers to the wire, depending
+// on whether `otel_propagation.ts`'s `installFluePropagation()` has been
+// installed in THIS process (`isFluePropagationInstalled()` — set only when
+// `observability.otel` is configured for the run):
 //
-//  - `traceparent` must be FRESH per actual HTTP call. `auth.apiKey.resolve()`
-//    (below) is genuinely reinvoked by pi-ai on every real dispatch — see
-//    `resolveProviderAuth`/`Models.applyAuth()` in
-//    `@earendil-works/pi-ai/dist/models.js` — and its returned `auth.headers`
-//    is merged into the request's headers ahead of the OpenAI SDK call
-//    (`getAuth()` merges it with the model's own static `headers` first,
-//    `applyAuth()` merges the per-call `options.headers` on top, and
-//    `createClient()` folds both into `defaultHeaders`). So a fresh
-//    traceparent minted inside `resolve()` reaches every real call.
-//  - `x-correlation-id`/`x-spf-agent` identify WHICH run/agent is calling,
-//    which `resolve()` cannot know: its only argument is `{ctx, credential}`
-//    (`@earendil-works/pi-ai/dist/auth/types.d.ts`'s `ApiKeyAuth.resolve`),
-//    an `AuthContext`/`Credential` pair with no session/request correlator at
-//    all — not flue's own per-submission `ctx.id`, not anything SPF mints.
-//    Stashing that in a module-level mutable var set around each dispatch
-//    was tried for the SEPARATE trace-parenting problem this repo already
-//    solved (see `otel_propagation.ts`'s header) and REJECTED: flue runs
-//    every submission through one process-lifetime claim loop, so a value
-//    set immediately before one `dispatch()` call can still be overwritten
-//    by a second, concurrent flue agent's dispatch before the first one's
-//    `resolve()` actually fires — silently mis-attributing one run's calls
-//    to another's `x-correlation-id`/`x-spf-agent`. Unsafe here for the same
-//    reason it was unsafe there.
+//  - INSTALLED: `@opentelemetry/instrumentation-undici`/`-http` inject
+//    `traceparent` (`W3CTraceContextPropagator`) and `x-correlation-id`/
+//    `x-spf-agent` (`GatewayHeadersPropagator`, keyed off the per-session
+//    registration `agent_flue.ts` makes via `registerFlueSessionTrace` —
+//    see `otel_propagation.ts`'s header) directly onto every real outbound
+//    request, REGARDLESS of which provider SDK issued it. This is the more
+//    precise mechanism (correct even under concurrent flue sessions in one
+//    process) and it uses `request.addHeader` (append, not replace) — so
+//    THIS module must not ALSO set any of the three, or the gateway sees
+//    two of each header on the wire (this was BLOCKER A: `resolve()` used
+//    to mint its own `traceparent` unconditionally, on top of the
+//    instrumentation's).
+//  - NOT INSTALLED (the common case: otel unconfigured): nothing else is
+//    injecting these headers, so this module must supply all three itself,
+//    via two different sub-mechanisms because they need two different
+//    lifetimes:
+//     - `traceparent` must be FRESH per actual HTTP call. `auth.apiKey.
+//       resolve()` (below) is genuinely reinvoked by pi-ai on every real
+//       dispatch — see `resolveProviderAuth`/`Models.applyAuth()` in
+//       `@earendil-works/pi-ai/dist/models.js` — and its returned
+//       `auth.headers` is merged into the request's headers ahead of the
+//       OpenAI SDK call. So a fresh traceparent minted inside `resolve()`
+//       reaches every real call.
+//     - `x-correlation-id`/`x-spf-agent` identify WHICH run/agent is
+//       calling, which `resolve()` cannot know: its only argument is
+//       `{ctx, credential}` (`@earendil-works/pi-ai/dist/auth/types.d.ts`'s
+//       `ApiKeyAuth.resolve`), an `AuthContext`/`Credential` pair with no
+//       session/request correlator at all. Stashing that in a module-level
+//       mutable var set around each dispatch was tried for the SEPARATE
+//       trace-parenting problem this repo already solved (see
+//       `otel_propagation.ts`'s header) and REJECTED: flue runs every
+//       submission through one process-lifetime claim loop, so a value set
+//       immediately before one `dispatch()` call can still be overwritten by
+//       a second, concurrent flue agent's dispatch before the first one's
+//       `resolve()` actually fires. Unsafe here for the same reason.
 //
-//    So these two ride on `Model.headers` instead — STATIC, stamped once at
-//    registration time from whatever `GatewayCallContext` the FIRST
-//    registration of a given model id received (see `registerOllamaModel`).
-//    This is exactly the fallback the task that produced this module
-//    authorized when "Flue's dispatch() truly cannot expose per-call
-//    context" — see `open_questions` in this change's handoff for the
-//    documented limitation: two DIFFERENT agents sharing the same
-//    `ollama/<id>` model within one process/run will both carry the FIRST
-//    agent's name on `x-spf-agent` (the id is already registered, so a
-//    later registerOllamaModel() call for it is a no-op — see
-//    `registeredIds`'s doc). `x-correlation-id` (the run's adw_id) does not
-//    have this problem in the common case: one `spf` process runs one adw_id
-//    for its whole lifetime.
+//       So, when not installed, these two ride on `Model.headers` instead —
+//       STATIC, re-stamped on every `registerOllamaModel()` call for this
+//       model id (see its own doc for the mutate-not-no-op fix and the one
+//       race that remains: two flue agents dispatching CONCURRENTLY to the
+//       SAME `ollama/<id>` model, i.e. fanout concurrency > 1 racing on one
+//       shared model id, can still have the loser's ctx silently lose to
+//       whichever registration's `setProvider()` call lands last).
 
 /** SPF-side identity for one LLM call, as far as `registerOllamaModel`'s caller can supply it. Both fields optional — an absent one simply omits its header. */
 export interface GatewayCallContext {
@@ -129,20 +145,26 @@ export interface GatewayCallContext {
   agentName?: string;
 }
 
-const X_CORRELATION_ID_HEADER = "x-correlation-id";
-const X_SPF_AGENT_HEADER = "x-spf-agent";
-/** Must NEVER be sent — Envoy/Switchyard own it end-to-end; a client-supplied value breaks their sampling. Exported only so tests can assert its absence by name, not a literal string. */
+/** Must NEVER be sent — Envoy/Switchyard own it end-to-end; a client-supplied value breaks their sampling. Exported only so tests can assert its absence by name, not a literal string. The sole surviving export of this name in the codebase — see MINOR-G in this change's review; `otel_propagation.ts` no longer has one now that `XRequestIdPropagator` is gone (BLOCKER B). */
 export const X_REQUEST_ID_HEADER = "x-request-id";
 
 /**
- * A fresh W3C `traceparent` for one outbound call. Reuses the active OTel
- * span context when `otel_propagation.ts`'s instrumentation (or anything
- * else) has one installed and current — the same trace this call's other
- * telemetry already belongs to — falling back to a brand-new random
- * trace/span id pair when there is none (otel unconfigured, or no span
- * active at this point), so the gateway still gets a well-formed,
- * per-call-unique traceparent either way. Never throws; `isSpanContextValid`
- * is the same guard `otel_propagation.ts`'s own propagators use.
+ * A fresh W3C `traceparent` for one outbound call — used only on the NOT
+ * INSTALLED path (see the section above); when propagation IS installed,
+ * `resolve()` does not call this at all, relying entirely on the
+ * instrumentation's own per-request injection instead (this is what fixed
+ * BLOCKER A/MAJOR-C: this function used to be called unconditionally, and
+ * on the installed path it silently reused the one still-open span's
+ * traceparent for every call inside that span, which is both a duplicate
+ * header AND not actually fresh per call).
+ *
+ * Reuses the active OTel span context when one is installed and current —
+ * the same trace this call's other telemetry already belongs to — falling
+ * back to a brand-new random trace/span id pair when there is none (no span
+ * active at this exact point, e.g. a stray call before any span opened), so
+ * the gateway still gets a well-formed, per-call-unique traceparent either
+ * way. Never throws; `isSpanContextValid` is the same guard
+ * `otel_propagation.ts`'s own propagators use.
  */
 export function freshTraceparent(): string {
   const active = traceApi.getSpanContext(contextApi.active());
@@ -150,47 +172,6 @@ export function freshTraceparent(): string {
     return `00-${active.traceId}-${active.spanId}-01`;
   }
   return `00-${newId(32)}-${newId(16)}-01`;
-}
-
-/** The gateway header set for one call: always a fresh `traceparent`; `x-correlation-id`/`x-spf-agent` only when `ctx` supplies them. Never includes `x-request-id`. Pure — no I/O, safe to call from a test. */
-export function gatewayHeaders(ctx: GatewayCallContext = {}): Record<string, string> {
-  const headers: Record<string, string> = { traceparent: freshTraceparent() };
-  if (ctx.adwId) headers[X_CORRELATION_ID_HEADER] = ctx.adwId;
-  if (ctx.agentName) headers[X_SPF_AGENT_HEADER] = ctx.agentName;
-  return headers;
-}
-
-/** The minimal shape `withGatewayHeaders` needs from a `fetch`-like function — matches `globalThis.fetch`'s call signature without depending on DOM lib types. */
-export type FetchLike = (input: unknown, init?: Record<string, unknown> & { headers?: Record<string, string> }) => Promise<unknown>;
-
-/**
- * Wraps a `fetch` implementation so every call it makes carries this call's
- * gateway headers, and NEVER carries `x-request-id` (stripped from whatever
- * the caller passed in, in addition to never being one of the headers this
- * adds) — a small, pure, unit-testable primitive for the per-call fetch hook
- * the task background asked for.
- *
- * NOT currently wired into a real ollama dispatch: pi-ai's `stream()` only
- * accepts a custom `fetch` via a per-call `StreamOptions.fetch`
- * (`@earendil-works/pi-ai/dist/types.d.ts`), and `@flue/runtime`'s own
- * `useModel(model, options)` — the only call site `agent_flue.ts` has —
- * accepts just `{thinkingLevel?, compaction?}`
- * (`@flue/runtime/dist/index.d.mts`'s `UseModelOptions`), with no
- * `headers`/`fetch` passthrough at all. So there is no clean way today to
- * hand Flue a per-call fetch override; see `resolve()`/`Model.headers` below
- * for how the same three headers actually reach the wire in this version.
- * Kept exported and tested so it's ready to wire in the moment Flue (or a
- * future pi-ai option) exposes a per-call hook — see `open_questions`.
- */
-export function withGatewayHeaders(fetchImpl: FetchLike, ctx: GatewayCallContext = {}): FetchLike {
-  return (input, init) => {
-    const incoming: Record<string, string> = { ...(init?.headers ?? {}) };
-    for (const name of Object.keys(incoming)) {
-      if (name.toLowerCase() === X_REQUEST_ID_HEADER) delete incoming[name];
-    }
-    const headers = { ...incoming, ...gatewayHeaders(ctx) };
-    return fetchImpl(input, { ...init, headers });
-  };
 }
 
 // Advisory only: pi-ai's `openai-completions` api reads this per REQUEST via
@@ -214,24 +195,24 @@ const DEFAULT_MAX_TOKENS = 8192;
  *
  * `OLLAMA_BASE_URL` is read fresh (via `ollamaBaseUrl()`) at each
  * registration call, and the whole union is re-registered at whatever URL
- * is current AT THAT MOMENT — so a mid-process env change applies unevenly:
- * ids already registered keep the base URL they were registered under until
- * the NEXT new id triggers a fresh union re-registration, which then
- * re-points every id at once. Deliberate: a single local server for the
- * whole process is the supported case, and this asymmetry only bites a
- * per-agent override, which isn't.
+ * is current AT THAT MOMENT. `registerOllamaModel` re-runs this rebuild on
+ * EVERY call now (see its own doc for why: MAJOR-D's gateway-header
+ * re-stamping needs it), so in practice a mid-process `OLLAMA_BASE_URL`
+ * change is picked up by the very next dispatch to ANY already-registered
+ * id, not just the next brand-new one.
  */
 const registeredIds = new Set<string>();
 
 /**
- * The `GatewayCallContext` each model id was FIRST registered with — see the
- * "Gateway headers" section above for why `x-correlation-id`/`x-spf-agent`
- * are static per-model rather than resolved per-call. Keyed by model id so a
- * union re-registration (triggered by a NEW id) can rebuild every
- * already-registered id's `Model.headers` from the context it originally
- * got, instead of silently dropping it — the same "already-registered ids
- * keep what they were registered with" invariant `registeredIds` documents
- * for the base URL.
+ * The `GatewayCallContext` each model id was MOST RECENTLY registered with
+ * — see the "Gateway headers" section above for why `x-correlation-id`/
+ * `x-spf-agent` are static per-model (when otel propagation isn't
+ * installed) rather than resolved per-call. Keyed by model id so a union
+ * re-registration (triggered by ANY registration call, new id or repeat —
+ * see `registerOllamaModel`'s MAJOR-D doc) can rebuild every
+ * already-registered id's `Model.headers` from the context it MOST
+ * RECENTLY got, rather than dropping it or freezing it at first
+ * registration.
  */
 const registrationContext = new Map<string, GatewayCallContext>();
 
@@ -258,13 +239,20 @@ export function ollamaBaseUrl(): string {
 function modelFor(id: string, baseUrl: string, ctx?: GatewayCallContext): Model<"openai-completions"> {
   // Static per-model headers — see the "Gateway headers" section above for
   // why `x-correlation-id`/`x-spf-agent` live here rather than in
-  // `resolve()`. Omitted entirely (no `headers` key at all) when `ctx` is
-  // absent/empty, so a caller that never passes one — every call site
-  // before this change, and any future one that doesn't care — gets a
-  // byte-identical `Model` to before this field existed.
+  // `resolve()`, and ONLY on the NOT INSTALLED path: when
+  // `isFluePropagationInstalled()` is true, `GatewayHeadersPropagator`
+  // already injects both per real request, correctly attributed per
+  // session — stamping them here too would double them up on the wire
+  // (BLOCKER A's bug, for these two headers instead of `traceparent`).
+  // Omitted entirely (no `headers` key at all) when there is nothing to
+  // stamp — propagation installed, or `ctx` absent/empty — so a caller that
+  // never passes one, or a run with otel configured, gets a `Model` with no
+  // static headers.
   const staticHeaders: Record<string, string> = {};
-  if (ctx?.adwId) staticHeaders[X_CORRELATION_ID_HEADER] = ctx.adwId;
-  if (ctx?.agentName) staticHeaders[X_SPF_AGENT_HEADER] = ctx.agentName;
+  if (!isFluePropagationInstalled()) {
+    if (ctx?.adwId) staticHeaders[X_CORRELATION_ID_HEADER] = ctx.adwId;
+    if (ctx?.agentName) staticHeaders[X_SPF_AGENT_HEADER] = ctx.agentName;
+  }
   return {
     id,
     name: id,
@@ -288,32 +276,49 @@ function modelFor(id: string, baseUrl: string, ctx?: GatewayCallContext): Model<
 /**
  * Registers `modelId` (the part after `ollama/` in an agent's `model`
  * config) with Flue's provider registry, alongside every other `ollama/*`
- * id ever registered this process. Idempotent: a repeat of an already-seen
- * id is a no-op — no re-registration, no re-import. A concurrent call for
- * the SAME id joins the in-flight registration rather than returning early
- * (see `inflight`'s doc); `registeredIds` itself is only ever updated AFTER
- * `setProvider()` succeeds, so a failed attempt (a bad install, a bundler
- * that can't resolve the deep `.lazy` subpath, a future validation error)
- * leaves the id unregistered and eligible for a real retry — not
- * permanently and misleadingly marked "done" while nothing is actually
- * registered.
+ * id ever registered this process. NOT idempotent w.r.t. `ctx` (see MAJOR-D
+ * below) — every call re-runs the union re-registration (dynamic imports
+ * are cheap after the first, and `setProvider()` is a cheap in-memory
+ * upsert), so this id's `Model.headers` always reflect the MOST RECENT
+ * `ctx` this function was called with, not just the first. A concurrent
+ * call for the SAME id joins the in-flight registration rather than running
+ * a second one in parallel (see `inflight`'s doc); `registeredIds` itself
+ * is only ever updated AFTER `setProvider()` succeeds, so a failed attempt
+ * (a bad install, a bundler that can't resolve the deep `.lazy` subpath, a
+ * future validation error) leaves the id unregistered and eligible for a
+ * real retry — not permanently and misleadingly marked "done" while
+ * nothing is actually registered.
  *
  * Must complete before the FIRST Flue dispatch that names this model
  * (agent_flue.ts's `run()` awaits this before `ensureRuntime()`/`start()`),
- * but is equally safe to call again later with a new id mid-process — that
- * later call's union re-registration is exactly how a second model gets
- * added without orphaning the first (see the `registeredIds` doc above).
+ * but is equally safe to call again later with a new id, or the SAME id
+ * again, mid-process — a new id's union re-registration is how a second
+ * model gets added without orphaning the first (see the `registeredIds` doc
+ * above); a repeat of the SAME id is how MAJOR-D below is fixed.
  *
- * `ctx`, when given, is stamped onto this id's `Model.headers` as
- * `x-correlation-id`/`x-spf-agent` — see the "Gateway headers" section
- * above for why this is static-per-id rather than resolved per call, and
- * `registrationContext`'s doc for what a repeat/union re-registration does
- * with it. Ignored (as if omitted) for an already-registered id, exactly
- * like every other per-id registration detail this function documents as
- * fixed at first registration.
+ * MAJOR-D (fixed): `ctx`, when given AND `isFluePropagationInstalled()` is
+ * false (see the "Gateway headers" section above — when it's true, these
+ * two headers come from the per-request `GatewayHeadersPropagator`
+ * instead), is stamped onto this id's `Model.headers` as
+ * `x-correlation-id`/`x-spf-agent`. A PRIOR version of this function
+ * returned immediately for an already-registered id (a false comment
+ * claimed "one spf process runs one adw_id for its whole lifetime" to
+ * justify this) — which meant every later agent/adw_id sharing a model id
+ * within one process (spf `loop`/`fanout`/`watch`, which run many adw_ids
+ * in ONE process, `fanout` concurrently) silently kept the FIRST
+ * registration's headers forever. Re-running the full registration on every
+ * call, unconditionally, fixes that for every case except one, which
+ * remains and is not silently swallowed: two flue agents dispatching
+ * CONCURRENTLY (not sequentially) to the SAME `ollama/<id>` model id race on
+ * `registrationContext`/`setProvider()` — whichever registration's
+ * `setProvider()` call lands last wins the headers BOTH calls' subsequent
+ * dispatches see, until the next registration for that id. This is a
+ * `fanout` concurrency > 1 scenario specifically (two DIFFERENT agents,
+ * same process, same model id, truly overlapping registrations) — a
+ * sequential loop/watch never hits it, since each call's `await` completes
+ * before the next one starts.
  */
 export async function registerOllamaModel(modelId: string, ctx?: GatewayCallContext): Promise<void> {
-  if (registeredIds.has(modelId)) return;
   const existing = inflight.get(modelId);
   if (existing) return existing;
 
@@ -351,11 +356,31 @@ export async function registerOllamaModel(modelId: string, ctx?: GatewayCallCont
           // `OLLAMA_API_KEY` when the operator set one (e.g. the Briefs
           // gateway's per-client bearer), falling back to the DUMMY_API_KEY
           // a bare keyless local server needs (see its own doc for why that
-          // can't just be "no key needed" instead). `headers.traceparent` is
-          // this call's fresh W3C trace context; `x-correlation-id`/
-          // `x-spf-agent` are NOT set here — see `Model.headers` above for
-          // why those two are static-per-model instead.
-          resolve: async () => ({ auth: { apiKey: ollamaApiKey(), headers: { traceparent: freshTraceparent() } } }),
+          // can't just be "no key needed" instead).
+          //
+          // `headers.traceparent` is minted here ONLY when
+          // `isFluePropagationInstalled()` is false — checked fresh on every
+          // call, since propagation can be installed partway through this
+          // process's lifetime (the first ollama dispatch in a run with
+          // otel configured registers the model BEFORE
+          // `installFluePropagation()` runs — see `agent_flue.ts`'s `run()`
+          // — so a later dispatch on the SAME already-registered model must
+          // still re-check, not trust a value baked in at registration
+          // time). When installed, `@opentelemetry/instrumentation-undici`
+          // already injects a real, fresh `traceparent` for this exact
+          // outbound request (see `otel_propagation.ts`); minting a second
+          // one here would put TWO `traceparent` headers on the wire
+          // (`UndiciInstrumentation` appends, it does not replace) — this
+          // was BLOCKER A. `x-correlation-id`/`x-spf-agent` are NEVER set
+          // here either way — see `Model.headers` above (not installed) and
+          // `GatewayHeadersPropagator` (installed) for where those two
+          // actually come from.
+          resolve: async () => ({
+            auth: {
+              apiKey: ollamaApiKey(),
+              ...(isFluePropagationInstalled() ? {} : { headers: { traceparent: freshTraceparent() } }),
+            },
+          }),
         },
       },
       models,

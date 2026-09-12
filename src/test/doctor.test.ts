@@ -510,3 +510,119 @@ test("doctor: observability.db kind:d1 reachability probe warns with the real er
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── MINOR-F: OLLAMA_BASE_URL reachability probe sends OLLAMA_API_KEY as a bearer, and flags a 401/403 by name ──
+
+/** A `builder`-only ollama config: `builder` is the one packaged-roster agent that inherits `defaults.*` rather than pinning its own model (see interview.ts's own comment on planner/reviewer/documenter) — so this is the minimal config that flips `usesOllamaFlue` true. */
+const OLLAMA_FLUE_CONFIG = "defaults:\n  coding_agent: flue\n  model: ollama/llama3\n";
+
+/** Same swap-global-fetch technique as `withMockedFetch`, but captures the request `init` so a test can assert on the headers doctor's probe actually sent — `withMockedFetch` itself discards them since the D1 probe tests never needed to inspect a request. */
+async function withMockedFetchCapturingHeaders<T>(
+  respond: () => { status: number; body: unknown },
+  fn: (calls: Array<{ url: string; headers: Record<string, string> }>) => Promise<T>,
+): Promise<T> {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    calls.push({ url: String(input), headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
+    const { status, body } = respond();
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  try {
+    return await fn(calls);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+test("doctor: OLLAMA_BASE_URL reachability probe sends no Authorization header when OLLAMA_API_KEY is unset — a bare local Ollama server needs none", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, OLLAMA_FLUE_CONFIG);
+    await withEnv({ OLLAMA_API_KEY: undefined }, () =>
+      withMockedFetchCapturingHeaders(
+        () => ({ status: 200, body: { data: [] } }),
+        async (calls) => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "OLLAMA_BASE_URL reachability");
+          assert.ok(reachCheck, "expected an OLLAMA_BASE_URL reachability check for a flue+ollama config");
+          assert.equal(reachCheck!.severity, "info");
+          assert.match(reachCheck!.detail, /^reachable: GET/);
+          assert.equal(calls.length, 1);
+          assert.equal("authorization" in calls[0]!.headers, false);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: OLLAMA_BASE_URL reachability probe sends OLLAMA_API_KEY as a bearer when set — mirrors the Cloudflare Workers AI probe", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, OLLAMA_FLUE_CONFIG);
+    await withEnv({ OLLAMA_API_KEY: "briefs-gateway-client-key-123" }, () =>
+      withMockedFetchCapturingHeaders(
+        () => ({ status: 200, body: { data: [] } }),
+        async (calls) => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "OLLAMA_BASE_URL reachability");
+          assert.ok(reachCheck);
+          assert.equal(reachCheck!.severity, "info");
+          assert.match(reachCheck!.detail, /^reachable: GET/);
+          assert.equal(calls.length, 1);
+          assert.equal(calls[0]!.headers["authorization"], "Bearer briefs-gateway-client-key-123");
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: OLLAMA_BASE_URL reachability probe reports a 401/403 as a WARN naming OLLAMA_API_KEY, never flipping report.ok", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, OLLAMA_FLUE_CONFIG);
+    await withEnv({ OLLAMA_API_KEY: "wrong-key" }, () =>
+      withMockedFetch(
+        () => ({ status: 401, body: {} }),
+        async () => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "OLLAMA_BASE_URL reachability");
+          assert.ok(reachCheck);
+          assert.equal(reachCheck!.ok, true, "a gateway 401 is informational, never a hard doctor failure");
+          assert.equal(reachCheck!.severity, "warn");
+          assert.match(reachCheck!.detail, /HTTP 401/);
+          assert.match(reachCheck!.detail, /OLLAMA_API_KEY/);
+          assert.match(reachCheck!.detail, /one is set, but was rejected/);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor: OLLAMA_BASE_URL reachability probe on a 403 with NO key set names OLLAMA_API_KEY as currently unset", async () => {
+  const dir = tmpRepo();
+  try {
+    writeSpfConfig(dir, OLLAMA_FLUE_CONFIG);
+    await withEnv({ OLLAMA_API_KEY: undefined }, () =>
+      withMockedFetch(
+        () => ({ status: 403, body: {} }),
+        async () => {
+          const report = await runDoctorProbing(dir);
+          const reachCheck = report.checks.find((c) => c.name === "OLLAMA_BASE_URL reachability");
+          assert.ok(reachCheck);
+          assert.equal(reachCheck!.severity, "warn");
+          assert.match(reachCheck!.detail, /HTTP 403/);
+          assert.match(reachCheck!.detail, /none is currently set/);
+        },
+      ),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

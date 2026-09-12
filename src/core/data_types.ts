@@ -1604,15 +1604,25 @@ export interface AgentRequest {
   /**
    * Outbound OTel trace-context propagation — set by `agents.ts`'s `send()`
    * from `otel.ts`'s `OtelExporter.agentCallTraceContext()` ONLY when
-   * `observability.otel` is configured for this run; absent otherwise, and
-   * every backend that ignores it (`opencode` today) is byte-identical to
-   * before this field existed. `traceparent`/`x_request_id` are this call's
-   * own span context (`agent_cc.ts`'s single `spawn()` choke point turns
-   * them into `TRACEPARENT`/`ANTHROPIC_CUSTOM_HEADERS`); `endpoint`/
-   * `headers`/`service_name` are the SAME `observability.otel` block,
-   * carried through so `agent_flue.ts` can install its own (separate,
-   * process-scoped — see `otel_propagation.ts`) global http/undici
-   * propagation without needing the full `SFConfig`.
+   * `observability.otel` is configured for this run; absent otherwise.
+   * `traceparent` is this call's own span context — `agent_cc.ts`'s single
+   * `spawn()` choke point turns it (alongside `adw_id`/`agent_name` above,
+   * which are NOT gated on this field) into `TRACEPARENT`/
+   * `ANTHROPIC_CUSTOM_HEADERS`; `agent_opencode.ts` does the analogous thing
+   * into its temp `opencode.json`. `endpoint`/`headers`/`service_name` are
+   * the SAME `observability.otel` block, carried through so `agent_flue.ts`
+   * can install its own (separate, process-scoped — see
+   * `otel_propagation.ts`) global http/undici propagation without needing
+   * the full `SFConfig`.
+   *
+   * `x_request_id` (this call's own span id) is no longer turned into any
+   * outbound header by anything in this repo — `agent_cc.ts`/
+   * `agent_opencode.ts` used to send it as `x-request-id` and no longer do
+   * (BLOCKER B: Envoy/Switchyard own that header end-to-end; a client-sent
+   * value broke their own trace sampling). Kept as a field (rather than
+   * removed) since it is still a well-defined, harmless-to-carry value — a
+   * future consumer that needs "this call's own span id" for something
+   * other than a header has it available — but nothing reads it today.
    */
   otel?: {
     traceparent: string;

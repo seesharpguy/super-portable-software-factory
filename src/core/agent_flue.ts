@@ -472,18 +472,6 @@ export async function run(
   // imports this module for `resolveModel()` alone (doctor.ts, interview.ts)
   // without ever dispatching an ollama call.
   const [provider, modelId] = resolveModel(request.model);
-  // `adw_id`/`agent_name` (when the caller supplied them — see
-  // `data_types.ts`'s `AgentRequest` doc) become this model id's static
-  // `x-correlation-id`/`x-spf-agent` gateway headers on FIRST registration
-  // only — see `ollama_provider.ts`'s "Gateway headers" section for why a
-  // per-call value isn't safe here.
-  if (provider === "ollama") await registerOllamaModel(modelId, { adwId: request.adw_id, agentName: request.agent_name });
-  // Cloudflare Workers AI is the same self-registration shape as Ollama
-  // (no pi-ai/Flue built-in "cloudflare" provider on Node) — see
-  // cloudflare_provider.ts's header comment for the Workers AI OpenAI-
-  // compatible endpoint, the slashed `@cf/...` model-id handling, and the
-  // real-Bearer-token (not dummy-key) auth.
-  if (provider === "cloudflare") await registerCloudflareModel(modelId);
 
   // Outbound OTel propagation (SPF's otel-sdk extension) — see
   // `otel_propagation.ts`'s own header for what this does and does not
@@ -491,8 +479,35 @@ export async function run(
   // configured for this run (see `agents.ts`'s `send()`); the installer is
   // itself a no-op on `undefined` AND idempotent across every later call in
   // this same process, so this costs nothing for a repo that hasn't
-  // configured otel and installs at most once for one that has.
+  // configured otel and installs at most once for one that has. Called
+  // BEFORE `registerOllamaModel` below (not after, as an earlier version had
+  // it): `ollama_provider.ts`'s `modelFor()`/`resolve()` both consult
+  // `isFluePropagationInstalled()` to decide whether THEY need to supply
+  // `traceparent`/`x-correlation-id`/`x-spf-agent` themselves — if
+  // installation happened AFTER the first registration in a run that has
+  // otel configured, that first model would be built (and cached in
+  // `Model.headers`) believing propagation wasn't installed yet, then keep
+  // stale static headers alongside the instrumentation's own per-request
+  // ones for the rest of the process (a duplicate-header bug, same shape as
+  // BLOCKER A). Installing first means every registration in this run sees
+  // the SAME, final installed-state.
   installFluePropagation(request.otel);
+
+  // `adw_id`/`agent_name` (when the caller supplied them — see
+  // `data_types.ts`'s `AgentRequest` doc) become this model id's static
+  // `x-correlation-id`/`x-spf-agent` gateway headers, re-stamped on every
+  // call — see `ollama_provider.ts`'s "Gateway headers" section and
+  // `registerOllamaModel`'s own doc (MAJOR-D) for why this must run every
+  // time, not just on first registration, and why it's a no-op for these
+  // two headers specifically once otel propagation is installed (see
+  // `registerFlueSessionTrace` below instead, in that case).
+  if (provider === "ollama") await registerOllamaModel(modelId, { adwId: request.adw_id, agentName: request.agent_name });
+  // Cloudflare Workers AI is the same self-registration shape as Ollama
+  // (no pi-ai/Flue built-in "cloudflare" provider on Node) — see
+  // cloudflare_provider.ts's header comment for the Workers AI OpenAI-
+  // compatible endpoint, the slashed `@cf/...` model-id handling, and the
+  // real-Bearer-token (not dummy-key) auth.
+  if (provider === "cloudflare") await registerCloudflareModel(modelId);
 
   await ensureRuntime(request.flue_db_path);
 
@@ -522,8 +537,17 @@ export async function run(
   // async context is captured by the first dispatch that started it, so a
   // dispatch-time context wrap would silently mis-attribute every later
   // agent's spans into the FIRST agent's trace. No-op when otel is
-  // unconfigured.
-  if (request.otel) registerFlueSessionTrace(request.session_id, request.otel.traceparent);
+  // unconfigured. The SAME registration also carries `adw_id`/`agent_name`
+  // (MAJOR-D) — `otel_propagation.ts`'s `GatewayHeadersPropagator` reads
+  // them back per real outbound call this session makes, exactly the way
+  // `resolveFlueRootContext` already reads `traceparent` back per span.
+  if (request.otel) {
+    registerFlueSessionTrace(request.session_id, {
+      traceparent: request.otel.traceparent,
+      adwId: request.adw_id,
+      agentName: request.agent_name,
+    });
+  }
   const receipt = await handle.dispatch(request.prompt);
   const slot: UsageSlot = { usage: new UsageBreakdown(), context_tokens: 0 };
   pendingUsage.set(receipt.submissionId, slot);

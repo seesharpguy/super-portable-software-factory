@@ -70,27 +70,33 @@
  * documented gap in both guarantees, not a bug this module can paper over
  * from the outside.
  *
- * OUTBOUND OTEL PROPAGATION [OFFICIAL config surface; best-effort
- * behavior]: when `request.otel` is present (`agents.ts`'s `send()` threads
- * it only when `observability.otel` is configured — absent otherwise, and
- * this whole path is byte-identical to before), this module propagates
- * trace context two ways:
+ * OUTBOUND OTEL + GATEWAY-HEADER PROPAGATION [OFFICIAL config surface;
+ * best-effort behavior]: `request.otel` is present only when
+ * `observability.otel` is configured (`agents.ts`'s `send()`); `request.
+ * adw_id`/`request.agent_name` are present on EVERY call regardless (the
+ * gateway needs `x-correlation-id`/`x-spf-agent` whether or not SPF's own
+ * otel export is on — see `data_types.ts`'s `AgentRequest.adw_id` doc). This
+ * module propagates whatever subset of the two is present, two ways:
  *
  *   1. `TRACEPARENT` on the child's env — the standard W3C env var, same
- *      shape `agent_cc.ts` sets. No published statement confirms the
- *      opencode CLI itself reads it (UNVERIFIED either way; set for parity
- *      and for any opencode-spawned subprocess telemetry, at zero cost).
- *   2. `traceparent` + `x-request-id` as STATIC provider headers in the
- *      temp `opencode.json` (`provider.<id>.options.headers` — opencode's
- *      documented per-provider options surface;
+ *      shape `agent_cc.ts` sets, ONLY when `otel` is present. No published
+ *      statement confirms the opencode CLI itself reads it (UNVERIFIED
+ *      either way; set for parity and for any opencode-spawned subprocess
+ *      telemetry, at zero cost).
+ *   2. `traceparent` (when `otel` present) and `x-correlation-id`/
+ *      `x-spf-agent` (when `adw_id`/`agent_name` present) as STATIC provider
+ *      headers in the temp `opencode.json` (`provider.<id>.options.headers`
+ *      — opencode's documented per-provider options surface;
  *      https://opencode.ai/docs/providers/). Static values are CORRECT
  *      here, unlike the general case, because one `opencode run` subprocess
- *      IS exactly one SPF agent call — the traceparent can never go stale
- *      mid-run. This is the header that actually reaches the wire:
- *      opencode's provider requests flow through the AI SDK, which honors
- *      `options.headers` for that provider's requests. Subject to the
- *      CONFIG PRECEDENCE limitation above: a repo's own `opencode.json` can
- *      override these headers.
+ *      IS exactly one SPF agent call — none of these three headers can go
+ *      stale mid-run. This is the header set that actually reaches the
+ *      wire: opencode's provider requests flow through the AI SDK, which
+ *      honors `options.headers` for that provider's requests. Subject to
+ *      the CONFIG PRECEDENCE limitation above: a repo's own `opencode.json`
+ *      can override these headers. `x-request-id` is NEVER one of them —
+ *      Envoy/Switchyard own that header end-to-end; this module used to
+ *      send it here (BLOCKER B) and no longer does.
  *
  * `injectOtelEnv()` / `otelProviderHeaders()` / `tempConfigContents()` are
  * exported pure functions so every fragment is unit-testable without
@@ -438,24 +444,44 @@ export function injectOtelEnv(
 
 export interface OpencodeOtelHeaders {
   provider: string;
-  headers: { traceparent: string; "x-request-id": string };
+  /** Never carries `x-request-id` — see the module doc comment's OUTBOUND OTEL + GATEWAY-HEADER PROPAGATION section. */
+  headers: Record<string, string>;
+}
+
+/** This call's own SPF identity, when the caller has it — see `data_types.ts`'s `AgentRequest.adw_id`/`agent_name` doc. Both optional; an absent one simply omits its header. */
+export interface GatewayCallIdentity {
+  adwId?: string;
+  agentName?: string;
 }
 
 /**
  * Builds the `provider.<id>.options.headers` fragment for a temp
- * `opencode.json` (see the module doc comment's OUTBOUND OTEL PROPAGATION
- * section for why static values are correct here). Returns `null` when
- * `otel` is absent, or when the model id carries no `provider/` prefix —
+ * `opencode.json` (see the module doc comment's OUTBOUND OTEL + GATEWAY-
+ * HEADER PROPAGATION section for why static values are correct here).
+ * Returns `null` when NEITHER `otel` nor `gateway` has anything to
+ * contribute, or when the model id carries no `provider/` prefix —
  * opencode's own `--model` vocabulary is documented as `provider/model-id`,
  * but a bare model name has no provider id this module could key headers
  * under, and guessing the wrong provider id would write a config block
  * opencode merges onto a DIFFERENT provider than the one being called.
+ * `x-correlation-id`/`x-spf-agent` are added whenever `gateway` supplies
+ * them, regardless of whether `otel` is configured — see
+ * `data_types.ts`'s `AgentRequest.adw_id` doc for why that pair isn't
+ * gated on `observability.otel` the way `traceparent` is.
  */
-export function otelProviderHeaders(model: string, otel: AgentRequest["otel"] | undefined): OpencodeOtelHeaders | null {
-  if (!otel) return null;
+export function otelProviderHeaders(
+  model: string,
+  otel: AgentRequest["otel"] | undefined,
+  gateway: GatewayCallIdentity = {},
+): OpencodeOtelHeaders | null {
   const slash = model.indexOf("/");
   if (slash <= 0) return null;
-  return { provider: model.slice(0, slash), headers: { traceparent: otel.traceparent, "x-request-id": otel.x_request_id } };
+  const headers: Record<string, string> = {};
+  if (otel) headers.traceparent = otel.traceparent;
+  if (gateway.adwId) headers["x-correlation-id"] = gateway.adwId;
+  if (gateway.agentName) headers["x-spf-agent"] = gateway.agentName;
+  if (Object.keys(headers).length === 0) return null;
+  return { provider: model.slice(0, slash), headers };
 }
 
 /**
@@ -650,12 +676,12 @@ export async function run(
   const fullArgs = [...cmdArgs, ...args];
 
   const baseEnv = request.env ?? operatorEnv();
-  // `request.tools` null/undefined AND no otel config -> every tool, no
-  // config file written at all (see tempConfigContents' own doc comment).
-  // Otherwise -> a real temp opencode.json (tool restriction, OTel provider
-  // headers, or both), pointed at via OPENCODE_CONFIG on the CHILD's env
-  // only — never mutates process.env.
-  const otelHeaders = otelProviderHeaders(request.model, request.otel);
+  // `request.tools` null/undefined AND no otel config AND no adw_id/agent_name
+  // -> every tool, no config file written at all (see tempConfigContents'
+  // own doc comment). Otherwise -> a real temp opencode.json (tool
+  // restriction, gateway provider headers, or both), pointed at via
+  // OPENCODE_CONFIG on the CHILD's env only — never mutates process.env.
+  const otelHeaders = otelProviderHeaders(request.model, request.otel, { adwId: request.adw_id, agentName: request.agent_name });
   let configContents = tempConfigContents(request.tools, otelHeaders);
   // A caller-provided OPENCODE_CONFIG (operatorEnv() passthrough or an
   // agent's env_allowlist) is MERGED into the temp file, never replaced —

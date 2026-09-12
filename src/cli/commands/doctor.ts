@@ -571,13 +571,28 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     // latency either way — strictly cheaper for a pure reachability check,
     // and there's no live-server dependency in this choice: doctor's probe
     // itself tolerates either endpoint being down (see `probeGet`).
-    const result = await withProbeStatus("OLLAMA_BASE_URL reachability", () => probeGet(`${ollamaBase}/models`));
+    //
+    // MINOR-F: send `OLLAMA_API_KEY` as a bearer when set — same shape as
+    // the Cloudflare Workers AI probe below. A bare local Ollama server
+    // (the common case) checks nothing and answers identically either way;
+    // a gateway in front of it (e.g. Briefs' Envoy AI Gateway) 401/403s an
+    // unauthenticated or wrong-key probe, which is exactly the
+    // misconfiguration doctor exists to surface, not silently mask as a
+    // generic "reachable: HTTP 401".
+    const ollamaApiKeyEnv = process.env["OLLAMA_API_KEY"];
+    const ollamaHeaders: Record<string, string> = ollamaApiKeyEnv ? { authorization: `Bearer ${ollamaApiKeyEnv}` } : {};
+    const result = await withProbeStatus("OLLAMA_BASE_URL reachability", () => probeGet(`${ollamaBase}/models`, ollamaHeaders));
+    const isAuthFailure = result.ok && (result.status === 401 || result.status === 403);
     check(
       report,
       "OLLAMA_BASE_URL reachability",
       true, // informational/warning only — see the ANTHROPIC_BASE_URL check above for why
-      result.ok ? `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}` : `unreachable: GET ${ollamaBase}/models -> ${result.error}`,
-      result.ok ? "info" : "warn",
+      !result.ok
+        ? `unreachable: GET ${ollamaBase}/models -> ${result.error}`
+        : isAuthFailure
+          ? `HTTP ${result.status} from GET ${ollamaBase}/models — a gateway in front of Ollama is rejecting this request; set OLLAMA_API_KEY to the client key it expects${ollamaApiKeyEnv ? " (one is set, but was rejected — check its value)" : " (none is currently set)"}`
+          : `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}`,
+      !result.ok || isAuthFailure ? "warn" : "info",
     );
   }
 
