@@ -866,6 +866,43 @@ export const ConfigDefaultsSchema = v.object({
    */
   max_run_cost: v.optional(v.pipe(v.number(), v.gtValue(0))),
   max_run_tokens: v.optional(v.pipe(v.number(), v.integer(), v.gtValue(0))),
+  /**
+   * REQUEST TIMEOUT — how long a single agent dispatch may run before it is
+   * aborted and settled as failed, rather than hanging on a connection that
+   * silently died mid-call with nothing to notice.
+   *
+   * FLUE-SPECIFIC, unlike every other key in this schema: it maps straight
+   * onto `AgentStatics.durability.timeoutMs` (see `@flue/runtime`'s own
+   * docs), a `flue`-backend-only mechanism. `claude_code`/`opencode` are
+   * subprocess backends with no such knob today — this field is silently
+   * ignored for them, the same way `flue_db_path` on `AgentRequest` already
+   * is. Not a bug to fix here: a subprocess backend needs its own separate
+   * process-level timeout story, which is out of scope for this key.
+   *
+   * ABSENT BY DEFAULT, and absence is a total no-op: Flue's own default
+   * applies unchanged (1 hour, 10 attempts) — the same "surprise mid-run
+   * failure on a ceiling nobody chose is worse than the spend" reasoning as
+   * `max_run_cost`/`max_run_tokens` above. Set this when a hung connection
+   * should surface as an attributable failure (and feed the normal
+   * gate-correction / `spf watch` retry loop) in minutes, not however long
+   * Flue's own default takes — e.g. `300_000` for a five-minute ceiling.
+   * NOT a precise deadline, though: manual verification against a socket
+   * that accepts a connection and then sends nothing (see
+   * `request_timeout.test.ts`'s header comment) saw Flue's own timeout check
+   * fire on a coarser periodic sweep — a 3s ceiling settled at ~15s, not 3s.
+   * Bounded-but-imprecise is still a firm improvement over unbounded.
+   *
+   * SCOPE IS ONE SUBMISSION (one agent dispatch — the first prompt, one
+   * JSON-repair retry, one gate correction), NOT the accumulated run, unlike
+   * `max_run_cost`/`max_run_tokens` above. It is still process-scoped, not
+   * per-agent: Flue's `durability` is a static on the single shared agent
+   * function `agent_flue.ts` dispatches everything through, set once before
+   * the first dispatch of the process — see that file's `ensureRuntime()`.
+   * Deliberately NOT in `loadConfig`'s per-agent back-fill list for the same
+   * reason `max_run_cost`/`max_run_tokens` aren't: a per-agent copy would
+   * read as "this agent gets its own timeout", which nothing enforces.
+   */
+  request_timeout_ms: v.optional(v.pipe(v.number(), v.integer(), v.gtValue(0))),
 });
 export type ConfigDefaults = v.InferOutput<typeof ConfigDefaultsSchema>;
 
@@ -1653,6 +1690,10 @@ export interface AgentRequest {
   output_type_name: string;
   cwd: string; // set from run.repo_root — the codebase root agents work in
   flue_db_path: string; // Flue-specific: its own conversation store, consulted only by agent_flue.ts
+  // Flue-specific, like flue_db_path above: maps onto AgentStatics.durability.timeoutMs
+  // (see ConfigDefaultsSchema's request_timeout_ms doc for the full rationale).
+  // undefined (the common case) => Flue's own default applies unchanged.
+  request_timeout_ms?: number;
   // Set only when the agent config carries an env_allowlist — the filtered
   // env to hand the backend's subprocess/sandbox. undefined (the common
   // case) means "pass the operator's own environment through unfiltered",

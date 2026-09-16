@@ -82,6 +82,7 @@ agents:
 | `data_dir` | path | Runtime home, repo-relative. Default `.spf/data`. |
 | `max_run_cost` | number > 0 (USD) | Stops the NEXT agent call once a run has already spent this much — checked before each call, never after. A single call is never capped (a run can overshoot by one whole call), and a chain with only one agent dispatch (`scout`, `prompt`, `build`) can never trip it at all. Absent (default) = unbounded. Throws `BudgetExceeded`, which fails the phase closed. |
 | `max_run_tokens` | integer > 0 | Same semantics as `max_run_cost`, on `sessions.total_tokens` instead of cost. Absent (default) = unbounded. |
+| `request_timeout_ms` | integer > 0 | `flue`-backend-only (maps onto `AgentStatics.durability.timeoutMs`; silently ignored for `claude_code`/`opencode`, which have no such knob). Bounds ONE agent dispatch, not the accumulated run. Absent (default) = Flue's own default applies unchanged (1 hour, 10 attempts) — a connection that dies silently mid-call hangs that long before anything notices. Not a precise deadline: Flue's own timeout check runs on a coarser periodic sweep in practice. Not back-filled onto agents — process-scoped, like `max_run_cost`/`max_run_tokens` above. |
 
 ### `spf fanout`
 

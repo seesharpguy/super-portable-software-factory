@@ -1035,6 +1035,7 @@ export async function execute(run: RunForAgents, phase: Phase, call: AgentCall):
       output_type_name: call.output_type.name,
       cwd: spec ? spec.workspace_dir : run.repo_root,
       flue_db_path: path.join(run.data_dir, "flue.db"),
+      request_timeout_ms: run.cfg.defaults.request_timeout_ms,
       env: agentEnv(agent),
       sandbox: spec,
       adw_id: run.adw_id,
