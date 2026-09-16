@@ -46,7 +46,7 @@ const HELP = `spf — repeatable agents-plus-code workflows (ADWs)
   spf migrate [--apply] [--force]           move an old stamped adws/ tree onto .spf/ (dry run by default)
   spf eject [--target <dir>] [--force]      copy the installed engine out for reference/hand-editing
   spf doctor [--json]                       check everything that fails silently otherwise
-  spf ui [--port N] [--no-open] [--db path] open the trace visualizer
+  spf ui [--port N] [--host addr] [--no-open] [--db path]  open the trace visualizer (loopback-only by default; --host widens it, deliberately)
   spf watch init                            idempotently seed the <prefix>:* labels watch.repo needs
   spf watch [--dry-run] [--once]            poll watch.repo for labeled issues, run watch.chain on each
   spf sessions [--limit N] [--json]         recent runs

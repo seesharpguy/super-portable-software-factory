@@ -6,7 +6,7 @@ import { parseCli } from "../../core/utils.ts";
 import { runUi } from "../../ui/server/serve.ts";
 
 export async function uiCommand(argv: string[]): Promise<number> {
-  const { options, flags } = parseCli(argv, ["cwd", "config", "db", "port"], ["no-open"]);
+  const { options, flags } = parseCli(argv, ["cwd", "config", "db", "port", "host"], ["no-open"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
 
   let db: NormalizedObservabilityDb;
@@ -32,6 +32,7 @@ export async function uiCommand(argv: string[]): Promise<number> {
       sessionsDir,
       webDir: paths.WEB_DIR,
       port: options["port"] ? Number.parseInt(options["port"], 10) : undefined,
+      host: options["host"],
       open: !flags["no-open"],
     });
     console.log(`[spf] ui        ${handle.url}`);
