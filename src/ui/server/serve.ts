@@ -2,9 +2,11 @@
  * `spf ui` bootstrap: bind the app to a real port, print the URL, optionally
  * open a browser, and shut down cleanly on SIGINT/SIGTERM.
  *
- * Binds loopback-only (127.0.0.1) deliberately — this server can flip a
- * database column and reveal agent prompts, and a companion CLI has no
- * reason to listen on every interface.
+ * Binds loopback-only (127.0.0.1) by DEFAULT, deliberately — this server can
+ * flip a database column and reveal agent prompts, and a companion CLI has
+ * no reason to listen on every interface unless someone explicitly asks for
+ * it via `options.host` (`--host` on the CLI). Widening the bind is an
+ * opt-in the caller states on purpose, not a default — see issue #90.
  */
 import { spawn } from "node:child_process";
 import type { AddressInfo } from "node:net";
@@ -21,6 +23,13 @@ export interface UiOptions {
   webDir: string;
   /** Explicit port. Omit to try the default and probe upward on collision. */
   port?: number;
+  /**
+   * Bind address. Omit for the safe default (`127.0.0.1`, loopback-only).
+   * Set explicitly (e.g. `"0.0.0.0"`, or a specific interface IP) to make
+   * this reachable off-box — a deliberate widening, not something a caller
+   * should ever get by accident. See the module doc comment above.
+   */
+  host?: string;
   open?: boolean;
 }
 
@@ -37,9 +46,9 @@ function isAddrInUse(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: string }).code === "EADDRINUSE";
 }
 
-function listen(app: ReturnType<typeof createApp>, port: number): Promise<ServerType> {
+function listen(app: ReturnType<typeof createApp>, port: number, hostname: string): Promise<ServerType> {
   return new Promise((resolvePromise, reject) => {
-    const server = serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => resolvePromise(server));
+    const server = serve({ fetch: app.fetch, port, hostname }, () => resolvePromise(server));
     server.on("error", reject);
   });
 }
@@ -61,6 +70,7 @@ export async function runUi(options: UiOptions): Promise<UiHandle> {
   const db = await SfDb.open(options.db, options.sessionsDir);
   const app = createApp(db, options.webDir);
 
+  const host = options.host ?? "127.0.0.1";
   const explicit = options.port !== undefined;
   const startPort = options.port ?? DEFAULT_PORT;
   let server: ServerType | undefined;
@@ -70,7 +80,7 @@ export async function runUi(options: UiOptions): Promise<UiHandle> {
   for (let i = 0; i < attempts; i++) {
     port = startPort + i;
     try {
-      server = await listen(app, port);
+      server = await listen(app, port, host);
       break;
     } catch (error) {
       if (!isAddrInUse(error)) throw error;
@@ -87,7 +97,7 @@ export async function runUi(options: UiOptions): Promise<UiHandle> {
 
   const info = server!.address() as AddressInfo | null;
   const boundPort = info?.port ?? port;
-  const url = `http://127.0.0.1:${boundPort}`;
+  const url = `http://${host}:${boundPort}`;
 
   const shouldOpen = options.open !== false && process.stdout.isTTY && !process.env.CI && !process.env.SSH_CONNECTION;
   if (shouldOpen) openUrl(url);

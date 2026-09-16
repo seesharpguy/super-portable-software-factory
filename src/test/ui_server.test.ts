@@ -17,6 +17,8 @@ import { runUi, type UiHandle } from "../ui/server/serve.js";
 
 let dir: string;
 let handle: UiHandle;
+let dbPath: string;
+let webDir: string;
 const ADW_ID = "t1";
 
 before(async () => {
@@ -31,7 +33,7 @@ before(async () => {
     { cwd: dir },
   );
 
-  const dbPath = join(dir, "spf.db");
+  dbPath = join(dir, "spf.db");
   const tracer = await Tracer.open(dbPath, join(dir, "sessions", ADW_ID, "events.jsonl"));
   await tracer.sessionStart(ADW_ID, "tester", "quality");
   const phase = {
@@ -51,7 +53,7 @@ before(async () => {
   await tracer.close();
 
   // dist/test/ui_server.test.js -> dist -> package root -> web
-  const webDir = join(import.meta.dirname, "..", "..", "web");
+  webDir = join(import.meta.dirname, "..", "..", "web");
   handle = await runUi({ db: { kind: "sqlite", path: dbPath }, webDir, port: 0, open: false });
 });
 
@@ -66,6 +68,32 @@ async function get(path: string, init?: RequestInit): Promise<{ status: number; 
   const body: any = contentType.includes("json") ? await res.json() : await res.text();
   return { status: res.status, body, contentType };
 }
+
+test("host defaults to loopback; an explicit host is honored in both the bind and the printed url", async () => {
+  // Default: no host passed at all (distinct from the `before()` handle,
+  // which is also loopback-default — this proves the omission path, not
+  // just that 127.0.0.1 happens to work).
+  const defaultHandle = await runUi({ db: { kind: "sqlite", path: dbPath }, webDir, port: 0, open: false });
+  try {
+    assert.match(defaultHandle.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+  } finally {
+    await defaultHandle.close();
+  }
+
+  // Explicit host, distinct from the hardcoded default's literal string
+  // ("localhost", not "127.0.0.1") — proves `host` is actually threaded
+  // into the listen() call and the printed url, not silently ignored.
+  // NOT 127.0.0.2: that's only auto-aliased to loopback on some OSes
+  // (EADDRNOTAVAIL elsewhere) — "localhost" resolves to loopback everywhere.
+  const customHandle = await runUi({ db: { kind: "sqlite", path: dbPath }, webDir, port: 0, host: "localhost", open: false });
+  try {
+    assert.equal(customHandle.url, `http://localhost:${customHandle.port}`);
+    const res = await fetch(customHandle.url + "/api/health");
+    assert.equal(res.status, 200);
+  } finally {
+    await customHandle.close();
+  }
+});
 
 test("GET /api/health reports the real db path and session count", async () => {
   const { status, body } = await get("/api/health");
