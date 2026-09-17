@@ -392,8 +392,17 @@ interface UsageSlot {
 const pendingUsage = new Map<string, UsageSlot>();
 let runtimePromise: Promise<Flue> | null = null;
 
-function ensureRuntime(flueDbPath: string): Promise<Flue> {
+/**
+ * `requestTimeoutMs` (from `defaults.request_timeout_ms`) only has an effect
+ * on the FIRST call — `SfAgent.durability` is a static Flue reads once, and
+ * `runtimePromise` below already memoizes `start()` to run once per process.
+ * A later call with a different value is silently ignored, same as `start()`
+ * itself already is; every dispatch in one `spf` process shares one config
+ * anyway, so this can't happen in practice outside a test harness.
+ */
+function ensureRuntime(flueDbPath: string, requestTimeoutMs?: number): Promise<Flue> {
   if (!runtimePromise) {
+    if (requestTimeoutMs !== undefined) SfAgent.durability = { timeoutMs: requestTimeoutMs };
     runtimePromise = start({ agents: [SfAgent], db: sqlite(flueDbPath) }).then((flue) => {
       observe((event) => {
         if (event.type !== "turn" || !event.submissionId) return;
@@ -509,7 +518,7 @@ export async function run(
   // real-Bearer-token (not dummy-key) auth.
   if (provider === "cloudflare") await registerCloudflareModel(modelId);
 
-  await ensureRuntime(request.flue_db_path);
+  await ensureRuntime(request.flue_db_path, request.request_timeout_ms);
 
   REGISTRY.set(request.session_id, {
     model: request.model,
