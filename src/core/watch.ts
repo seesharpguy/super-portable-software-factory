@@ -199,6 +199,13 @@ export interface WatchDeps {
   baseBranch: string;
   concurrency: number;
   /**
+   * `watch.allowed_authors` (`WatchConfigSchema`) — see that field's own doc
+   * comment for the threat this closes. Empty (every existing config,
+   * unchanged) means unrestricted; `claimNewWork`/`claimSpecs` don't even
+   * look at `Issue.author` in that case. Checked by `authorBlocked`, below.
+   */
+  allowedAuthors: string[];
+  /**
    * `watch.chain_options` (see `WatchConfigSchema`'s doc comment) — passed
    * unchanged into both `runChain`'s and `runRefine`'s opts below, exactly
    * like `spf <chain> --suite <name>` builds an options map for an
@@ -1589,6 +1596,59 @@ export function orderEligible(issues: Issue[], inflightParents: Map<string, stri
 }
 
 /**
+ * Whether `watch.allowed_authors` refuses this issue outright — checked
+ * before frontier/lock/claim in both `claimNewWork` and `claimSpecs`, since
+ * there's no point spending a `getIssue` blocker check or a worktree on
+ * content the daemon is about to refuse anyway. Empty `allowedAuthors` (the
+ * default) never blocks anything; a missing `issue.author` is treated as
+ * UNKNOWN, not trusted, once the list is non-empty — see `Issue.author`'s
+ * own doc comment (`issues/provider.ts`) for why it's optional at all.
+ */
+function authorBlocked(deps: WatchDeps, issue: Issue): boolean {
+  if (deps.allowedAuthors.length === 0) return false;
+  return issue.author === undefined || !deps.allowedAuthors.includes(issue.author);
+}
+
+/**
+ * The action `authorBlocked` triggers: transition straight to `blocked` with
+ * a comment naming the actual reason, instead of ever starting a chain.
+ * Deliberately NOT a silent skip like `frontierBlockedOn`'s — a blocker
+ * resolves itself once the dependency finishes, but an author outside the
+ * allowlist never will on its own, and leaving it sitting at `ready` forever
+ * (re-evaluated and re-skipped every tick, no visible signal) is worse than
+ * a loud, one-time `blocked` a human has to consciously reverse.
+ *
+ * `dryRun` still logs what WOULD happen without mutating anything, same
+ * contract as every other branch in `claimNewWork`/`claimSpecs`.
+ */
+async function rejectDisallowedAuthor(deps: WatchDeps, issue: Issue, kind: "issue" | "spec"): Promise<void> {
+  const detail =
+    `spf watch: refusing to ${kind === "spec" ? "refine" : "build"} — this ${kind}'s author ` +
+    `("${issue.author ?? "unknown"}") is not in \`watch.allowed_authors\`. Whoever applied the ` +
+    `\`${deps.labelPrefix}:${kind === "spec" ? "spec-ready" : "ready"}\` label has permission to label; that is not ` +
+    `the same as this content being trusted input for a coding agent with real Bash/write access. ` +
+    `If this is intentional, add "${issue.author ?? "the real author"}" to \`watch.allowed_authors\` in ` +
+    `\`.spf/spf.config.yaml\` — relabeling alone will not change this outcome.`;
+  deps.log(`watch: ${issue.id} authored by "${issue.author ?? "unknown"}" — outside watch.allowed_authors, refusing`);
+  if (deps.dryRun) {
+    deps.log(`watch: [dry-run] would block ${issue.id} instead of claiming it — see previous line for why`);
+    return;
+  }
+  deps.notify({
+    kind: "issue_blocked",
+    level: "notice",
+    title: `${kind} ${issue.id} blocked`,
+    detail,
+    fields: [
+      ["issue", issue.id],
+      ["title", issue.title],
+      ["author", issue.author ?? "unknown"],
+    ],
+  });
+  await deps.provider.transition(issue, "blocked", detail);
+}
+
+/**
  * Whether every id in `blockedBy` currently carries `<prefix>:done` — the
  * frontier check `assets/prompts/refiner/system.md:62` has always promised
  * the refiner ("the factory works the frontier: any leaf whose blockers are
@@ -1619,9 +1679,11 @@ async function frontierBlockedOn(deps: WatchDeps, blockedBy: string[], cache: Ma
 
 /**
  * Claim as many `ready` issues as the concurrency budget allows, in priority
- * + sibling-affinity + created-asc order (`orderEligible`), skipping any
- * whose `blocked_by` isn't fully `<prefix>:done` yet (`frontierBlockedOn`),
- * and kick off `runIssue` for each claimed one in the background.
+ * + sibling-affinity + created-asc order (`orderEligible`), refusing any
+ * whose author isn't in `watch.allowed_authors` (`authorBlocked`/
+ * `rejectDisallowedAuthor`) and skipping any whose `blocked_by` isn't fully
+ * `<prefix>:done` yet (`frontierBlockedOn`), and kick off `runIssue` for each
+ * claimed one in the background.
  */
 export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promise<void> {
   if (state.inflight.size >= deps.concurrency) return;
@@ -1631,6 +1693,10 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
   for (const issue of ordered) {
     if (state.inflight.size >= deps.concurrency) break;
     if (state.inflight.has(issue.id)) continue;
+    if (authorBlocked(deps, issue)) {
+      await rejectDisallowedAuthor(deps, issue, "issue");
+      continue;
+    }
     const marker = parseRefineMarker(issue.body);
     if (marker.blocked_by.length > 0) {
       const waitingOn = await frontierBlockedOn(deps, marker.blocked_by, blockerCache);
@@ -1678,8 +1744,11 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
 }
 
 /**
- * Claim as many specs in `from` as `refineConcurrency` allows, and kick off
- * `runSpec` for each in the background. A no-op when `watch.refine` is off.
+ * Claim as many specs in `from` as `refineConcurrency` allows, refusing any
+ * whose author isn't in `watch.allowed_authors` (same `authorBlocked`/
+ * `rejectDisallowedAuthor` gate `claimNewWork` uses), and kick off `runSpec`
+ * for each remaining one in the background. A no-op when `watch.refine` is
+ * off.
  *
  * `from` defaults to `spec-ready` (a fresh spec) but `tick()` also calls this
  * with `"continue-refinement"` — a human's signal that they've answered a
@@ -1704,6 +1773,10 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: Wa
   for (const issue of eligible) {
     if (state.refining.size >= deps.refineConcurrency) break;
     if (state.refining.has(issue.id)) continue;
+    if (authorBlocked(deps, issue)) {
+      await rejectDisallowedAuthor(deps, issue, "spec");
+      continue;
+    }
     if (deps.dryRun) {
       deps.log(`watch: [dry-run] would claim spec ${issue.id} (${issue.title}) and run refine chain "${deps.refineChain}"`);
       continue;

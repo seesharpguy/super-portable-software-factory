@@ -79,11 +79,20 @@ class FakeProvider implements IssueProvider {
    * blocked_by, priority) the same way `core/refine.ts`'s `renderBody()`
    * would — see this file's `markerBody()` helper. `opts.extraLabels` lets a
    * test add a `spf:priority:pN` (or any other) label alongside the state
-   * label `addIssue` always sets.
+   * label `addIssue` always sets. `opts.author` defaults to `"test-author"`
+   * rather than leaving it unset, so an ordinary test never has to think
+   * about `watch.allowed_authors` — only the tests that exercise it (see
+   * `authorBlocked`'s own suite) set this explicitly.
    */
-  addIssue(id: string, title: string, state: WatchState = "ready", marker: WatchMarker | null = null, opts: { body?: string; extraLabels?: string[] } = {}): void {
+  addIssue(
+    id: string,
+    title: string,
+    state: WatchState = "ready",
+    marker: WatchMarker | null = null,
+    opts: { body?: string; extraLabels?: string[]; author?: string } = {},
+  ): void {
     this.entries.set(id, {
-      issue: { id, title, body: opts.body ?? "", labels: [`spf:${state}`, ...(opts.extraLabels ?? [])] },
+      issue: { id, title, body: opts.body ?? "", labels: [`spf:${state}`, ...(opts.extraLabels ?? [])], author: opts.author ?? "test-author" },
       state,
       marker,
       comments: [],
@@ -220,6 +229,9 @@ function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Par
     chain: "plan-build-test",
     baseBranch: "main",
     concurrency: 2,
+    // `[]` by default, like WatchConfigSchema's own default — a test that
+    // doesn't override this never exercises watch.allowed_authors at all.
+    allowedAuthors: [],
     // `{}` by default, like WatchConfigSchema's own default — a test that
     // doesn't override this never sees a chainOptions field at all in what
     // runChain/runRefine receive.
@@ -502,6 +514,72 @@ test("claimNewWork: a blocker that no longer exists (404) is treated as satisfie
   await waitUntil(() => state.inflight.size === 0);
 
   assert.deepEqual(provider.claimCalls, ["30"]);
+});
+
+// ── claimNewWork: watch.allowed_authors ──────────────────────────────────
+
+test("claimNewWork: an empty allowed_authors (the default) never blocks anything, regardless of author", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("50", "anyone's issue", "ready", null, { author: "a-random-public-account" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost, { allowedAuthors: [] }), state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["50"]);
+});
+
+test("claimNewWork: an issue authored by someone outside allowed_authors is refused — blocked, never claimed", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("51", "a public issue a collaborator mislabeled", "ready", null, { author: "someone-else" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost, { allowedAuthors: ["iamfiscus"] }), state);
+
+  assert.equal(provider.claimCalls.length, 0, "must never reach provider.claim() — refused before the lock/claim step");
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["blocked"]);
+  assert.match(provider.transitions[0]!.detail ?? "", /someone-else/);
+  assert.match(provider.transitions[0]!.detail ?? "", /allowed_authors/);
+});
+
+test("claimNewWork: an issue authored by an allowed_authors entry claims normally", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("52", "my own issue", "ready", null, { author: "iamfiscus" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost, { allowedAuthors: ["iamfiscus"] }), state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["52"]);
+});
+
+test("claimNewWork: an issue with no author on record is refused once allowed_authors is non-empty — unknown is not trusted", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("53", "authorless fixture", "ready");
+  provider.entries.get("53")!.issue.author = undefined; // simulates an Issue built before this field existed
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+
+  await claimNewWork(makeDeps(provider, codeHost, { allowedAuthors: ["iamfiscus"] }), state);
+
+  assert.equal(provider.claimCalls.length, 0);
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["blocked"]);
+});
+
+test("claimNewWork: dry-run logs what would be blocked but transitions nothing", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("54", "a public issue", "ready", null, { author: "someone-else" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const logs: string[] = [];
+
+  await claimNewWork(makeDeps(provider, codeHost, { allowedAuthors: ["iamfiscus"], dryRun: true, log: (m) => logs.push(m) }), state);
+
+  assert.equal(provider.transitions.length, 0, "dry-run must never mutate the tracker");
+  assert.ok(logs.some((l) => l.includes("[dry-run] would block")));
 });
 
 test("claimNewWork: a blocker shared by two leaves is fetched at most once per tick", async () => {
@@ -918,6 +996,41 @@ test("claimSpecs: a disabled refine lane never lists spec-ready issues or claims
   await claimSpecs(makeDeps(provider, codeHost, { refineEnabled: false }), state);
 
   assert.equal(provider.claimCalls.length, 0);
+});
+
+// ── claimSpecs: watch.allowed_authors ────────────────────────────────────
+
+test("claimSpecs: a spec authored by someone outside allowed_authors is refused — blocked, never refined", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("102", "a public spec", "spec-ready", null, { author: "someone-else" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, {
+    refineEnabled: true,
+    allowedAuthors: ["iamfiscus"],
+    runRefine: async () => {
+      throw new Error("runRefine should never be called for a disallowed author");
+    },
+  });
+
+  await claimSpecs(deps, state);
+
+  assert.equal(provider.claimCalls.length, 0);
+  assert.deepEqual(provider.transitions.map((t) => t.to), ["blocked"]);
+  assert.match(provider.transitions[0]!.detail ?? "", /someone-else/);
+});
+
+test("claimSpecs: a spec authored by an allowed_authors entry refines normally", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("103", "my own spec", "spec-ready", null, { author: "iamfiscus" });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const deps = makeDeps(provider, codeHost, { refineEnabled: true, allowedAuthors: ["iamfiscus"] });
+
+  await claimSpecs(deps, state);
+  await waitUntil(() => state.refining.size === 0);
+
+  assert.deepEqual(provider.claimCalls, ["103"]);
 });
 
 test("claimSpecs: claims a spec-ready spec, publishes, and moves it to spec-in-progress with a summary comment — NOT done yet", async () => {

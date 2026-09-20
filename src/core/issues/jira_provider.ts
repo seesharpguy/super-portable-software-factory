@@ -122,6 +122,10 @@ interface JiraIssue {
     summary: string;
     description: unknown | null;
     labels: string[];
+    // Jira always sets a reporter on create and does not allow it to be
+    // cleared later, but this stays optional/nullable defensively — same
+    // reasoning as github_provider.ts's GhIssue.user on a ghost account.
+    reporter?: { displayName: string } | null;
   };
 }
 
@@ -208,6 +212,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
       title: raw.fields.summary,
       body: raw.fields.description ? adfToMarkdown(raw.fields.description) : "",
       labels: raw.fields.labels,
+      author: raw.fields.reporter?.displayName ?? "unknown",
     };
   }
 
@@ -224,7 +229,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     const jql = `project = ${JSON.stringify(this.projectKey)} AND labels = ${JSON.stringify(label)}`;
     const result = await this.jira<{ issues: JiraIssue[] }>("/rest/api/3/search/jql", {
       method: "POST",
-      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels"] }),
+      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels", "reporter"] }),
     });
     return result.issues.map((i) => this.toIssue(i));
   }
@@ -253,7 +258,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
    * never discovers it from the issue body itself.
    */
   async getIssue(id: string): Promise<Issue | null> {
-    const response = await fetchRetryTransient(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels`, {
+    const response = await fetchRetryTransient(`${this.baseUrl}/rest/api/3/issue/${id}?fields=summary,description,labels,reporter`, {
       headers: { Authorization: this.authHeader(), Accept: "application/json" },
     });
     if (response.status === 404) return null;
@@ -278,7 +283,11 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
         },
       }),
     });
-    return { id: response.key, title: input.title, body: input.body, labels: input.labels };
+    // Jira defaults a created issue's reporter to the authenticated account
+    // when the POST body above doesn't set one explicitly — `this.email` is
+    // exactly that account, so this matches what a `getIssue`/searchByLabel
+    // re-fetch of the same issue would report back through `toIssue`.
+    return { id: response.key, title: input.title, body: input.body, labels: input.labels, author: this.email };
   }
 
   /**
@@ -362,7 +371,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     const jql = `parent = ${JSON.stringify(parent.id)}`;
     const result = await this.jira<{ issues: JiraIssue[] }>("/rest/api/3/search/jql", {
       method: "POST",
-      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels"] }),
+      body: JSON.stringify({ jql, maxResults: 100, fields: ["summary", "description", "labels", "reporter"] }),
     });
     return result.issues.map((i) => this.toIssue(i));
   }
@@ -402,7 +411,7 @@ export class JiraProvider implements IssueProvider, IssueAuthoringProvider {
     const next = issue.labels.filter((l) => l !== from);
     next.push(to);
     await this.jira(`/rest/api/3/issue/${issue.id}`, { method: "PUT", body: JSON.stringify({ fields: { labels: next } }) });
-    const fresh = await this.jira<JiraIssue>(`/rest/api/3/issue/${issue.id}?fields=summary,description,labels`);
+    const fresh = await this.jira<JiraIssue>(`/rest/api/3/issue/${issue.id}?fields=summary,description,labels,reporter`);
     const labels = fresh.fields.labels;
     const claimed = labels.includes(to) && !labels.includes(from);
     if (!claimed) {

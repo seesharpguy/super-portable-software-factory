@@ -452,6 +452,19 @@ spf watch --dry-run          # log intended claims/transitions, mutate nothing
 
 No GitHub App, no webhook, no Jira/Bitbucket app install — it's a plain REST poll against whichever combination is configured, same philosophy as the trace db's own polling contract. See [`assets/templates/`](assets/templates/) for full worked configs (also usable directly via `spf init --template <name>`), and `spf install-skill`'s installed skill (`roster.md`, `references/config.md`) for the field-by-field reference.
 
+### `watch.allowed_authors` — the label isn't the trust boundary
+
+`<prefix>:ready` is a label, and on GitHub only accounts with Triage+ access can add one. But on a repo that accepts public issues, ANYONE can open an issue and write whatever they want in its body — labeling and authoring are different permissions, held by different people. A collaborator who labels a plausible-looking public issue `ready` without catching an embedded instruction hands that issue's body to a coding agent with real Bash/write access as if it were trusted input. The label gate alone doesn't stop this, because the person who can label and the person who wrote the content aren't the same person.
+
+```yaml
+watch:
+  allowed_authors: [octocat, some-other-trusted-login]   # empty (default) = unrestricted
+```
+
+Empty (the default) is unrestricted — identical to every `spf watch` release before this field existed. A non-empty list is a hard refusal, checked against `Issue.author` (the account that OPENED the issue, never whoever most recently labeled or edited it): an issue from anyone else is transitioned straight to `blocked` with an explanatory comment, before a worktree, a lock, or a chain run ever exist for it. Re-labeling it `ready` again does nothing — the fix is either adding that author to the list, or opening an equivalent issue yourself. `spf doctor` reports whether this is set.
+
+This applies to both lanes — `claimNewWork` (`<prefix>:ready`) and `claimSpecs` (`<prefix>:spec-ready`/`continue-refinement`). It does not get in your own way: an issue the refine lane creates itself (a spec's decomposed children) carries whichever tracker identity your own configured credential creates issues as, so if you're in your own `allowed_authors` list (the common case — you're the one who filed the spec), its children pass too.
+
 ### Priority, dependencies, and picking what's next
 
 Among every `<prefix>:ready` issue, `spf watch` claims in this order:

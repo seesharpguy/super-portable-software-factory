@@ -8,6 +8,11 @@ record independent of the commit log.
 
 ## Unreleased
 
+### Added — `watch.allowed_authors`: an explicit issue-author allowlist, separate from the label gate
+
+- **`core/data_types.ts`** (`WatchConfigSchema.allowed_authors`), **`core/issues/provider.ts`** (`Issue.author`), **`core/watch.ts`** (`authorBlocked`/`rejectDisallowedAuthor`, wired into both `claimNewWork` and `claimSpecs`): on a tracker that accepts public issues, `<prefix>:ready`/`<prefix>:spec-ready` being a label-write-gated action does not mean the ISSUE CONTENT is trusted — anyone can open an issue and write whatever they want in its body, and a collaborator who labels a plausible-looking public issue without catching an embedded instruction hands that body to a coding agent with real Bash/write access as if it were vetted input. `watch.allowed_authors` is a second, independent gate: empty (the default, and every existing config's behavior, unchanged) is unrestricted; a non-empty list refuses any issue whose ORIGINAL author (`Issue.author` — GitHub's `user.login`, Jira's `reporter.displayName`) isn't on it, transitioning straight to `blocked` with an explanation before a worktree, lock, or chain run ever exists for it. See the README's `watch.allowed_authors` section.
+- `spf doctor` reports whether this is set.
+
 ### Changed — OpenTelemetry: real SDK encoder, process-scoped metrics, outbound propagation
 
 - **`core/otel.ts`**: the hand-rolled OTLP/HTTP-JSON span encoder is

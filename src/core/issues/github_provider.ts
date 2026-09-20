@@ -146,6 +146,12 @@ interface GhIssue {
   body: string | null;
   labels: Array<{ name: string } | string>;
   pull_request?: unknown;
+  // Absent only for a ghost/deleted account, per GitHub's own API — treated
+  // as "unknown" rather than throwing, since Issue.author still has to be a
+  // string for `watch.allowed_authors` to compare against. Optional (not
+  // just nullable) so JSON fixtures/mocks predating this field still satisfy
+  // the type.
+  user?: { login: string } | null;
 }
 
 export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAuthoringProvider {
@@ -284,6 +290,7 @@ export class GitHubProvider implements IssueProvider, CodeHostProvider, IssueAut
       title: raw.title,
       body: raw.body ?? "",
       labels: raw.labels.map((l) => (typeof l === "string" ? l : l.name)),
+      author: raw.user?.login ?? "unknown",
     };
   }
 

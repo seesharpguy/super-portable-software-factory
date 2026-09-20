@@ -260,6 +260,7 @@ async function rig(opts: { sandboxYaml?: string; chain: ChainDefinition; n: numb
     chain: chainDef.name,
     baseBranch: "main",
     concurrency: 2,
+    allowedAuthors: [],
     chainOptions: cfg.watch.chain_options,
     refineEnabled: false,
     refineConcurrency: 1,
