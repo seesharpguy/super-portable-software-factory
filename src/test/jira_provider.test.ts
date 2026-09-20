@@ -230,7 +230,7 @@ test('listChildren: POSTs a parent = "<id>" JQL search, maps results the same wa
     assert.equal(calls[0]!.method, "POST");
     assert.match(calls[0]!.url, /\/rest\/api\/3\/search\/jql$/);
     assert.equal(calls[0]!.body.jql, 'parent = "PROJ-1"');
-    assert.deepEqual(children, [{ id: "PROJ-2", title: "story one", body: "", labels: ["spf:refined"] }]);
+    assert.deepEqual(children, [{ id: "PROJ-2", title: "story one", body: "", labels: ["spf:refined"], author: "unknown" }]);
   } finally {
     restore();
   }

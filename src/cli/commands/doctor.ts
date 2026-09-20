@@ -1223,6 +1223,21 @@ export async function doctorCommand(argv: string[]): Promise<number> {
     check(report, "watch.issue_provider", true, cfg.watch.issue_provider);
     check(report, "watch.code_host", true, cfg.watch.code_host);
     check(report, "watch.repo", true, `${cfg.watch.repo} (code_host's repo)`);
+    // Purely informational (`ok: true` regardless) — an empty list is a
+    // valid, common config, not a misconfiguration. Surfaced here because
+    // it's easy to assume the `<prefix>:ready` label itself is the security
+    // boundary; on a repo that takes issues from anyone but restricts
+    // labeling to collaborators, it isn't — see `WatchConfigSchema.allowed_
+    // authors`'s doc comment (`core/data_types.ts`) for the gap this closes.
+    check(
+      report,
+      "watch.allowed_authors",
+      true,
+      cfg.watch.allowed_authors.length > 0
+        ? `restricted to: ${cfg.watch.allowed_authors.join(", ")}`
+        : "unrestricted — spf watch will build ANY issue the tracker labels ready, regardless of who opened it; " +
+            "set this if the repo takes issues from people other than whoever applies the ready label",
+    );
 
     // The one combination where a single `repo` field is ambiguous: GitHub
     // issues against a Bitbucket repo are two different repos in two

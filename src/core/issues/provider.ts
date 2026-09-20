@@ -119,6 +119,26 @@ export interface Issue {
   body: string;
   labels: string[];
   /**
+   * The tracker account that OPENED the issue — GitHub's `user.login`,
+   * Jira's `reporter.displayName` — never whoever most recently labeled or
+   * edited it. This is `watch.allowed_authors`' whole basis (`data_types.ts`,
+   * checked by `core/watch.ts`'s `authorBlocked`): label-write access and
+   * issue-open access are different permissions, so the label alone doesn't
+   * say who wrote the body a coding agent is about to treat as input. An
+   * issue this provider creates itself (`createIssue`, the refine lane's
+   * children) gets the tracker identity behind this provider's own
+   * credential — the same identity a human's `allowed_authors` entry for
+   * THEMSELVES already covers, since that's who configured the daemon.
+   *
+   * Optional, like `internal_id` above, so an `Issue` a test constructs by
+   * hand (or a fixture written before this field existed) doesn't need one —
+   * `authorBlocked` treats a missing author as UNKNOWN, not trusted: with a
+   * non-empty `allowed_authors`, an issue with no author is refused exactly
+   * like one whose real author isn't on the list. Both real providers
+   * (`github_provider.ts`, `jira_provider.ts`) always populate this.
+   */
+  author?: string;
+  /**
    * The tracker's own internal/database id, distinct from `id` (the
    * human-facing number/key) — only populated where an authoring operation
    * needs it. GitHub's sub-issue API is the reason this exists: `POST

@@ -749,6 +749,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     chain: cfg.watch.chain,
     baseBranch: cfg.watch.base_branch,
     concurrency: cfg.watch.concurrency,
+    allowedAuthors: cfg.watch.allowed_authors,
     chainOptions: cfg.watch.chain_options,
     refineEnabled: cfg.watch.refine.enabled,
     refineConcurrency: cfg.watch.refine.concurrency,

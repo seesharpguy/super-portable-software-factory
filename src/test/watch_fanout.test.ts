@@ -262,6 +262,7 @@ function fanoutHarness(opts: {
     chain: "plan-build-test",
     baseBranch: "main",
     concurrency: 2,
+    allowedAuthors: [],
     chainOptions: {},
     refineEnabled: false,
     refineConcurrency: 1,

@@ -1441,6 +1441,34 @@ export const WatchConfigSchema = v.object({
    * `data_types.test.ts`'s merge-survival test for this field.
    */
   chain_options: v.optional(v.record(v.string(), v.string()), () => ({})),
+  /**
+   * An explicit allowlist of tracker logins/display names `claimNewWork`/
+   * `claimSpecs` (`core/watch.ts`) will build content from — checked against
+   * `Issue.author`, which is the tracker account that OPENED the issue, not
+   * whoever applied the `<prefix>:ready`/`<prefix>:spec-ready` label.
+   *
+   * This matters specifically because label-write access and issue-open
+   * access are different permissions: on a public GitHub repo, anyone can
+   * open an issue and write whatever they want in its body, but only a
+   * collaborator with Triage+ access can label one `ready`. That collaborator
+   * labeling a plausible-looking public issue without catching an embedded
+   * instruction hands that issue's body to a coding agent with real Bash/
+   * write access as if it were trusted input — the label gate alone does not
+   * stop that, because the person who can label and the person who wrote the
+   * content are different people. This allowlist is the second gate: even a
+   * correctly-labeled issue is refused (see `authorBlocked`) unless its
+   * ORIGINAL author is on the list.
+   *
+   * Empty (the default) means unrestricted — identical behavior to every
+   * `spf watch` release before this field existed. A non-empty list is a
+   * hard refusal, not a warning: `claimNewWork`/`claimSpecs` transition a
+   * disallowed issue straight to `blocked` with an explanatory comment
+   * instead of ever starting a chain against it.
+   *
+   * Whole-array replace on merge, like `fanout`/`chain_options` above — an
+   * override config's list replaces the base's rather than unioning with it.
+   */
+  allowed_authors: v.optional(v.array(v.string()), () => []),
   jira: v.optional(WatchJiraConfigSchema, () => v.parse(WatchJiraConfigSchema, {})),
   github: v.optional(WatchGithubConfigSchema, () => v.parse(WatchGithubConfigSchema, {})),
   refine: v.optional(WatchRefineConfigSchema, () => v.parse(WatchRefineConfigSchema, {})),
