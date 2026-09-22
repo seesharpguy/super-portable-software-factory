@@ -46,6 +46,8 @@ import {
   traceIdFor,
 } from "../core/otel.js";
 import { resetOtelMetricsForTest, resolveOtelMetrics } from "../core/otel_metrics.js";
+import { ensureCacheDetailsProbed, resetCacheDetailsProbeForTest } from "../core/cache_details_probe.js";
+import { ollamaBaseUrl } from "../core/ollama_provider.js";
 import * as v from "valibot";
 import {
   AgentConfigSchema,
@@ -843,6 +845,133 @@ test("loraAdapterFor: provider/adapter-name — this org's -lora- served-model c
 test("loraAdapterFor: no match on any convention -> null, never a blind copy of the model id", () => {
   assert.equal(loraAdapterFor({ model: "google/gemini-3.6-flash" }), null);
   assert.equal(loraAdapterFor({ model: "anthropic/claude-opus-4" }), null);
+});
+
+// ── 9b. spf.cache_details_available (issue #82: vLLM cache-read pass-through) ──
+
+test("closeAgentCall sets spf.cache_details_available=false when probe confirms missing for ollama models", async () => {
+  resetCacheDetailsProbeForTest();
+  const origFetch = globalThis.fetch;
+  try {
+    // Stub fetch to return a response with usage but NO prompt_tokens_details
+    globalThis.fetch = (() =>
+      Promise.resolve({
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "hi" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 }, // missing prompt_tokens_details
+        }),
+      })) as any;
+
+    const exp = exporter("http://127.0.0.1:1/v1/traces");
+    exp.recordAgentSession(
+      v.parse(AgentConfigSchema, { name: "builder", model: "ollama/nemotron", prompt_engineering: { system: "s.md", user: "u.md" } }),
+    );
+
+    // Ensure the probe runs and settles before the agent call completes
+    await ensureCacheDetailsProbed(ollamaBaseUrl(), "test-key", "ollama/nemotron");
+
+    const phaseId = "adw_test_01_build";
+    exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+    exp.recordEvent(
+      makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_end", name: "builder", tokens: 10, payload: { usage: { input_tokens: 8, output_tokens: 2 } } }),
+      "evt_2",
+      "2026-01-01T00:00:01.000Z",
+    );
+
+    const json = exp.pendingJson();
+    const agentSpan = JSON.parse(json).resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "agent builder");
+    const attrs = Object.fromEntries(agentSpan.attributes.map((a: any) => [a.key, a.value]));
+    assert.deepEqual(attrs["spf.cache_details_available"], { boolValue: false }, "probe detected missing prompt_tokens_details");
+  } finally {
+    globalThis.fetch = origFetch;
+    resetCacheDetailsProbeForTest();
+  }
+});
+
+test("closeAgentCall omits spf.cache_details_available when probe confirms present for ollama models", async () => {
+  resetCacheDetailsProbeForTest();
+  const origFetch = globalThis.fetch;
+  try {
+    // Stub fetch to return a response WITH prompt_tokens_details
+    globalThis.fetch = (() =>
+      Promise.resolve({
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: "hi" } }],
+          usage: { prompt_tokens: 1, prompt_tokens_details: { cached_tokens: 0 }, completion_tokens: 1 },
+        }),
+      })) as any;
+
+    const exp = exporter("http://127.0.0.1:1/v1/traces");
+    exp.recordAgentSession(
+      v.parse(AgentConfigSchema, { name: "builder", model: "ollama/nemotron", prompt_engineering: { system: "s.md", user: "u.md" } }),
+    );
+
+    // Ensure the probe runs and settles
+    await ensureCacheDetailsProbed(ollamaBaseUrl(), "test-key", "ollama/nemotron");
+
+    const phaseId = "adw_test_01_build";
+    exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+    exp.recordEvent(
+      makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_end", name: "builder", tokens: 10, payload: { usage: { input_tokens: 8, output_tokens: 2 } } }),
+      "evt_2",
+      "2026-01-01T00:00:01.000Z",
+    );
+
+    const json = exp.pendingJson();
+    const agentSpan = JSON.parse(json).resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "agent builder");
+    const attrs = Object.fromEntries(agentSpan.attributes.map((a: any) => [a.key, a.value]));
+    assert.ok(!("spf.cache_details_available" in attrs), "when probe confirms present, the attribute is omitted (not a misconfiguration signal)");
+  } finally {
+    globalThis.fetch = origFetch;
+    resetCacheDetailsProbeForTest();
+  }
+});
+
+test("closeAgentCall omits spf.cache_details_available for non-ollama models, regardless of probe state", () => {
+  resetCacheDetailsProbeForTest();
+  const exp = exporter("http://127.0.0.1:1/v1/traces");
+  exp.recordAgentSession(
+    v.parse(AgentConfigSchema, { name: "builder", model: "google/gemini-3.6-flash", prompt_engineering: { system: "s.md", user: "u.md" } }),
+  );
+
+  const phaseId = "adw_test_01_build";
+  exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+  exp.recordEvent(
+    makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_end", name: "builder", tokens: 10, payload: { usage: { input_tokens: 8, output_tokens: 2 } } }),
+    "evt_2",
+    "2026-01-01T00:00:01.000Z",
+  );
+
+  const json = exp.pendingJson();
+  const agentSpan = JSON.parse(json).resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "agent builder");
+  const attrs = Object.fromEntries(agentSpan.attributes.map((a: any) => [a.key, a.value]));
+  assert.ok(!("spf.cache_details_available" in attrs), "the attribute is never looked up for non-ollama models");
+  resetCacheDetailsProbeForTest();
+});
+
+test("closeAgentCall omits spf.cache_details_available when never probed (undefined)", () => {
+  resetCacheDetailsProbeForTest();
+  const exp = exporter("http://127.0.0.1:1/v1/traces");
+  exp.recordAgentSession(
+    v.parse(AgentConfigSchema, { name: "builder", model: "ollama/nemotron", prompt_engineering: { system: "s.md", user: "u.md" } }),
+  );
+
+  // Intentionally do NOT call ensureCacheDetailsProbed — the probe registry is empty
+  const phaseId = "adw_test_01_build";
+  exp.recordEvent(makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_start", name: "builder", payload: {} }), "evt_1", "2026-01-01T00:00:00.000Z");
+  exp.recordEvent(
+    makeEventRecord({ adw_id: "adw_test", phase_id: phaseId, type: "agent_end", name: "builder", tokens: 10, payload: { usage: { input_tokens: 8, output_tokens: 2 } } }),
+    "evt_2",
+    "2026-01-01T00:00:01.000Z",
+  );
+
+  const json = exp.pendingJson();
+  const agentSpan = JSON.parse(json).resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "agent builder");
+  const attrs = Object.fromEntries(agentSpan.attributes.map((a: any) => [a.key, a.value]));
+  assert.ok(!("spf.cache_details_available" in attrs), "when never probed, getCacheDetailsAvailability returns undefined and the attribute is omitted");
+  resetCacheDetailsProbeForTest();
 });
 
 // ── 10. outbound propagation seam: agentCallTraceContext ────────────────────

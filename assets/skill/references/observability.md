@@ -187,10 +187,23 @@ routing hop, and vLLM's own serving span can ALL be emitted to the same Tempo
     (`usage.prompt_tokens_details.cached_tokens`, surfaced here as both
     `spf.tokens.cache_read` and `gen_ai.usage.cache_read.input_tokens`)
     requires the upstream vLLM server to be started with
-    `--enable-prompt-tokens-details` (off by default) — SPF has no way to
-    detect this at config-validation time; a correctly-wired pipeline reads
-    `0` forever against a server that hasn't set the flag, with no bug
-    anywhere in SPF's own code.
+    `--enable-prompt-tokens-details` (off by default). SPF #82 added a
+    one-shot capability probe per base URL (`src/core/cache_details_probe.ts`)
+    — fired from `otel.ts`'s `recordAgentSession` (only reachable once
+    `observability.otel` is configured, which is that class's own activation
+    gate — deliberately NOT wired into `ollama_provider.ts`'s
+    `registerOllamaModel`, Flue's hot dispatch-registration path, where an
+    earlier version raced the probe's own request against the real dispatch's
+    request to the same base URL) — that sends a real minimal completion
+    and inspects the response for the `prompt_tokens_details` key. When
+    confirmed absent, every subsequent agent-call span for that base URL on
+    a model prefixed `ollama/` carries `spf.cache_details_available: false`
+    (never set otherwise — true/unknown are not alertable states), the exact
+    actionable dashboard-alert signal this note used to say was impossible.
+    `spf doctor` surfaces the same probe result as an informational
+    "vLLM cache-details support" check. The deployment-side fix — actually
+    setting the flag on the vLLM server — lives in https://github.com/iamfiscus/inference-platform-aws,
+    not this repo.
 
 **Spend is itemized per phase.** `agent_end.usage` carries tokens *and*
 dollars for each component Flue reports (matching pi-ai's field names

@@ -246,6 +246,8 @@ import { resourceFromAttributes, type Resource } from "@opentelemetry/resources"
 import type { ReadableSpan, TimedEvent } from "@opentelemetry/sdk-trace";
 import { applyOtelEnvSupplement, type AgentConfig, type EventRecord, type GateReport, type OTelConfig, type Phase, type SFConfig } from "./data_types.ts";
 import { resolveOtelMetrics, type OtelMetrics } from "./otel_metrics.ts";
+import { ensureCacheDetailsProbed, getCacheDetailsAvailability } from "./cache_details_probe.ts";
+import { ollamaApiKey, ollamaBaseUrl } from "./ollama_provider.ts";
 
 // ── tunables (see BACKPRESSURE above) ───────────────────────────────────────
 const MAX_QUEUED_SPANS = 2048;
@@ -720,6 +722,21 @@ export class OtelExporter {
       codingAgent: agent.coding_agent,
       loraAdapter: loraAdapterFor(agent),
     });
+
+    // Fire-and-forget cache-details capability probe (issue #82) — deliberately
+    // triggered HERE, from OTel's own bookkeeping, rather than from
+    // ollama_provider.ts's registerOllamaModel (Flue's hot dispatch-registration
+    // path). A prior version lived there and broke ollama_gateway_e2e.test.ts's
+    // "exactly one real HTTP request reached the stub server" invariants — the
+    // probe's own real network call raced with the actual dispatch's request to
+    // the SAME base URL. This class only exists when observability.otel is
+    // configured (its own activation gate), so no extra isFluePropagationInstalled
+    // check is needed here; memoized per base URL (see cache_details_probe.ts),
+    // so this is a real network call only on the FIRST ollama/-model agent
+    // recorded per base URL per process, never once per dispatch.
+    if (agent.model.startsWith("ollama/")) {
+      void ensureCacheDetailsProbed(ollamaBaseUrl(), ollamaApiKey(), agent.model.slice("ollama/".length)).catch(() => {});
+    }
   }
 
   /**
@@ -984,6 +1001,21 @@ export class OtelExporter {
     // more attribute name for the same already-present number.
     const cacheReadTokens = numOrNull(usageObj["cache_read_tokens"]);
     if (cacheReadTokens !== null) attributes["gen_ai.usage.cache_read.input_tokens"] = Math.trunc(cacheReadTokens);
+
+    // spf.cache_details_available: detect vLLM server misconfiguration that would
+    // suppress cache_read_tokens even when real cache hits occur (see issue #82 and
+    // the "vLLM's own cache-read pass-through" note in assets/skill/references/
+    // observability.md). Only emit the attribute when getCacheDetailsAvailability
+    // returns EXACTLY false (confirmed missing). Omit it when true (confirmed
+    // present), null (probe failed open), or undefined (never probed) — only the
+    // "confirmed misconfigured" signal should trigger a dashboard alert.
+    if (meta && meta.model.startsWith("ollama/")) {
+      const availability = getCacheDetailsAvailability(ollamaBaseUrl());
+      if (availability === false) {
+        attributes["spf.cache_details_available"] = false;
+      }
+    }
+
     const cost = numOrNull(record.payload?.["cost"]);
     if (cost !== null) attributes["spf.cost.total"] = cost;
 
