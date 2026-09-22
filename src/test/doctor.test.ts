@@ -548,7 +548,11 @@ test("doctor: OLLAMA_BASE_URL reachability probe sends the SAME dummy bearer a r
           assert.ok(reachCheck, "expected an OLLAMA_BASE_URL reachability check for a flue+ollama config");
           assert.equal(reachCheck!.severity, "info");
           assert.match(reachCheck!.detail, /^reachable: GET/);
-          assert.equal(calls.length, 1);
+          // 2 calls: the /models reachability GET asserted above, plus the
+          // vLLM cache-details /chat/completions probe (issue #82) that now
+          // fires right after it for the same OLLAMA_FLUE_CONFIG roster.
+          assert.equal(calls.length, 2);
+          assert.match(calls[1]!.url, /\/chat\/completions$/);
           // A prior version sent no Authorization header at all here — a
           // real divergence from ollama_provider.ts's `resolve()`, which
           // ALWAYS sends a bearer (the dummy placeholder when unset). Now
@@ -575,7 +579,8 @@ test("doctor: OLLAMA_BASE_URL reachability probe sends OLLAMA_API_KEY as a beare
           assert.ok(reachCheck);
           assert.equal(reachCheck!.severity, "info");
           assert.match(reachCheck!.detail, /^reachable: GET/);
-          assert.equal(calls.length, 1);
+          // See the sibling "dummy bearer" test above for why this is 2, not 1.
+          assert.equal(calls.length, 2);
           assert.equal(calls[0]!.headers["authorization"], "Bearer briefs-gateway-client-key-123");
         },
       ),

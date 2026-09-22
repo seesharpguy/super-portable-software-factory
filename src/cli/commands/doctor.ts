@@ -19,6 +19,7 @@ import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
 import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { ollamaApiKey, ollamaBaseUrl } from "../../core/ollama_provider.ts";
+import { probeCacheDetailsAvailable } from "../../core/cache_details_probe.ts";
 import { cloudflareAiBaseUrl } from "../../core/cloudflare_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
@@ -601,6 +602,46 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           : `reachable: GET ${ollamaBase}/models -> HTTP ${result.status}`,
       !result.ok || isAuthFailure ? "warn" : "info",
     );
+
+    // vLLM cache-details support probe — origin issue #82. Determines a
+    // representative model id by scanning cfg.agents and cfg.tiering.tiers
+    // for the first entry whose model starts with "ollama/" (same scanning
+    // shape as the usesOllamaFlue computation above), strips the "ollama/"
+    // prefix, and probes that bare model id to detect whether the server
+    // returns usage.prompt_tokens_details — the exact signal that flags a
+    // silent cache-miss when absent (see observability.md caveat).
+    let bareModelId: string | undefined;
+    for (const agent of cfg.agents) {
+      if (agent.coding_agent !== "claude_code" && agent.model.startsWith("ollama/")) {
+        bareModelId = agent.model.slice("ollama/".length);
+        break;
+      }
+    }
+    if (!bareModelId && cfg.tiering.enabled) {
+      for (const tier of cfg.tiering.tiers) {
+        if (tier.coding_agent !== "claude_code" && tier.model.startsWith("ollama/")) {
+          bareModelId = tier.model.slice("ollama/".length);
+          break;
+        }
+      }
+    }
+
+    if (bareModelId) {
+      const probeResult = await withProbeStatus("vLLM cache-details support", () =>
+        probeCacheDetailsAvailable(ollamaBase, ollamaApiKey(), bareModelId),
+      );
+      check(
+        report,
+        "vLLM cache-details support",
+        true, // informational only — never a hard failure, same contract as the reachability check above
+        probeResult === true
+          ? `${ollamaBase} reports prompt_tokens_details — cache-read tokens are accurately tracked.`
+          : probeResult === false
+            ? `vLLM/Ollama server at ${ollamaBase} is not returning usage.prompt_tokens_details — cache-read token counts will silently read 0. Start the server with --enable-prompt-tokens-details, or see https://github.com/iamfiscus/inference-platform-aws for the deployment-side fix.`
+            : `could not determine prompt_tokens_details support for ${ollamaBase} (probe failed or no representative ollama/ model configured).`,
+        probeResult === false ? "warn" : "info",
+      );
+    }
   }
 
   // Cloudflare Workers AI — the same reachability check the Ollama block
