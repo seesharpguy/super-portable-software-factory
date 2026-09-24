@@ -91,7 +91,29 @@ export type IssueAuthoringKind = RefinedIssue["kind"] | "spec";
  * instruction to CODE ("go create these"), not new information a refiner
  * session needs to reason about, so it skips the agent entirely.
  *
- * All thirteen still live in one `WatchState` union (not several separate
+ * `feedback` is the BUILD lane's own human-in-the-loop escape hatch, added
+ * later and modeled directly on `needs-feedback`/`continue-refinement`
+ * above — but simpler, because it's one label instead of two: a declined PR
+ * already tells the human "spf needs you" (`blocked`, plus an invite
+ * comment naming the PR — see `finishReviews` in `watch.ts`), so there's no
+ * separate "spf asked a question" state to enter first. A human leaves
+ * corrections as COMMENTS ON THE PR (not the issue — see
+ * `CodeHostProvider.listPrComments` below) and adds `<prefix>:feedback`;
+ * `claimFeedback` (`watch.ts`) claims `feedback -> working` and reruns the
+ * SAME issue (deterministic adw_id `issue-<id>`, exactly like a fresh
+ * claim) with the PR's comment thread folded into the prompt
+ * (`buildIssuePrompt`). Unlike the refine lane's loop, this can fire against
+ * a PR that's still OPEN, not only a closed/declined one — the primary use
+ * case is "leave a review comment on the open PR, then add the label,"
+ * updating that same PR in place; a declined PR instead gets a fresh
+ * `-rN`-suffixed branch and a new PR (see `branchNameFor`'s `round`
+ * parameter and `openPrForWinner`'s `existingPr` option). See
+ * `WatchMarker.revision` for the round/watermark bookkeeping this shares
+ * conceptually with `WatchMarker.feedback`, kept as a separate field because
+ * the two lanes' watermark semantics differ (a build revision's `since` is
+ * "when we last pushed," not "when we last asked a question").
+ *
+ * All fourteen still live in one `WatchState` union (not several separate
  * unions) because `transition()`'s "strip every `<prefix>:<state>` label,
  * then add one" logic (see `github_provider.ts`/`jira_provider.ts`) has to
  * know about every one of them to strip correctly, and `ensureLabels()`
@@ -103,6 +125,7 @@ export type WatchState =
   | "review"
   | "done"
   | "blocked"
+  | "feedback"
   | "spec-ready"
   | "refining"
   | "refined"
@@ -153,6 +176,25 @@ export interface PrStatus {
 }
 
 /**
+ * One comment (or review) read back off a PR — the build lane's own
+ * `IssueComment` twin (see `IssueProvider.listComments`), for
+ * `CodeHostProvider.listPrComments` below. `path`/`line` are set only for an
+ * inline/diff-anchored comment, when the host reports one; `verdict` is set
+ * only where the host distinguishes a review decision from a plain comment
+ * (GitHub: `APPROVED`/`CHANGES_REQUESTED`/`COMMENTED`/`DISMISSED`; Bitbucket
+ * has no such concept on a comment, so it's always absent there).
+ */
+export interface PrComment {
+  id: string;
+  author: string;
+  created_at: string;
+  body: string;
+  path?: string;
+  line?: number;
+  verdict?: string;
+}
+
+/**
  * The durable scratch state for one issue, stored as a hidden HTML comment
  * on the issue itself — zero infrastructure, survives a daemon crash,
  * human-readable. `attempt` bounds orphan-retry (see `watch.ts`); `ciFixes`
@@ -182,6 +224,20 @@ export interface PrStatus {
  * `feedback.rounds` — how many times this spec has been through the
  * propose/revise loop, for the same "answered after N rounds" summary-comment
  * purpose.
+ *
+ * `revision` is the BUILD lane's own cursor, the `feedback` field's build-lane
+ * twin (see `WatchState`'s `feedback` doc comment above) but with different
+ * watermark semantics: `since` is stamped on every PUSH (`openPrForWinner`),
+ * not on every question asked — "PR comments at or after this timestamp are
+ * corrections on the current state of the PR," which is also correct for a
+ * developer who comments and declines BEFORE spf ever posts an invite (there
+ * is no invite to time against, only the last push). `rounds` both counts
+ * revisions for logging and — on a declined PR, where a fresh branch is
+ * required — names the branch suffix (`branchNameFor`'s `round` parameter).
+ * A separate field from `feedback` rather than a shared one because the two
+ * lanes' claims never touch the same field name on the same code path, and
+ * `reconcileOrphans`/`reconcileRefining` would otherwise have to disambiguate
+ * which lane a shared field belonged to.
  */
 export interface WatchMarker {
   worktree?: string;
@@ -191,6 +247,7 @@ export interface WatchMarker {
   refined?: string[];
   feedback?: { rounds: number; asked_at: string };
   split?: { specs: SpecSplit[]; proposed_at: string; rounds: number };
+  revision?: { rounds: number; since: string };
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */
@@ -281,6 +338,19 @@ export interface IssueProvider {
 export interface CodeHostProvider {
   openPr(opts: { branch: string; title: string; body: string; base: string }): Promise<PrRef>;
   prStatus(pr: PrRef): Promise<PrStatus>;
+  /**
+   * Every comment/review left on a PR, oldest-first — the build lane's
+   * `feedback` revision loop's one read (see `WatchState`'s `feedback` doc
+   * comment, `watch.ts`'s `claimFeedback`/`buildIssuePrompt`). OPTIONAL, same
+   * pattern as `IssueProvider.closeIssue?`/`IssueAuthoringProvider`: not
+   * every code host can list PR comments cheaply (there is none that
+   * genuinely can't today — GitHub and Bitbucket both implement it — but the
+   * seam stays optional so a future minimal host isn't forced to). A host
+   * that omits this makes `feedback` an honest dead end: `claimFeedback`
+   * blocks the issue again with an explanation rather than silently running
+   * with no corrections.
+   */
+  listPrComments?(pr: PrRef): Promise<PrComment[]>;
 }
 
 /**

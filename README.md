@@ -385,7 +385,7 @@ uses) are documented in the installed skill's "Repo-local chains" section
 
 ## `spf watch`
 
-Polls an issue tracker for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR against a code host, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`.
+Polls an issue tracker for issues labeled `<prefix>:ready`, runs a configured chain against each in its own git worktree, opens a PR against a code host, and tracks it through to merged or blocked — driving the same chains above rather than reimplementing an SDLC. Labels are the whole state machine: `ready → working → review → done`/`blocked`, plus `blocked ⇄ feedback` — see "Revising a rejected (or still-open) PR" below.
 
 A second, optional lane (`watch.refine`, off by default) decomposes a `<prefix>:spec-ready` product spec into a feature/story-or-bug tree of real issues instead — see "Refining specs" below.
 
@@ -463,6 +463,27 @@ Among every `<prefix>:ready` issue, `spf watch` claims in this order:
 Before claiming anything, `spf watch` also checks the **frontier**: an issue's `blocked_by` dependencies (set by the refine lane, or by hand) must all carry `<prefix>:done` first. A leaf whose blockers aren't done yet is skipped, not blocked — it's simply reconsidered next tick, once the log line naming what it's waiting on stops applying.
 
 This is a **label**, not this repo's own GitHub Projects v2 "Priority" field (if your board has one — Urgent/High/Medium/Low, say). `spf watch` never reads or writes Projects v2: no GraphQL, no `project` token scope, no Jira equivalent. If you use both, they're independent — nothing reconciles them, and `spf watch` obeys only the label. Keep them aligned yourself, or don't use the board field for this repo's issues.
+
+### Revising a rejected (or still-open) PR (`<prefix>:feedback`)
+
+A declined PR used to be a dead end: relabeling the issue back to `ready` threw away the PR entirely and started over from `origin/<base>` with the original issue text — no memory of what was wrong, and (until this label existed) a `git push` non-fast-forward rejection against the still-live remote branch. `<prefix>:feedback` fixes both: leave your corrections as **comments on the PR itself** (not the issue), add the label, and `spf watch` reruns the same issue with that PR's comment thread folded into the prompt.
+
+```text
+review ──(you decline the PR)──→ blocked   "leave corrections as comments on PR #N,
+                                    │        then add <prefix>:feedback"
+                                    ▼
+                                 feedback ──claim──→ working ──┬─→ PR still open:   rebuild from the PR's
+                                                                │   own branch head, push, SAME PR updates
+                                                                └─→ PR closed:       fresh branch, new PR
+                                                                                      superseding the old one
+                                                                    → review
+```
+
+No decline required first: add `<prefix>:feedback` to an issue whose PR is **still open** (leave a review comment, then label it) and `spf watch` rebuilds from that PR's own branch head and pushes the fix onto the *same* PR — no new PR number, just a new commit landing on what's already under review. That's the primary path this exists for. A PR that was actually closed/declined instead gets a fresh `-rN`-suffixed branch and a new PR whose body notes it supersedes the old one, since there's no branch head left to build on top of.
+
+Corrections come from **PR comments**, not issue comments — deliberately a different channel from the refine lane's `continue-refinement` loop above, matching where a human actually reviews code. Reading them needs `CodeHostProvider.listPrComments`, implemented for both GitHub (issue comments + inline review comments + review verdicts, merged into one thread) and Bitbucket; a code host without it degrades honestly — the issue blocks again with an explanation instead of silently rebuilding with no corrections.
+
+`spf watch init` seeds `<prefix>:feedback` alongside the other state labels — **re-run it** after upgrading to this version.
 
 ### Refining specs (`watch.refine`)
 
@@ -769,7 +790,7 @@ is off.
 export GITHUB_TOKEN=...   # classic PAT; spf doctor checks it's set
 ```
 
-`spf watch init` seeds `<prefix>:ready`/`working`/`review`/`done`/`blocked`/`spec-ready`/`refining`/`refined` labels, plus `<prefix>:type:epic`/`feature`/`story`/`bug`/`task` (used by the refine lane whether or not it's enabled), each with a color and description — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
+`spf watch init` seeds every `<prefix>:<state>` label (`ready`/`working`/`review`/`done`/`blocked`/`feedback`/`spec-ready`/`refining`/`refined`/`needs-feedback`/`continue-refinement`/`spec-in-progress`/`split-proposed`/`split-approved`), plus `<prefix>:type:epic`/`feature`/`story`/`bug`/`task` (used by the refine lane whether or not it's enabled) and `<prefix>:priority:p0`-`p3`, each with a color and description — safe to re-run any time (creates what's missing, corrects any that drifted, leaves the rest alone).
 
 A **classic** PAT (fine-grained tokens use different permission names — not covered here), scoped to the minimum that covers every call `spf watch`/`spf watch init` makes on GitHub: creating/editing labels, reading and labeling issues, posting comments, opening PRs, reading PR/check-run status, and — with `watch.refine.enabled` — creating issues and linking them via the sub-issues API. All of it is already covered by `repo`/`public_repo`; refine needs no additional scope.
 
@@ -863,10 +884,12 @@ notifications:
   a blocked issue (`issue_blocked`) or a spec needing feedback
   (`spec_needs_feedback` — see "Human-in-the-loop escalation" above).
 - `all` adds every remaining milestone — run started/finished, issue
-  claimed, PR opened, issue done, a container's roll-up (`feature_done` —
-  see "Container roll-up" above), and a spec reaching actual completion
-  (`spec_done` — distinct from `spec_refined`, which fires the moment a
-  tree is published; see "Human-in-the-loop escalation" above).
+  claimed, PR opened or updated (`pr_opened`/`pr_updated` — the latter fires
+  on a `<prefix>:feedback` revision that lands on the SAME PR; see "Revising
+  a rejected (or still-open) PR" above), issue done, a container's roll-up
+  (`feature_done` — see "Container roll-up" above), and a spec reaching
+  actual completion (`spec_done` — distinct from `spec_refined`, which fires
+  the moment a tree is published; see "Human-in-the-loop escalation" above).
 
 Each tier includes everything the narrower tiers send. A channel's own
 `events` overrides the top-level scope for just that channel. `spf doctor`
@@ -978,6 +1001,8 @@ Honest edges, because knowing them is cheaper than discovering them.
 | Gates pass, output is bad | Gates check what a predicate can check, not plan quality or code taste | Run the `reviewer`, or read it yourself |
 | An agent edits something it shouldn't | Detected and rolled back after the call, and the phase fails | Expected. Widen that agent's `writes` if the change was legitimate |
 | Commit phase has nothing to commit | Throws if the cwd isn't a git repo or nothing changed | `git init` with one commit first |
+| A `<prefix>:feedback` revision's PR comment thread exceeds ~500 comments (5 pages) | `listPrComments` warns and silently caps — the oldest comments past the cap are invisible to that round's prompt | Keep the thread focused, or resolve/collapse old discussion before adding the label again |
+| `<prefix>:feedback` added to an issue with no recorded PR (never pushed, or the marker was cleared) | Blocks immediately with an explanatory comment — nothing to revise, the chain never runs | Relabel to `<prefix>:ready` for a fresh build instead |
 
 Also missing on purpose, so you know what to add: chains run on your current branch by default. For real work you want a branch or worktree per run and a merge step at the end.
 

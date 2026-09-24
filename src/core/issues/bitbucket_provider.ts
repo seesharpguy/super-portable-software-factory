@@ -17,9 +17,19 @@
  * means something different per `code_host`.
  */
 import { fetchRetryTransient } from "../utils.ts";
-import type { CodeHostProvider, PrRef, PrStatus } from "./provider.ts";
+import type { CodeHostProvider, PrComment, PrRef, PrStatus } from "./provider.ts";
 
 const API = "https://api.bitbucket.org/2.0";
+/**
+ * `listPrComments`'s pagination bound — this file's first pagination loop
+ * (`prStatus`'s own `statuses` call takes a single `pagelen=100` page and
+ * accepts truncation, since it only needs to know "is anything still
+ * failing/in-progress," not the complete list). A PR's comment thread is
+ * exactly where a truncated page would silently drop the corrections this
+ * feature exists to read, so this one walks Bitbucket's `next` cursor,
+ * capped the same defensive way GitHub's `MAX_PR_COMMENT_PAGES` is.
+ */
+const MAX_PR_COMMENT_PAGES = 5;
 
 interface BbPullRequest {
   id: number;
@@ -30,6 +40,15 @@ interface BbPullRequest {
 
 interface BbCommitStatus {
   state: "SUCCESSFUL" | "FAILED" | "INPROGRESS" | "STOPPED";
+}
+
+interface BbComment {
+  id: number;
+  content: { raw: string };
+  user: { display_name: string } | null;
+  created_on: string;
+  deleted: boolean;
+  inline?: { path: string; to: number | null; from: number | null } | null;
 }
 
 export class BitbucketProvider implements CodeHostProvider {
@@ -98,5 +117,45 @@ export class BitbucketProvider implements CodeHostProvider {
       ciStatus = "pending"; // status lookup failing shouldn't block merge/close detection
     }
     return { merged: detail.state === "MERGED", state: detail.state === "OPEN" ? "open" : "closed", ciStatus };
+  }
+
+  /**
+   * `GET /pullrequests/{id}/comments`, oldest-first (Bitbucket's own order),
+   * walking `next` up to `MAX_PR_COMMENT_PAGES` — see that constant's doc
+   * comment. Unlike GitHub, Bitbucket has no separate "reviews" surface: a
+   * general comment and an inline/diff comment come back from the same
+   * endpoint, distinguished only by whether `inline` is present, and a
+   * decline/approve verdict lives on the PR's own `participants[]` (a
+   * `prStatus()` concern, not this one) rather than on any comment — so
+   * `verdict` is always left unset here.
+   */
+  async listPrComments(pr: PrRef): Promise<PrComment[]> {
+    const results: PrComment[] = [];
+    let path: string | null = `/repositories/${this.workspace}/${this.repoSlug}/pullrequests/${pr.number}/comments?pagelen=100`;
+    for (let page = 1; path && page <= MAX_PR_COMMENT_PAGES; page++) {
+      const response: { values: BbComment[]; next?: string } = await this.bb(path);
+      for (const c of response.values) {
+        if (c.deleted) continue;
+        results.push({
+          id: String(c.id),
+          author: c.user?.display_name ?? "unknown",
+          created_at: c.created_on,
+          body: c.content.raw,
+          path: c.inline?.path,
+          line: c.inline?.to ?? c.inline?.from ?? undefined,
+        });
+      }
+      if (!response.next) return results;
+      // `next` is a full absolute URL — strip the API root back off so the
+      // next iteration goes back through `bb()`'s own base-URL prefixing.
+      path = response.next.startsWith(API) ? response.next.slice(API.length) : response.next;
+      if (page === MAX_PR_COMMENT_PAGES) {
+        console.error(
+          `spf watch: listPrComments(PR #${pr.number}) hit the ${MAX_PR_COMMENT_PAGES}-page (${MAX_PR_COMMENT_PAGES * 100}-comment) cap — ` +
+            `older comments past this cap are invisible this tick`,
+        );
+      }
+    }
+    return results;
   }
 }

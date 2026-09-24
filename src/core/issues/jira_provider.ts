@@ -92,6 +92,7 @@ const STATES: WatchState[] = [
   "review",
   "done",
   "blocked",
+  "feedback",
   "spec-ready",
   "refining",
   "refined",

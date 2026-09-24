@@ -57,13 +57,21 @@
  * last, the frontier `assets/prompts/refiner/system.md` has always promised
  * the refiner. `finishReviews` also now closes a landed leaf and rolls a
  * container up to `done` + closed once every child under it carries
- * `<prefix>:done` (`rollUp`) — still no Projects v2 mirroring, no CI-fix
- * retry loop, no auto-merge; those remain deliberately out of scope.
+ * `<prefix>:done` (`rollUp`).
+ *
+ * Also new: the BUILD lane's own human-in-the-loop loop, `<prefix>:feedback`
+ * (see `WatchState`'s doc comment in `provider.ts`) — a developer leaves
+ * corrections as comments on the PR itself (not the issue), adds the label,
+ * and `claimFeedback` reruns the SAME issue with that PR's comment thread
+ * folded into the prompt (`buildIssuePrompt`). A still-open PR gets updated
+ * in place; a declined one gets a fresh branch and a superseding PR. Still no
+ * Projects v2 mirroring, no CI-fix retry loop, no auto-merge; those remain
+ * deliberately out of scope.
  */
 import path from "node:path";
 import type { GitHandle } from "./git_helper.ts";
 import { attemptAdwId, attemptBranch, attemptWorktreePath, runBestOf, type AttemptDispatch, type AttemptMetrics } from "./fanout.ts";
-import type { CodeHostProvider, Issue, IssueComment, IssueProvider, WatchMarker, WatchState } from "./issues/provider.ts";
+import type { CodeHostProvider, Issue, IssueComment, IssueProvider, PrComment, PrRef, WatchMarker, WatchState } from "./issues/provider.ts";
 import type { NotifyEvent } from "./notify/channel.ts";
 import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
 import { redact } from "./otel.ts";
@@ -328,11 +336,26 @@ function slugifyTitle(title: string): string {
   );
 }
 
-export function branchNameFor(issue: Issue): string {
+/**
+ * `round` (default 0, no suffix) exists for exactly one reason: a branch
+ * name is otherwise fully deterministic from `issue.id`, and re-pushing the
+ * SAME name after a previous push already put commits on that name at
+ * origin is a guaranteed `git push` non-fast-forward rejection — the local
+ * worktree/branch gets recreated from `origin/<base>` on every claim
+ * (`cleanupWorktree` + a fresh `worktreeAdd`), but the remote ref isn't
+ * touched, so it still holds the earlier attempt's history. `round > 0`
+ * (`runIssueSingle`, on a re-claim whose marker already recorded a `pr`, or
+ * a `feedback`-lane revision against a declined PR) picks a fresh name
+ * instead. The un-suffixed portion is slice()'d down so the total still fits
+ * git's practical ref-length comfort zone even at `round`'s realistic range.
+ */
+export function branchNameFor(issue: Issue, round = 0): string {
   // The issue's own id in the branch name isn't just labeling: Jira's
   // Bitbucket integration auto-links a PR to the issue when its key
   // appears anywhere in the branch name, no explicit API call needed.
-  return `spf-watch/${issue.id}-${slugifyTitle(issue.title)}`.slice(0, 200);
+  const base = `spf-watch/${issue.id}-${slugifyTitle(issue.title)}`;
+  const suffix = round > 0 ? `-r${round}` : "";
+  return `${base.slice(0, 200 - suffix.length)}${suffix}`;
 }
 
 /** Same idea as `branchNameFor`, for the refine lane's throwaway worktree — a spec never gets a PR, so this branch is only ever fetched-from-and-thrown-away, never pushed. */
@@ -604,6 +627,63 @@ export function buildSpecPrompt(issue: Issue, comments: IssueComment[], feedback
   if (parts.length === 0) return header;
 
   return `${header}\n\n## Discussion on the spec issue\n\n${parts.join("\n\n")}`;
+}
+
+/**
+ * The build lane's own `${title}\n\nbody` prompt — `buildSpecPrompt`'s twin,
+ * same truncation rule (`MAX_THREAD_CHARS`, oldest-first, an explicit
+ * omitted-count line) but folding in PR comments instead of issue comments.
+ * With no `prComments` (a plain `ready` claim never has any) this returns
+ * exactly what the bare `${title}\n\nbody` prompt always was — byte-
+ * identical, matching this codebase's own convention for an additive prompt
+ * change (see `buildSpecPrompt`'s "byte-identical to before this feature
+ * existed" test).
+ *
+ * `revision` is the marker's PRIOR `revision` field (before this round's own
+ * write) — same pattern as `buildSpecPrompt`'s `feedback` parameter: it's
+ * read, not yet updated, so `revision.since` still names the watermark from
+ * the LAST push, which is exactly the line that separates "corrections on
+ * the current PR" from "earlier review discussion." `revision.since` means
+ * "when we last pushed," not "when we last asked a question" — see
+ * `WatchMarker.revision`'s own doc comment for why that's the right
+ * semantics here specifically (a developer who comments and declines BEFORE
+ * spf ever posts anything still has that comment correctly classified as a
+ * correction, since there's no invite to time against, only the last push).
+ */
+export function buildIssuePrompt(issue: Issue, prComments?: PrComment[], revision?: WatchMarker["revision"]): string {
+  const header = `${issue.title}\n\n${issue.body}`.trim();
+  if (!prComments || prComments.length === 0) return header;
+
+  const renderOne = (c: PrComment): string => {
+    const anchor = c.path ? ` on \`${c.path}${c.line ? `:${c.line}` : ""}\`` : "";
+    const verdict = c.verdict ? ` — ${c.verdict}` : "";
+    return `**@${c.author}** (${c.created_at})${anchor}${verdict}:\n${c.body.trim()}`;
+  };
+  const render = (list: PrComment[]): string => list.map(renderOne).join("\n\n");
+
+  let kept = prComments;
+  let dropped = 0;
+  while (render(kept).length > MAX_THREAD_CHARS && kept.length > 1) {
+    kept = kept.slice(1);
+    dropped++;
+  }
+
+  const sinceAt = revision?.since ? Date.parse(revision.since) : null;
+  // No watermark at all (a revision claim against a marker predating this
+  // feature, or against a PR that never went through `openPrForWinner`'s own
+  // stamp) means every comment is a correction — there's no earlier state to
+  // separate it from.
+  const corrections = sinceAt !== null ? kept.filter((c) => Date.parse(c.created_at) >= sinceAt) : kept;
+  const earlier = sinceAt !== null ? kept.filter((c) => Date.parse(c.created_at) < sinceAt) : [];
+  const round = (revision?.rounds ?? 0) + 1;
+
+  const parts: string[] = [];
+  if (dropped > 0) parts.push(`_... ${dropped} earlier comment(s) omitted for length._`);
+  if (corrections.length > 0) parts.push(`### Corrections to address (round ${round})\n\n${render(corrections)}`);
+  if (earlier.length > 0) parts.push(`### Earlier review discussion\n\n${render(earlier)}`);
+  if (parts.length === 0) return header;
+
+  return `${header}\n\n## PR review comments\n\n${parts.join("\n\n")}`;
 }
 
 /**
@@ -960,15 +1040,27 @@ export async function finishReviews(deps: WatchDeps): Promise<void> {
       }
     } else if (status.state === "closed") {
       deps.log(`watch: ${issue.id}'s PR #${marker.pr} closed without merging — blocked`);
+      // The invite the `feedback` revision loop's whole entry point depends
+      // on — see `WatchState`'s `feedback` doc comment. Folded into
+      // `transition()`'s own `detail` comment (one comment, not two) AND
+      // the notify's `detail`, so both the tracker thread and any
+      // Slack/Teams channel say the same actionable thing.
+      const detail =
+        `PR #${marker.pr} was closed without merging. Leave your corrections as comments on PR #${marker.pr}, ` +
+        `then add the \`${deps.labelPrefix}:feedback\` label to this issue — spf will rebuild honoring them.`;
       deps.notify({
         kind: "issue_blocked",
         level: "notice",
         title: `issue ${issue.id} blocked`,
-        detail: `PR #${marker.pr} was closed without merging.`,
+        detail,
         fields: [["issue", issue.id], ["title", issue.title], ["pr", `#${marker.pr}`]],
       });
       if (!deps.dryRun) {
-        await deps.provider.transition(issue, "blocked", `PR #${marker.pr} was closed without merging.`);
+        // `marker.pr` (and `marker.revision`) are left untouched here —
+        // `writeMarker` is never called on this path — so a later
+        // `feedback` claim (`claimFeedback`/`runIssueSingle`) still has the
+        // closed PR's number to read corrections from and supersede.
+        await deps.provider.transition(issue, "blocked", detail);
         cleanupWorktree(deps, marker);
       }
     }
@@ -1014,6 +1106,18 @@ async function openPrForWinner(
     reviewRequired?: boolean;
     reviewSummary?: string;
     extraNotifyFields?: Array<[string, string]>;
+    /** Set on a `feedback`-lane revision that found its PR still open — update THIS pr in place (comment + push, no `openPr` call) instead of opening a new one. */
+    existingPr?: number;
+    /** Set on a `feedback`-lane revision whose PR was closed/declined — the new PR's body notes it supersedes this one. */
+    supersedesPr?: number;
+    /**
+     * How many times this issue has been pushed before THIS push — 0 for a
+     * genuinely first-ever push. Stamped verbatim into
+     * `WatchMarker.revision.rounds`; also what the caller used to pick this
+     * push's branch name when a new one was needed (`branchNameFor(issue,
+     * revisionRound)`) — see `runIssueSingle`.
+     */
+    revisionRound?: number;
   },
 ): Promise<void> {
   const wtGit = deps.worktreeGit(won.worktreePath);
@@ -1051,28 +1155,45 @@ async function openPrForWinner(
   const issueBody = issue.body.trim();
   const askSection =
     issueBody.length > MAX_ISSUE_BODY_CHARS ? `${issueBody.slice(0, MAX_ISSUE_BODY_CHARS)}\n\n_(truncated)_` : issueBody || "_(no description on the issue)_";
-  // No cross-linking magic keyword here on purpose (a code host paired
-  // with a different tracker has no "Closes #n" convention to hook into
-  // — see provider.ts) — the issue id in the title/body is plain text
-  // for humans, and, on a Jira+Bitbucket pairing, exactly what Jira's own
-  // Bitbucket integration scans for to link the PR automatically.
-  const pr = await deps.codeHost.openPr({
+  let pr: PrRef;
+  if (won.existingPr) {
+    // Revision-in-place: the PR itself already exists and is already open —
+    // just tell the human what landed. No `openPr` call, no new PR number.
+    pr = { number: won.existingPr, branch: won.branch, url: "" };
+    await deps.provider.comment(issue, `spf watch pushed a revision addressing the comments above.\n\n**Review:** ${reviewLine}`);
+  } else {
+    const supersedeNote = won.supersedesPr
+      ? `\n\n_Supersedes PR #${won.supersedesPr}, which was closed without merging — see that PR for the review comments this one addresses._`
+      : "";
+    // No cross-linking magic keyword here on purpose (a code host paired
+    // with a different tracker has no "Closes #n" convention to hook into
+    // — see provider.ts) — the issue id in the title/body is plain text
+    // for humans, and, on a Jira+Bitbucket pairing, exactly what Jira's own
+    // Bitbucket integration scans for to link the PR automatically.
+    pr = await deps.codeHost.openPr({
+      branch: won.branch,
+      title: `${issue.title} (${issue.id})`,
+      body: `${askSection}\n\n---\n\n**Review:** ${reviewLine}${supersedeNote}\n\n_Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}._`,
+      base: deps.baseBranch,
+    });
+  }
+  await deps.provider.writeMarker(issue, {
+    worktree: won.worktreePath,
     branch: won.branch,
-    title: `${issue.title} (${issue.id})`,
-    body: `${askSection}\n\n---\n\n**Review:** ${reviewLine}\n\n_Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}._`,
-    base: deps.baseBranch,
+    pr: pr.number,
+    attempt: 0,
+    revision: { rounds: won.revisionRound ?? 0, since: new Date().toISOString() },
   });
-  await deps.provider.writeMarker(issue, { worktree: won.worktreePath, branch: won.branch, pr: pr.number, attempt: 0 });
   await deps.provider.transition(issue, "review");
-  deps.log(`watch: ${issue.id}: opened PR #${pr.number} — review`);
+  deps.log(`watch: ${issue.id}: ${won.existingPr ? `pushed a revision to PR #${pr.number}` : `opened PR #${pr.number}`} — review`);
   deps.notify({
-    kind: "pr_opened",
-    // Unlike `issue_claimed`/`issue_done` (routine milestones), an opened PR
-    // is a standing ask for a human reviewer — the same "needs a human, not
-    // a failure" bucket as `issue_blocked`, so it ships to an
-    // `attention`-scoped channel, not just `all`.
+    // Unlike `issue_claimed`/`issue_done` (routine milestones), an
+    // opened/updated PR is a standing ask for a human reviewer — the same
+    // "needs a human, not a failure" bucket as `issue_blocked`, so it ships
+    // to an `attention`-scoped channel, not just `all`.
+    kind: won.existingPr ? "pr_updated" : "pr_opened",
     level: "notice",
-    title: `PR #${pr.number} opened`,
+    title: won.existingPr ? `PR #${pr.number} updated` : `PR #${pr.number} opened`,
     detail: reviewLine,
     fields: [
       ["issue", issue.id],
@@ -1321,34 +1442,124 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
 }
 
 /**
- * Today's single-dispatch path — `runIssue`'s entire body before fan-out
- * existed, moved intact with its post-win tail extracted into
- * `openPrForWinner` above: same statements, same order, same values. This is
- * what makes `watch.fanout.n: 1` (the default) a no-op for the running
- * daemon: same adw_id, same worktree, same fetch semantics, same marker,
- * same PR, same notifications as before this feature existed.
+ * The single-dispatch path — `runIssue`'s entire body before fan-out
+ * existed, its post-win tail extracted into `openPrForWinner` above, and now
+ * also the build lane's `feedback` revision loop's own run. `watch.fanout.n:
+ * 1` (the default) on a PLAIN claim is still a no-op for the running daemon:
+ * same adw_id, same worktree, same fetch semantics, same marker, same PR,
+ * same notifications as before either feature existed — see the branch/round
+ * computation below for the one addition that touches every claim.
+ *
+ * `opts.revision` is set only by `claimFeedback` (a `<prefix>:feedback`
+ * claim — see `WatchState`'s own doc comment). Everything gated on it reads
+ * the PR's comment thread, checks whether the PR is still open, and either
+ * updates that PR in place or opens a fresh one superseding it; a plain
+ * `ready` claim touches none of that. Fan-out is deliberately NOT extended to
+ * a revision — see `claimFeedback`'s own doc comment for why it always calls
+ * this function directly rather than `runIssue`.
  */
-async function runIssueSingle(deps: WatchDeps, issue: Issue): Promise<void> {
-  const branch = branchNameFor(issue);
+async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: boolean } = {}): Promise<void> {
+  const revision = opts.revision ?? false;
   const worktreePath = worktreePathFor(deps, issue);
   const adwId = `issue-${issue.id}`;
+  // Provisional — reassigned below once `priorMarker` is read. A safe
+  // fallback for the catch block if something throws before that point, when
+  // nothing has been created on disk yet anyway.
+  let branch = branchNameFor(issue);
   try {
-    // Both worktreePath and branch are fully deterministic from issue.id —
-    // the only way either could already exist is a previous spf watch
-    // attempt for THIS issue that never reached its own cleanup (killed
-    // mid-run, crashed, machine restart). `git worktree add -b` refuses
-    // outright if the branch already exists ("fatal: a branch named '...'
-    // already exists"), which without this would permanently block the
-    // issue from ever being claimed again — it'd fail this same way on
-    // every single retry. Safe to clear unconditionally: worktreeRemove/
-    // deleteLocalBranch are both no-ops if there's nothing to remove.
-    cleanupWorktree(deps, { worktree: worktreePath, branch });
-    deps.git.fetch("origin", deps.baseBranch);
-    deps.git.worktreeAdd(worktreePath, branch, `origin/${deps.baseBranch}`);
-    deps.linkDataDir(worktreePath);
-    await deps.provider.writeMarker(issue, { worktree: worktreePath, branch, attempt: 0 });
+    const priorMarker = await deps.provider.readMarker(issue);
+    const priorRound = priorMarker?.revision?.rounds ?? 0;
+    // Carried forward into every claim-time marker write below, whichever
+    // branch runs — round-tracking survives a claim regardless of outcome,
+    // the same way `WatchMarker.attempt` survives across `reconcileOrphans`'
+    // own retry writes.
+    const revisionCarry = priorMarker?.revision;
 
-    const prompt = `${issue.title}\n\n${issue.body}`.trim();
+    let startPoint: string;
+    let diffBase: string;
+    let prompt: string;
+    let prCarry: number | undefined;
+    let openPrOpts: { existingPr?: number; supersedesPr?: number; revisionRound?: number } = {};
+
+    if (revision) {
+      if (!priorMarker?.pr) {
+        const detail = `\`${deps.labelPrefix}:feedback\` was added, but this issue has no recorded PR to read corrections from — nothing to revise.`;
+        deps.log(`watch: ${issue.id}: ${detail}`);
+        await deps.provider.transition(issue, "blocked", detail);
+        return;
+      }
+      if (!deps.codeHost.listPrComments) {
+        const detail = `\`${deps.labelPrefix}:feedback\` was added, but this code host can't list PR comments — nothing to read corrections from.`;
+        deps.log(`watch: ${issue.id}: ${detail}`);
+        await deps.provider.transition(issue, "blocked", detail);
+        return;
+      }
+      const prRef: PrRef = { number: priorMarker.pr, branch: priorMarker.branch ?? "", url: "" };
+      const [status, prComments] = await Promise.all([deps.codeHost.prStatus(prRef), deps.codeHost.listPrComments(prRef)]);
+      prompt = buildIssuePrompt(issue, prComments, priorMarker.revision);
+      const revisionRound = priorRound + 1;
+
+      if (status.state === "open") {
+        // Update the SAME PR in place: rebuild from the PR's own branch head
+        // (not origin/base), so the fix lands as a new commit on top of
+        // what's already under review — the primary ask this feature exists
+        // for ("leave a comment on the open PR, then add the label").
+        branch = priorMarker.branch ?? branchNameFor(issue, priorRound);
+        deps.git.fetch("origin", branch);
+        startPoint = `origin/${branch}`;
+        diffBase = `origin/${branch}`;
+        prCarry = priorMarker.pr;
+        openPrOpts = { existingPr: priorMarker.pr, revisionRound };
+      } else {
+        // Declined/closed: no branch head left to build on top of — fresh
+        // branch off current base, a new PR that supersedes the old one.
+        branch = branchNameFor(issue, revisionRound);
+        deps.git.fetch("origin", deps.baseBranch);
+        startPoint = `origin/${deps.baseBranch}`;
+        diffBase = `origin/${deps.baseBranch}`;
+        prCarry = undefined;
+        openPrOpts = { supersedesPr: priorMarker.pr, revisionRound };
+      }
+    } else {
+      // Plain `ready` claim. `priorRound` is 0 on a fresh issue's first-ever
+      // claim, so this is byte-identical to before either feature existed.
+      // On a `blocked -> ready` relabel of an issue that already pushed once
+      // (`priorMarker.pr` set), it picks up the next round's suffix instead
+      // of colliding with that push's still-live commits on origin — see
+      // `branchNameFor`'s own doc comment for the non-fast-forward rejection
+      // this specifically fixes.
+      const plainRound = priorMarker?.pr ? priorRound + 1 : 0;
+      branch = branchNameFor(issue, plainRound);
+      deps.git.fetch("origin", deps.baseBranch);
+      startPoint = `origin/${deps.baseBranch}`;
+      diffBase = `origin/${deps.baseBranch}`;
+      prompt = buildIssuePrompt(issue);
+      prCarry = undefined;
+      openPrOpts = { revisionRound: plainRound };
+    }
+
+    // worktreePath/branch are fully deterministic given the round just
+    // chosen above — the only way either could already exist is a previous
+    // spf watch attempt for THIS issue/round that never reached its own
+    // cleanup (killed mid-run, crashed, machine restart). `git worktree add
+    // -b` refuses outright if the branch already exists, which without this
+    // would permanently block the issue from ever being claimed again — it'd
+    // fail this same way on every single retry. Safe to clear
+    // unconditionally: worktreeRemove/deleteLocalBranch are both no-ops if
+    // there's nothing to remove.
+    cleanupWorktree(deps, { worktree: worktreePath, branch });
+    deps.git.worktreeAdd(worktreePath, branch, startPoint);
+    deps.linkDataDir(worktreePath);
+    // `pr`/`revision` dropped on every path EXCEPT an in-place revision
+    // against a still-open PR: keeping `pr` there gives `reconcileOrphans` an
+    // honest resume signal if this run crashes mid-flight (the PR really is
+    // still open, unchanged); dropping it everywhere else matches
+    // `runIssueFanout`'s own claim-time write (see its doc comment) — a
+    // stale `pr` surviving into a fresh attempt's marker would let a daemon
+    // restart resume straight to `review` off a PR this NEW attempt hasn't
+    // touched yet.
+    await deps.provider.writeMarker(issue, { pr: prCarry, revision: revisionCarry, worktree: worktreePath, branch, attempt: 0 });
+
     const result = await deps.runChain({ prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions });
 
     if (!result.accepted) {
@@ -1370,9 +1581,10 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue): Promise<void> {
       branch,
       worktreePath,
       adwId,
-      diffBase: `origin/${deps.baseBranch}`,
+      diffBase,
       reviewRequired: result.reviewRequired,
       reviewSummary: result.reviewSummary,
+      ...openPrOpts,
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -1739,6 +1951,73 @@ export async function claimSpecs(deps: WatchDeps, state: WatchRunState, from: Wa
   }
 }
 
+/**
+ * Claim as many `<prefix>:feedback` issues as `deps.concurrency` allows — the
+ * SAME budget/`state.inflight` set `claimNewWork` spends against, not a
+ * separate one the way the refine lane's `refining` is: a revision is build
+ * lane work, competing for the exact same worktree/chain capacity a fresh
+ * `ready` claim would, not a distinct kind of work with its own ceiling.
+ *
+ * Deliberately does NOT reuse `claimNewWork`'s own walk. That function's
+ * `orderEligible`/`frontierBlockedOn` are ADMISSION CONTROL for work that has
+ * never run — priority, sibling affinity, a `blocked_by` frontier gate. A
+ * `feedback` issue is already-admitted work resuming; re-running the
+ * frontier gate could wedge a revision behind a blocker that only regressed
+ * AFTER the issue's original claim, which no human asking for a revision
+ * would expect. Mirrors `claimSpecs`'s own shape instead — a plain
+ * `listInState` walk, no ordering beyond the tracker's own.
+ *
+ * Same known, deliberate wart `claimSpecs` documents for `continue-
+ * refinement`: `claim()` only strips `from`'s label, so while this is in
+ * flight the issue briefly still carries whatever OTHER state label it had
+ * (`blocked`, or even `review` — a human can add `feedback` to a still-open
+ * PR's issue without ever declining it first) alongside the now-claimed
+ * `working`. Nothing polls those on their own, and `runIssueSingle`'s own
+ * terminating `transition()` (to `review` again, or `blocked`) strips every
+ * state label from the fresh snapshot it reads at that point, so this
+ * self-heals on the very next transition rather than needing a second
+ * mutator alongside `transition()`.
+ */
+export async function claimFeedback(deps: WatchDeps, state: WatchRunState): Promise<void> {
+  if (state.inflight.size >= deps.concurrency) return;
+  const eligible = await deps.provider.listInState("feedback");
+  for (const issue of eligible) {
+    if (state.inflight.size >= deps.concurrency) break;
+    if (state.inflight.has(issue.id)) continue;
+    if (deps.dryRun) {
+      deps.log(`watch: [dry-run] would claim ${issue.id} (${issue.title}) for a revision`);
+      continue;
+    }
+    // Same local-exclusivity gate as claimNewWork/claimSpecs — keyed to
+    // match runIssueSingle's own adwId (`issue-<id>`) so it covers the SAME
+    // deterministic worktree a plain claim of this issue would.
+    const lockPath = issueLockPath(deps, `issue-${issue.id}`);
+    const lock = acquirePidLock(lockPath);
+    if (!lock.ok) {
+      deps.log(`watch: ${issue.id} is locked by another live \`spf watch\` process (pid ${lock.holderPid}) — skipping`);
+      continue;
+    }
+    const claimed = await deps.provider.claim(issue, { from: "feedback", to: "working" });
+    if (!claimed) {
+      deps.log(`watch: ${issue.id} lost the claim race this tick — skipping`);
+      releasePidLock(lockPath);
+      continue;
+    }
+    deps.log(`watch: claimed ${issue.id} for a revision: ${issue.title}`);
+    deps.notify({
+      kind: "issue_claimed",
+      level: "info",
+      title: `issue ${issue.id} claimed for revision`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
+    });
+    state.inflight.add(issue.id);
+    runIssueSingle(deps, issue, { revision: true }).finally(() => {
+      state.inflight.delete(issue.id);
+      releasePidLock(lockPath);
+    });
+  }
+}
+
 function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => void {
   return (error: unknown) => {
     // undici (and the tracker/code-host clients built on `fetch`) collapse
@@ -1759,12 +2038,16 @@ function tickErrorHandler(deps: WatchDeps, stage: string): (error: unknown) => v
 }
 
 /**
- * One poll tick: reconcile both lanes, finish reviews, then claim both
- * lanes — each stage independently caught, so one stage's error never blocks
+ * One poll tick: reconcile both lanes, finish reviews, then claim every
+ * lane — each stage independently caught, so one stage's error never blocks
  * the rest. `claimSpecs` runs twice: resumed specs (`continue-refinement`,
  * a human who already answered and is waiting) before fresh ones
  * (`spec-ready`) — both share `state.refining`'s budget, so
  * `refine.concurrency` still caps the lane as a whole either way.
+ * `claimFeedback` runs before `claimNewWork`, same reasoning: a human
+ * already waiting on a revision beats a fresh issue for `concurrency`'s
+ * shared budget (`state.inflight`) — see `claimFeedback`'s own doc comment
+ * for why it does NOT get a separate budget the way the refine lane does.
  */
 export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void> {
   await reconcileOrphans(deps, state).catch(tickErrorHandler(deps, "reconcileOrphans"));
@@ -1783,5 +2066,6 @@ export async function tick(deps: WatchDeps, state: WatchRunState): Promise<void>
   await executeApprovedSplits(deps).catch(tickErrorHandler(deps, "executeApprovedSplits"));
   await claimSpecs(deps, state, "continue-refinement").catch(tickErrorHandler(deps, "claimSpecs(resume)"));
   await claimSpecs(deps, state).catch(tickErrorHandler(deps, "claimSpecs"));
+  await claimFeedback(deps, state).catch(tickErrorHandler(deps, "claimFeedback"));
   await claimNewWork(deps, state).catch(tickErrorHandler(deps, "claimNewWork"));
 }

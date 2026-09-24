@@ -23,6 +23,7 @@ export type NotifyKind =
   | "watch_error"
   | "issue_claimed"
   | "pr_opened"
+  | "pr_updated"
   | "issue_done"
   | "issue_blocked"
   | "spec_refined"

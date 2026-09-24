@@ -118,3 +118,42 @@ record independent of the commit log.
 
 Not part of this change (explicit owner decision): no Briefs-specific model
 provider, and no `BRIEFS_*` env var — this was OTel-extension work only.
+
+### Added — watch: `<prefix>:feedback` revision loop for the build lane
+
+- **`core/issues/provider.ts`**: a new `WatchState` value, `feedback` — the
+  build lane's own human-in-the-loop label, modeled on the refine lane's
+  `needs-feedback`/`continue-refinement` pair but sourcing corrections from
+  **PR comments**, not issue comments. A new optional
+  `CodeHostProvider.listPrComments(pr)` seam (`PrComment[]`, oldest-first),
+  implemented for both `github_provider.ts` (merging issue comments, inline
+  review comments, and review verdicts into one thread, paginated up to 500
+  comments) and `bitbucket_provider.ts` (its first paginated endpoint). A new
+  `WatchMarker.revision` field (`{rounds, since}`) tracks how many times an
+  issue has been pushed and when, both for prompt-splitting and for the
+  branch-naming fix below.
+- **`core/watch.ts`**: `claimFeedback` (new) claims `feedback -> working` and
+  reruns the issue via `runIssueSingle(deps, issue, {revision: true})`. If
+  the recorded PR is still open, it rebuilds from that PR's own branch head
+  and pushes onto it in place — same PR, a new commit, no new PR number. If
+  the PR was closed/declined, it opens a fresh `-rN`-suffixed branch and a
+  new PR whose body notes it supersedes the old one. `buildIssuePrompt` (new,
+  exported, pure) folds the PR's comment thread into the prompt, splitting
+  "corrections to address" from "earlier review discussion" on
+  `WatchMarker.revision.since` — the same truncation/omission-count rule as
+  the refine lane's `buildSpecPrompt`. Wired into `tick()` right before
+  `claimNewWork`, sharing the build lane's own `concurrency` budget rather
+  than a separate one.
+- **Fixes a live bug**: relabeling a `blocked` issue (a declined PR) back to
+  `ready` used to always rebuild on the SAME un-suffixed branch name, which
+  the remote still held commits under from the earlier push — a guaranteed
+  `git push -u` non-fast-forward rejection. `branchNameFor(issue, round)`
+  now suffixes `-rN` whenever `runIssueSingle` sees a prior push recorded in
+  the marker, whether or not the reclaim goes through `feedback`.
+- **`core/notify/channel.ts`**: a new `NotifyKind`, `pr_updated`, fired at
+  `notice` level (the same `attention`-scope bucket as `pr_opened`) when a
+  revision lands on an existing PR instead of opening a new one.
+- Labels: `feedback` added to both providers' `STATES` (seeded by
+  `spf watch init` — re-run it after upgrading). Deliberately NOT added to
+  `JiraStatusMapSchema`/`GithubStatusMapSchema` — same reasoning as
+  `needs-feedback`: board-visible states only.

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import {
   branchNameFor,
+  buildIssuePrompt,
   buildSpecPrompt,
+  claimFeedback,
   claimNewWork,
   claimSpecs,
   createWatchState,
@@ -27,6 +29,7 @@ import type {
   Issue,
   IssueComment,
   IssueProvider,
+  PrComment,
   PrRef,
   PrStatus,
   WatchMarker,
@@ -58,9 +61,24 @@ interface FakeEntry {
 
 /** Every `<prefix>:<state>` label `transition()`/`claim()` strip before adding one — mirrors `github_provider.ts`'s own `STATES` (not exported, so duplicated here; a self-contained test fixture already hardcodes the "spf" prefix throughout this file). */
 const FAKE_STATE_LABELS = new Set(
-  (["ready", "working", "review", "done", "blocked", "spec-ready", "refining", "refined", "needs-feedback", "continue-refinement"] as const).map(
-    (s) => `spf:${s}`,
-  ),
+  (
+    [
+      "ready",
+      "working",
+      "review",
+      "done",
+      "blocked",
+      "feedback",
+      "spec-ready",
+      "refining",
+      "refined",
+      "needs-feedback",
+      "continue-refinement",
+      "spec-in-progress",
+      "split-proposed",
+      "split-approved",
+    ] as const
+  ).map((s) => `spf:${s}`),
 );
 
 /** In-memory fake — exactly the seam `provider.ts` exists for. */
@@ -167,10 +185,17 @@ class FakeProvider implements IssueProvider {
   }
 }
 
-/** In-memory fake `CodeHostProvider` — separate from `FakeProvider`, mirroring the real split. */
+/**
+ * In-memory fake `CodeHostProvider` — separate from `FakeProvider`, mirroring
+ * the real split. Implements the OPTIONAL `listPrComments` by default (most
+ * tests want it present); a test asserting the "host can't list PR comments"
+ * degrade builds its own bare object literal instead of this class — see
+ * the `feedback` revision tests below.
+ */
 class FakeCodeHost implements CodeHostProvider {
   prs = new Map<number, PrStatus>();
   openedPrs: Array<{ title: string; branch: string; body: string }> = [];
+  prComments = new Map<number, PrComment[]>();
   nextPrNumber = 1000;
 
   async openPr(opts: { branch: string; title: string; body: string }): Promise<PrRef> {
@@ -181,6 +206,9 @@ class FakeCodeHost implements CodeHostProvider {
   }
   async prStatus(pr: PrRef): Promise<PrStatus> {
     return this.prs.get(pr.number) ?? { merged: false, state: "open", ciStatus: "pending" };
+  }
+  async listPrComments(pr: PrRef): Promise<PrComment[]> {
+    return this.prComments.get(pr.number) ?? [];
   }
 }
 
@@ -210,7 +238,7 @@ function fakeGit(overrides: Partial<GitHandle> = {}): GitHandle {
   };
 }
 
-function makeDeps(provider: FakeProvider, codeHost: FakeCodeHost, overrides: Partial<WatchDeps> = {}): WatchDeps {
+function makeDeps(provider: FakeProvider, codeHost: CodeHostProvider, overrides: Partial<WatchDeps> = {}): WatchDeps {
   return {
     provider,
     codeHost,
@@ -900,6 +928,195 @@ test("claimNewWork: a chain with no reviewer step says nothing reviewed this cha
   assert.deepEqual(prOpened.fields.find(([k]) => k === "review"), ["review", "not reviewed"]);
 });
 
+// ── branchNameFor's round suffix ────────────────────────────────────────
+
+test("branchNameFor: round 0 (default) is byte-identical to before the feedback lane existed", () => {
+  assert.equal(branchNameFor({ id: "42", title: "Add a /health endpoint!!", body: "", labels: [] }, 0), "spf-watch/42-add-a-health-endpoint");
+});
+
+test("branchNameFor: round > 0 appends an -rN suffix, without exceeding the un-suffixed name's own length budget", () => {
+  const issue = { id: "42", title: "Add a /health endpoint!!", body: "", labels: [] };
+  assert.equal(branchNameFor(issue, 1), "spf-watch/42-add-a-health-endpoint-r1");
+  assert.equal(branchNameFor(issue, 2), "spf-watch/42-add-a-health-endpoint-r2");
+});
+
+// ── the feedback revision loop ──────────────────────────────────────────
+
+function prComment(author: string, created_at: string, body: string, extra: Partial<PrComment> = {}): PrComment {
+  return { id: `${author}-${created_at}`, author, created_at, body, ...extra };
+}
+
+test("claimFeedback: an open PR gets rebuilt from its own branch head and updated in place — no new PR, corrections folded into the prompt", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("70", "Add auth", "feedback", { pr: 900, branch: "spf-watch/70-add-auth", attempt: 0 });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(900, { merged: false, state: "open", ciStatus: "pending" });
+  codeHost.prComments.set(900, [prComment("alice", "2020-01-02T00:00:00.000Z", "Please add a test for the 401 case.")]);
+  const state = createWatchState();
+  const fetchCalls: string[] = [];
+  const worktreeAddCalls: Array<{ path: string; branch: string; startPoint: string }> = [];
+  let seenPrompt = "";
+  const deps = makeDeps(provider, codeHost, {
+    git: fakeGit({
+      fetch: (remote, ref) => fetchCalls.push(`${remote}/${ref}`),
+      worktreeAdd: (path, branch, startPoint) => worktreeAddCalls.push({ path, branch, startPoint }),
+    }),
+    runChain: async (opts) => {
+      seenPrompt = opts.prompt;
+      return { accepted: true, adwId: opts.adwId, detail: "" };
+    },
+  });
+
+  await claimFeedback(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.equal(codeHost.openedPrs.length, 0, "must not open a second PR");
+  assert.deepEqual(fetchCalls, ["origin/spf-watch/70-add-auth"], "fetches the PR's OWN branch, not origin/base");
+  assert.deepEqual(worktreeAddCalls, [
+    { path: path.join(deps.worktreesDir, "issue-70"), branch: "spf-watch/70-add-auth", startPoint: "origin/spf-watch/70-add-auth" },
+  ]);
+  assert.match(seenPrompt, /Corrections to address \(round 1\)/);
+  assert.match(seenPrompt, /Please add a test for the 401 case\./);
+  assert.equal(provider.entries.get("70")!.marker?.pr, 900, "same PR number — never replaced");
+  assert.equal(provider.entries.get("70")!.marker?.revision?.rounds, 1);
+  assert.equal(provider.entries.get("70")!.state, "review");
+  // The summary comment lands on the ISSUE (not a new PR body) — the PR
+  // itself already exists and is already open.
+  assert.match(provider.entries.get("70")!.comments.at(-1)!.body, /pushed a revision/);
+});
+
+test("claimFeedback: a closed/declined PR gets a fresh -rN branch and a new PR that supersedes the old one", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("71", "Add auth", "feedback", { pr: 901, branch: "spf-watch/71-add-auth" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(901, { merged: false, state: "closed", ciStatus: "failure" });
+  codeHost.prComments.set(901, [prComment("bob", "2020-01-02T00:00:00.000Z", "Wrong approach — use middleware instead.")]);
+  const state = createWatchState();
+  const fetchCalls: string[] = [];
+  const deps = makeDeps(provider, codeHost, {
+    git: fakeGit({ fetch: (remote, ref) => fetchCalls.push(`${remote}/${ref}`) }),
+  });
+
+  await claimFeedback(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(fetchCalls, ["origin/main"], "no branch head to build on — fetches the base instead");
+  assert.equal(codeHost.openedPrs.length, 1);
+  assert.equal(codeHost.openedPrs[0]!.branch, "spf-watch/71-add-auth-r1");
+  assert.match(codeHost.openedPrs[0]!.body, /Supersedes PR #901/);
+  assert.equal(provider.entries.get("71")!.marker?.pr, 1000, "a genuinely new PR number");
+  assert.equal(provider.entries.get("71")!.marker?.revision?.rounds, 1);
+  assert.equal(provider.entries.get("71")!.state, "review");
+});
+
+test("claimFeedback: no recorded PR blocks immediately — nothing to revise, the chain never runs", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("72", "Never pushed", "feedback", null);
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  let ranChain = false;
+  const deps = makeDeps(provider, codeHost, {
+    runChain: async () => {
+      ranChain = true;
+      return { accepted: true, adwId: "x", detail: "" };
+    },
+  });
+
+  await claimFeedback(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.equal(ranChain, false);
+  assert.equal(provider.transitions[0]?.to, "blocked");
+  assert.match(provider.transitions[0]?.detail ?? "", /no recorded PR/);
+});
+
+test("claimFeedback: a code host that can't list PR comments blocks with an explanation instead of running with no corrections", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("73", "Add auth", "feedback", { pr: 902, branch: "spf-watch/73-add-auth" });
+  // A bare object literal, deliberately with no `listPrComments` — the
+  // OPTIONAL-method degrade this test exists to cover (see
+  // `CodeHostProvider.listPrComments`'s own doc comment).
+  const codeHost: CodeHostProvider = {
+    openPr: async () => {
+      throw new Error("must not be called");
+    },
+    prStatus: async () => ({ merged: false, state: "open", ciStatus: "pending" }),
+  };
+  const state = createWatchState();
+  let ranChain = false;
+  const deps = makeDeps(provider, codeHost, {
+    runChain: async () => {
+      ranChain = true;
+      return { accepted: true, adwId: "x", detail: "" };
+    },
+  });
+
+  await claimFeedback(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.equal(ranChain, false);
+  assert.equal(provider.transitions[0]?.to, "blocked");
+  assert.match(provider.transitions[0]?.detail ?? "", /can't list PR comments/);
+});
+
+test("claimFeedback: dry-run claims nothing and calls neither claim() nor runChain", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("74", "Add auth", "feedback", { pr: 903, branch: "spf-watch/74-add-auth" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(903, { merged: false, state: "open", ciStatus: "pending" });
+  const state = createWatchState();
+  let ranChain = false;
+  const deps = makeDeps(provider, codeHost, {
+    dryRun: true,
+    runChain: async () => {
+      ranChain = true;
+      return { accepted: true, adwId: "x", detail: "" };
+    },
+  });
+
+  await claimFeedback(deps, state);
+  assert.equal(provider.claimCalls.length, 0);
+  assert.equal(ranChain, false);
+  assert.equal(provider.entries.get("74")!.state, "feedback");
+});
+
+test("finishReviews: a closed-without-merging PR's invite comment names the feedback label and the PR — and leaves marker.pr intact for a later revision", async () => {
+  const provider = new FakeProvider();
+  provider.addIssue("75", "rejected", "review", { pr: 904, branch: "spf-watch/75-x" });
+  const codeHost = new FakeCodeHost();
+  codeHost.prs.set(904, { merged: false, state: "closed", ciStatus: "failure" });
+
+  await finishReviews(makeDeps(provider, codeHost));
+
+  assert.equal(provider.transitions[0]?.to, "blocked");
+  assert.match(provider.transitions[0]?.detail ?? "", /spf:feedback/);
+  assert.match(provider.transitions[0]?.detail ?? "", /PR #904/);
+  assert.equal(provider.entries.get("75")!.marker?.pr, 904, "the closed PR's number must survive for a later feedback claim to read");
+});
+
+test("claimNewWork: a ready re-claim of an issue that already pushed once uses a fresh round-suffixed branch, avoiding the BT-1967 non-fast-forward push rejection", async () => {
+  const provider = new FakeProvider();
+  // Simulates a human manually relabeling `blocked` (a declined PR) back to
+  // `ready`, WITHOUT going through the `feedback` lane at all — the marker
+  // still records the earlier push's `pr`/`revision`, exactly as
+  // `openPrForWinner` leaves it, and `finishReviews`'s own blocked path
+  // never clears it either.
+  provider.addIssue("76", "Add x", "ready", { pr: 905, branch: "spf-watch/76-add-x", revision: { rounds: 0, since: "2020-01-01T00:00:00.000Z" } });
+  const codeHost = new FakeCodeHost();
+  const state = createWatchState();
+  const worktreeAddCalls: Array<{ branch: string; startPoint: string }> = [];
+  const deps = makeDeps(provider, codeHost, {
+    git: fakeGit({ worktreeAdd: (_path, branch, startPoint) => worktreeAddCalls.push({ branch, startPoint }) }),
+  });
+
+  await claimNewWork(deps, state);
+  await waitUntil(() => state.inflight.size === 0);
+
+  assert.deepEqual(worktreeAddCalls, [{ branch: "spf-watch/76-add-x-r1", startPoint: "origin/main" }]);
+  assert.equal(codeHost.openedPrs[0]!.branch, "spf-watch/76-add-x-r1");
+  assert.equal(provider.entries.get("76")!.marker?.revision?.rounds, 1);
+});
+
 // ── the refine lane ──────────────────────────────────────────────────────
 
 test("refineBranchNameFor: same sanitizer as branchNameFor, different prefix", () => {
@@ -1429,6 +1646,52 @@ test("buildSpecPrompt: comments at/after feedback.asked_at are the answers secti
 test("buildSpecPrompt: an oversized thread drops the oldest comments first and says so explicitly, never silently", () => {
   const comments = Array.from({ length: 5 }, (_, i) => specComment(`user${i}`, `2020-01-0${i + 1}T00:00:00.000Z`, "x".repeat(6000)));
   const prompt = buildSpecPrompt(specIssue(), comments);
+
+  assert.match(prompt, /_\.\.\. \d+ earlier comment\(s\) omitted for length\._/);
+  assert.ok(!prompt.includes("user0"), "the oldest comment must be the one dropped");
+  assert.ok(prompt.includes("user4"), "the newest comment must survive");
+});
+
+// ── buildIssuePrompt ─────────────────────────────────────────────────────
+
+test("buildIssuePrompt: no PR comments is byte-identical to the plain title/body prompt from before this feature existed", () => {
+  assert.equal(buildIssuePrompt(specIssue()), "A spec\n\nSome body text.");
+  assert.equal(buildIssuePrompt(specIssue(), []), "A spec\n\nSome body text.", "and the same for an explicitly empty list");
+});
+
+test("buildIssuePrompt: with no revision watermark, every PR comment is a correction — there's no earlier state to separate it from", () => {
+  const prompt = buildIssuePrompt(specIssue(), [prComment("alice", "2020-01-01T00:00:00.000Z", "Please add a test.")]);
+  assert.match(prompt, /## PR review comments/);
+  assert.match(prompt, /### Corrections to address \(round 1\)\n\n\*\*@alice\*\* \(2020-01-01T00:00:00\.000Z\):\nPlease add a test\./);
+  assert.ok(!prompt.includes("Earlier review discussion"));
+});
+
+test("buildIssuePrompt: comments at/after revision.since are corrections; earlier ones stay 'earlier review discussion', corrections rendered first", () => {
+  const comments = [
+    prComment("bob", "2020-01-01T00:00:00.000Z", "Looks reasonable so far."),
+    prComment("alice", "2020-01-02T00:00:00.000Z", "Please add a test."),
+  ];
+  const prompt = buildIssuePrompt(specIssue(), comments, { rounds: 1, since: "2020-01-01T12:00:00.000Z" });
+
+  assert.match(prompt, /### Corrections to address \(round 2\)\n\n\*\*@alice\*\*/);
+  assert.match(prompt, /### Earlier review discussion\n\n\*\*@bob\*\*/);
+  assert.ok(prompt.indexOf("Corrections to address") < prompt.indexOf("Earlier review discussion"), "corrections must be surfaced first");
+});
+
+test("buildIssuePrompt: renders an inline comment's file:line anchor and a review's verdict", () => {
+  const comments = [
+    prComment("alice", "2020-01-01T00:00:00.000Z", "This branch is unreachable.", { path: "src/index.ts", line: 42 }),
+    prComment("bob", "2020-01-02T00:00:00.000Z", "Needs another pass before I can approve.", { verdict: "CHANGES_REQUESTED" }),
+  ];
+  const prompt = buildIssuePrompt(specIssue(), comments);
+
+  assert.match(prompt, /\*\*@alice\*\* \(2020-01-01T00:00:00\.000Z\) on `src\/index\.ts:42`:\nThis branch is unreachable\./);
+  assert.match(prompt, /\*\*@bob\*\* \(2020-01-02T00:00:00\.000Z\) — CHANGES_REQUESTED:\nNeeds another pass before I can approve\./);
+});
+
+test("buildIssuePrompt: an oversized thread drops the oldest comments first and says so explicitly, never silently", () => {
+  const comments = Array.from({ length: 5 }, (_, i) => prComment(`user${i}`, `2020-01-0${i + 1}T00:00:00.000Z`, "x".repeat(6000)));
+  const prompt = buildIssuePrompt(specIssue(), comments);
 
   assert.match(prompt, /_\.\.\. \d+ earlier comment\(s\) omitted for length\._/);
   assert.ok(!prompt.includes("user0"), "the oldest comment must be the one dropped");
