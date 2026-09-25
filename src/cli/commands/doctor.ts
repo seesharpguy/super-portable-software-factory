@@ -1461,7 +1461,7 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       if (cfg.watch.fanout.n > 1) {
         const nonCommit = cfg.watch.chains.filter((name) => {
           const def = findChain(name);
-          return def !== undefined && !hasCommitStep(def.phases);
+          return def !== undefined && !chainHasCommitStep(def); // a graph chain counts its DEFAULT path only
         });
         if (nonCommit.length > 0) {
           check(

@@ -17,7 +17,7 @@
  * precomputed `commits` flag), so it too stays out of `src/chains/`'s
  * dependency direction and is unit-testable with no registry at all.
  * `cli/commands/watch.ts`'s `makeWatchChainRouter` is the other half: it
- * resolves names via `findChain`, computes `commits` with `hasCommitStep`,
+ * resolves names via `findChain`, computes `commits` with `chainHasCommitStep`,
  * builds the `Jev` with a trace recorder, and hands the result to
  * `WatchDeps.routeChain`.
  *
@@ -51,7 +51,7 @@ export interface RoutableChain {
   describe: string;
   /** `ChainDefinition.phases` — the derived step string (`plan -> build -> git(commit) ...`). */
   phases: string;
-  /** `hasCommitStep(phases)`, computed by the caller (it owns the chain registry). */
+  /** `chainHasCommitStep(def)` (a graph chain: its default path only), computed by the caller (it owns the chain registry). */
   commits: boolean;
 }
 
