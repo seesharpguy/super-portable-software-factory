@@ -50,8 +50,13 @@ record independent of the commit log.
   `jev.decisions.finding_triage.drop: noise | noise_and_style` they are
   withheld from the fixer instead, and still recorded in a `jev_triage`
   trace event. The verdict is never touched, and a round is never left
-  with nothing to fix. The fallback is `real`, which is today's behavior.
-  `fixLoop` suite output is not triaged.
+  with nothing to fix: when every unmet finding is demoted, `findings` and
+  `blocking` pass through unchanged and only the notes change. The
+  fallback is `real`, which is today's behavior. `fixLoop` suite output is
+  not triaged. The ticket's `jev.triage.drop` is spelled
+  `jev.decisions.finding_triage.drop`, like every kind's settings. Invalid
+  `jev.decisions.<kind>` settings now fail `startRun`, before any phase,
+  and `PhaseHandle` exposes `phase_id` for decisions made inside a phase.
 - **`loop_control`** (#105): after each failed, non-final round of
   `fixLoop`/`reviseLoop`, Jev chooses `continue | escalate_tier |
   stop_blocked` (fallback `continue`, today's loop). The configured `max`

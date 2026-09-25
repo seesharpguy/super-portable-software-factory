@@ -208,9 +208,10 @@ export function trailerFor(outcome: SignoffOutcome, identity: CommitterIdentity 
 export async function main(ctx: ChainContext): Promise<number> {
   const { prompt } = ctx;
   const run = await startRun(ctx, REQUIRED_AGENTS, REQUIRED_SUITES);
-  // Jev finding triage (#106): null unless on — resolved before any phase so a bad
-  // `jev.decisions.finding_triage` setting fails here, not after the build. It
-  // shapes the revise handoff only, never the verdict.
+  // Jev finding triage (#106): null unless on — resolved once, before any
+  // phase (startRun has already validated its `drop`, so a bad setting failed
+  // there, before the plan/build spend). It shapes the revise handoff only,
+  // never the verdict.
   const triage = resolveFindingTriage(run);
   const baseline = run.git.rev("HEAD"); // pinned before this run commits anything
 
@@ -279,7 +280,7 @@ export async function main(ctx: ChainContext): Promise<number> {
     build = await run.phase(
       makePhaseParams({ name: `revise_${i}`, kind: "agent", owner: "builder", retries: 1, description: "Close the reviewer's blocking findings" }),
       async (ph) => {
-        const previous = triage ? (await triageReviewFindings(run, review!, { settings: triage, round: i, prompt })).handoff : review!;
+        const previous = triage ? (await triageReviewFindings(run, review!, { settings: triage, round: i, prompt, phase_id: ph.phase_id })).handoff : review!;
         return ph.call(makeAgentCall({ output_type: BuildOutput, prompt, previous, gates: [gates.diffMatchesClaims] }));
       },
     );

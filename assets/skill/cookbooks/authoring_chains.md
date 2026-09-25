@@ -50,7 +50,8 @@ reviewer agent consult the tool as evidence instead.
 it on in `act` mode, each unmet finding is classified `real | noise | style`
 before the revise agent sees it: `noise`/`style` findings move to a
 "Deprioritized by jev" section (or are withheld with `drop: noise` or
-`drop: noise_and_style`, and still recorded in the trace). The reviewer's
+`drop: noise_and_style`, and still recorded in the trace); if every unmet
+finding is demoted, the full ask is kept and only labeled. The reviewer's
 verdict is never changed and still decides `state.accepted`. `fixLoop` hands
 the suite's output over verbatim and is never triaged, so choose the
 reviewer-agent + `reviseLoop` shape when you want triage.

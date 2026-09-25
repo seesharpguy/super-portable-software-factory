@@ -33,8 +33,11 @@
  *     triage can shrink a fixer's to-do list, never turn a rejection into an
  *     approval (invariant 6);
  *   - it never empties the ask: if EVERY unmet finding came back demoted,
- *     dropping is suspended for that round and they are all passed as
- *     deprioritized — a rejected review always hands the fixer something;
+ *     the structured ask (`findings`, `blocking`) is handed over UNCHANGED —
+ *     whatever `drop` says — and the demotions only add the "Deprioritized
+ *     by jev" note. A rejected review always hands the fixer a non-empty
+ *     to-do list, so the handoff still satisfies `gates.verdictConsistent`
+ *     ("a rejection names a problem") exactly as the reviewer's own did;
  *   - `met: true` findings are never triaged and always pass through.
  *
  * Off (the default) is a total no-op: `resolveFindingTriage` returns `null`,
@@ -64,10 +67,45 @@ export const FINDING_TRIAGE_EVENT = "jev_triage";
 /**
  * At most this many distinct unmet findings are asked about per round; any
  * beyond it keep the fallback (`real`) without a question. One batch is one
- * HTTP call whose state + questions share a ~32k-token budget, and a review
- * with more findings than this is not one a classifier should be pruning.
+ * HTTP call whose state + questions share a ~32k-token budget (see
+ * `TRIAGE_REQUEST_CHAR_BUDGET`), and a review with more findings than this
+ * is not one a classifier should be pruning.
  */
 export const MAX_TRIAGED_FINDINGS = 50;
+
+/**
+ * The whole SystemOne request (state + every question) is kept under this
+ * many JSON characters: ~32k tokens at a deliberately pessimistic ~3
+ * characters per token. An oversize request comes back as an HTTP error,
+ * which is safe (every finding falls back to `real`) but would silently
+ * disable triage on exactly the large reviews it exists for.
+ *
+ * The split: each question is a short constant instruction that names its
+ * finding by fingerprint (never restating it) plus the three option
+ * descriptions — under 1k characters each, so under ~50k characters for
+ * `MAX_TRIAGED_FINDINGS` questions — and `TRIAGE_STATE_CHAR_BUDGET` for the
+ * state.
+ * finding_triage.test.ts pins the worst case (50 maximal findings) under
+ * this total.
+ */
+export const TRIAGE_REQUEST_CHAR_BUDGET = 96_000;
+export const TRIAGE_STATE_CHAR_BUDGET = 44_000;
+
+/** `blocking` entries carried into the state (context only — never asked about); the rest are summarized as a count. */
+const MAX_BLOCKING_IN_STATE = 25;
+
+/**
+ * Clip limits tried in order until the state fits `TRIAGE_STATE_CHAR_BUDGET`.
+ * The LAST level fits by construction even at the caps (request 4k +
+ * summary 800 + 25 blockers x ~170 + 50 findings x ~420 = ~30k chars), so
+ * the budget is a guarantee, not a hope.
+ */
+const STATE_CLIP_LEVELS: readonly { request: number; summary: number; blocking: number; requirement: number; evidence: number }[] = [
+  { request: 12_000, summary: 2_000, blocking: 500, requirement: 500, evidence: 1_000 },
+  { request: 8_000, summary: 1_500, blocking: 300, requirement: 400, evidence: 500 },
+  { request: 6_000, summary: 1_000, blocking: 200, requirement: 300, evidence: 250 },
+  { request: 4_000, summary: 800, blocking: 150, requirement: 200, evidence: 120 },
+];
 
 /** The heuristic answer for every finding: today's behavior, where the fixer is asked to close all of them. */
 export const FINDING_TRIAGE_FALLBACK: FindingTriageClass = "real";
@@ -92,9 +130,12 @@ export interface FindingTriageSettings {
 /**
  * This kind's settings, or `null` when it is off (`jev.enabled: false` — the
  * default — or `jev.decisions.finding_triage.mode: off`). Call once, at the
- * top of the step, before any phase opens: an invalid `drop` throws the
- * config-shaped `jev.decisions.finding_triage: ...` error there rather than
- * mid-loop. While off, nothing is parsed at all.
+ * top of the step. `startRun` has already parsed every registered kind's
+ * extras before the run's first phase (so a bad `drop` fails before any
+ * agent spend); the parse here is the backstop for a `Run` built some other
+ * way, and it throws the same config-shaped
+ * `jev.decisions.finding_triage: ...` error rather than failing mid-loop.
+ * While off, nothing is parsed at all.
  *
  * `run.jev` is read defensively: a stub `Run` in a unit test may not carry
  * one, and the answer for "no Jev" is the same as for "Jev off".
@@ -142,7 +183,14 @@ export interface FindingTriageOutcome {
   deprioritized: TriagedFinding[];
   /** Demoted findings withheld from the fixer (recorded in the trace only). */
   dropped: TriagedFinding[];
-  /** True when `drop` asked to withhold findings but every unmet finding was demoted, so nothing was withheld this round. */
+  /**
+   * True when every unmet finding was demoted: the structured ask
+   * (`findings`, `blocking`) was then handed over unchanged, and the
+   * demotions only appear in the notes — a rejected review never reaches
+   * the fixer as an empty to-do list.
+   */
+  all_demoted: boolean;
+  /** `all_demoted` AND `drop` asked to withhold some of them — so nothing was withheld this round. */
   drop_suspended: boolean;
 }
 
@@ -167,50 +215,102 @@ export function applyFindingTriage(
     .map((finding) => ({ finding, key: findingTriageKey(round, finding), triage: classes.get(findingFingerprint(finding)) ?? "real" }));
   const kept = unmet.filter((t) => t.triage === "real");
   const demoted = unmet.filter((t) => t.triage !== "real");
-  if (demoted.length === 0) return { handoff: review, kept, deprioritized: [], dropped: [], drop_suspended: false };
+  if (demoted.length === 0) return { handoff: review, kept, deprioritized: [], dropped: [], all_demoted: false, drop_suspended: false };
 
-  // Never empty the ask: with no real finding left, withholding the rest
-  // would send the fixer an empty to-do list for a review that REJECTED.
-  const dropWanted = demoted.some((t) => shouldDrop(t.triage, drop));
-  const drop_suspended = kept.length === 0 && dropWanted;
-  const dropped = drop_suspended ? [] : demoted.filter((t) => shouldDrop(t.triage, drop));
-  const deprioritized = drop_suspended ? demoted : demoted.filter((t) => !shouldDrop(t.triage, drop));
+  // Never empty the ask: with no real finding left, reshaping would send the
+  // fixer an empty structured to-do list (`findings`/`blocking`) for a review
+  // that REJECTED — an envelope `gates.verdictConsistent` itself would refuse
+  // ("approved=false but no blocking item or unmet requirement"). So the
+  // structured ask stays the reviewer's, `drop` is not applied, and the
+  // demotions are advisory notes only.
+  const all_demoted = kept.length === 0;
+  if (all_demoted) {
+    const notes = appendDeprioritized(
+      review.notes_for_next_agent,
+      "Jev's finding triage classified EVERY unmet finding as noise or style. They all stay in `findings` and `blocking` — a rejected review always hands you its full ask — and none is waived: the reviewer rules on every requirement again next round. Treat these labels as a hint about where the real gap is least likely to be.",
+      demoted,
+    );
+    return {
+      handoff: { ...review, notes_for_next_agent: notes },
+      kept,
+      deprioritized: demoted,
+      dropped: [],
+      all_demoted,
+      drop_suspended: demoted.some((t) => shouldDrop(t.triage, drop)),
+    };
+  }
 
+  const dropped = demoted.filter((t) => shouldDrop(t.triage, drop));
+  const deprioritized = demoted.filter((t) => !shouldDrop(t.triage, drop));
   const demotedFps = new Set(demoted.map((t) => findingFingerprint(t.finding)));
   const demotedRequirements = new Set(demoted.map((t) => normalizeText(t.finding.requirement)));
   const findings = review.findings.filter((f) => f.met || !demotedFps.has(findingFingerprint(f)));
   const blocking = review.blocking.filter((b) => !demotedRequirements.has(normalizeText(b)));
-
-  let notes = review.notes_for_next_agent;
-  if (deprioritized.length > 0) {
-    const lines = [
-      "## Deprioritized by jev",
-      "Jev's finding triage classified these unmet findings as noise or style. They are NOT waived: the reviewer rules on every requirement again next round. Close everything in `findings` and `blocking` first; address these only where it is cheap and safe.",
-      ...deprioritized.map((t) => `- [${t.triage}] ${t.finding.requirement}${t.finding.evidence ? ` — ${t.finding.evidence}` : ""}`),
-    ];
-    notes = [notes, lines.join("\n")].filter((part) => part.length > 0).join("\n\n");
-  }
+  const notes =
+    deprioritized.length === 0
+      ? review.notes_for_next_agent
+      : appendDeprioritized(
+          review.notes_for_next_agent,
+          "Jev's finding triage classified these unmet findings as noise or style. They are NOT waived: the reviewer rules on every requirement again next round. Close everything in `findings` and `blocking` first; address these only where it is cheap and safe.",
+          deprioritized,
+        );
   // Spread first, so `approved`/`status`/everything else is the reviewer's own — only the to-do list is reshaped.
+  // `kept` is non-empty here, so `findings` still holds an unmet finding: the rejection still names a problem.
   const handoff: ReviewOutputT = { ...review, findings, blocking, notes_for_next_agent: notes };
-  return { handoff, kept, deprioritized, dropped, drop_suspended };
+  return { handoff, kept, deprioritized, dropped, all_demoted, drop_suspended: false };
 }
 
-function currentPhaseId(run: Run): string {
-  // Called from inside `run.phase(...)`'s callback, where the open phase is
-  // always the last one pushed (phases never nest in a chain).
-  const phases = (run as { phases?: { phase_id: string }[] }).phases ?? [];
-  return phases.length > 0 ? phases[phases.length - 1]!.phase_id : "";
+function appendDeprioritized(notes: string, preamble: string, demoted: readonly TriagedFinding[]): string {
+  const lines = [
+    "## Deprioritized by jev",
+    preamble,
+    ...demoted.map((t) => `- [${t.triage}] ${t.finding.requirement}${t.finding.evidence ? ` — ${t.finding.evidence}` : ""}`),
+  ];
+  return [notes, lines.join("\n")].filter((part) => part.length > 0).join("\n\n");
 }
 
 /**
+ * The batch's shared state: the request plus the review, with the unmet
+ * findings each carrying the `id` (fingerprint) its question refers to.
+ * Clipped by the first `STATE_CLIP_LEVELS` entry that fits
+ * `TRIAGE_STATE_CHAR_BUDGET`. Exported for its budget test.
+ */
+export function buildTriageState(prompt: string, review: ReviewOutputT, unique: ReadonlyMap<string, ReviewFinding>): Record<string, unknown> {
+  let state: Record<string, unknown> = {};
+  for (const level of STATE_CLIP_LEVELS) {
+    const blocking = review.blocking.slice(0, MAX_BLOCKING_IN_STATE).map((b) => clip(b, level.blocking));
+    const more = review.blocking.length - blocking.length;
+    state = {
+      task: "A code reviewer rejected a change. Before a fixing agent is asked to close them, each unmet finding is classified on its own.",
+      request: clip(prompt, level.request),
+      review: {
+        summary: clip(review.summary, level.summary),
+        blocking: more > 0 ? [...blocking, `(${more} more blocking item(s) not shown)`] : blocking,
+        unmet_findings: [...unique].map(([id, f]) => ({
+          id,
+          requirement: clip(f.requirement, level.requirement),
+          evidence: clip(f.evidence, level.evidence),
+        })),
+      },
+    };
+    if (JSON.stringify(state).length <= TRIAGE_STATE_CHAR_BUDGET) break;
+  }
+  return state;
+}
+
+/** Runs whose `jev_triage` outcome write already failed once — warn once per run, like `Jev.record`. */
+const outcomeWriteWarned = new WeakSet<object>();
+
+/**
  * Classify a rejected review's unmet findings with ONE Jev batch and reshape
- * the handoff. Call it from INSIDE the revise phase (so decisions carry that
- * phase's id), only when `resolveFindingTriage` returned settings.
+ * the handoff. Call it from INSIDE the revise phase, passing that phase's
+ * `ph.phase_id` (so every decision and the outcome row land on it), only
+ * when `resolveFindingTriage` returned settings.
  */
 export async function triageReviewFindings(
   run: Run,
   review: ReviewOutputT,
-  opts: { settings: FindingTriageSettings; round: number; prompt: string },
+  opts: { settings: FindingTriageSettings; round: number; prompt: string; phase_id: string },
 ): Promise<FindingTriageOutcome> {
   const unique = new Map<string, ReviewFinding>();
   for (const finding of review.findings) {
@@ -220,56 +320,57 @@ export async function triageReviewFindings(
   }
   if (unique.size === 0) return applyFindingTriage(review, new Map(), opts.settings.drop, opts.round);
 
-  const phase_id = currentPhaseId(run);
-  const state = {
-    request: clip(opts.prompt, 12_000),
-    review: {
-      summary: clip(review.summary, 2_000),
-      blocking: review.blocking.map((b) => clip(b, 500)),
-      unmet_findings: [...unique.values()].map((f) => ({ requirement: clip(f.requirement, 500), evidence: clip(f.evidence, 1_000) })),
-    },
-  };
+  const { phase_id } = opts;
+  const state = buildTriageState(opts.prompt, review, unique);
   const fingerprints = [...unique.keys()];
-  const items: DecisionBatchItem<FindingTriageClass>[] = [...unique.values()].map((finding) => ({
+  // Each question names its finding by fingerprint rather than restating it:
+  // the finding's text is already in `state`, once.
+  const items: DecisionBatchItem<FindingTriageClass>[] = [...unique].map(([fp, finding]) => ({
     kind: FINDING_TRIAGE_KIND.kind,
     key: findingTriageKey(opts.round, finding),
     options: FINDING_TRIAGE_OPTIONS,
     fallback: FINDING_TRIAGE_FALLBACK,
     phase_id,
-    instructions: [
-      "A code reviewer rejected a change. `state.request` is what was asked for; `state.review` is the reviewer's verdict.",
-      "Before a fixing agent is asked to close it, classify ONLY this one unmet finding:",
-      `Requirement: ${clip(finding.requirement, 500)}`,
-      `Evidence: ${clip(finding.evidence, 1_000) || "(none given)"}`,
-      "Answer `real` unless you are confident the finding is noise or purely style.",
-    ].join("\n"),
+    instructions:
+      `Classify ONLY the finding in \`state.review.unmet_findings\` whose id is "${fp}", against \`state.request\`. ` +
+      "Answer `real` unless you are confident it is noise or purely style.",
   }));
   const decisions: Decision<FindingTriageClass>[] = await run.jev.decideBatch(state, items);
   const classes = new Map(fingerprints.map((fp, i) => [fp, decisions[i]!.choice]));
   const outcome = applyFindingTriage(review, classes, opts.settings.drop, opts.round);
 
   if (outcome.handoff !== review) {
-    const row = (t: TriagedFinding) => ({ key: t.key, triage: t.triage, requirement: t.finding.requirement });
-    await run.tracer.event(
-      makeEventRecord({
-        adw_id: run.adw_id,
-        phase_id,
-        type: "log",
-        name: FINDING_TRIAGE_EVENT,
-        payload: {
-          round: opts.round,
-          drop: opts.settings.drop,
-          drop_suspended: outcome.drop_suspended,
-          kept: outcome.kept.map(row),
-          deprioritized: outcome.deprioritized.map(row),
-          dropped: outcome.dropped.map(row),
-        },
-      }),
-    );
-    await run.console.note(
-      `jev triage: ${outcome.kept.length} real, ${outcome.deprioritized.length} deprioritized, ${outcome.dropped.length} dropped` +
-        (outcome.drop_suspended ? " (drop suspended: nothing real left)" : ""),
-    );
+    // Advisory, like the decisions themselves: a trace or console failure
+    // here must never fail the revise phase (mirrors `Jev.record`).
+    try {
+      const row = (t: TriagedFinding) => ({ key: t.key, triage: t.triage, requirement: t.finding.requirement });
+      await run.tracer.event(
+        makeEventRecord({
+          adw_id: run.adw_id,
+          phase_id,
+          type: "log",
+          name: FINDING_TRIAGE_EVENT,
+          payload: {
+            round: opts.round,
+            drop: opts.settings.drop,
+            all_demoted: outcome.all_demoted,
+            drop_suspended: outcome.drop_suspended,
+            kept: outcome.kept.map(row),
+            deprioritized: outcome.deprioritized.map(row),
+            dropped: outcome.dropped.map(row),
+          },
+        }),
+      );
+      await run.console.note(
+        `jev triage: ${outcome.kept.length} real, ${outcome.deprioritized.length} deprioritized, ${outcome.dropped.length} dropped` +
+          (outcome.all_demoted ? " (every finding demoted: the full ask is kept)" : ""),
+      );
+    } catch (error) {
+      if (!outcomeWriteWarned.has(run)) {
+        outcomeWriteWarned.add(run);
+        process.stderr.write(`[spf] jev: could not record the finding triage outcome (${(error as Error).message}) — continuing\n`);
+      }
+    }
   }
   return outcome;
 }
