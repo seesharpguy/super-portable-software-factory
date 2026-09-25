@@ -14,6 +14,7 @@ import type { NotificationsConfig, NotifyScope, SFConfig } from "../data_types.t
 import { SlackChannel } from "./slack_channel.ts";
 import { TeamsChannel } from "./teams_channel.ts";
 import { WebhookChannel } from "./webhook_channel.ts";
+import { HerdrChannel, herdrEnvFrom } from "./herdr_channel.ts";
 
 /** Exported so `spf doctor` and the init interview can name the same key without duplicating this table. */
 export const DEFAULT_NOTIFY_ENV_KEY: Record<string, string> = {
@@ -142,6 +143,20 @@ export function resolveNotifier(cfg: SFConfig, opts: { dryRun?: boolean; log?: (
 
   const resolved: Array<{ channel: NotificationChannel; scope: NotifyScope }> = [];
   for (const entry of nc.channels) {
+    // herdr has no URL to look up — it needs spf to be running inside a herdr
+    // pane. It defaults to every milestone (not the top-level scope): it's a
+    // local display, and it needs the info-level claims and PRs to keep each
+    // issue's pane state right.
+    if (entry.kind === "herdr") {
+      const herdr = herdrEnvFrom();
+      if (!herdr) {
+        log("spf: notifications.channels[kind=herdr] is configured but spf is not running inside a herdr pane — skipping this channel");
+        continue;
+      }
+      const channel = new HerdrChannel(herdr, { cwd: process.cwd() }, entry.name);
+      resolved.push({ channel, scope: entry.events ?? "all" });
+      continue;
+    }
     const envKey = entry.webhook_url_env || DEFAULT_NOTIFY_ENV_KEY[entry.kind];
     const url = process.env[envKey];
     if (!url) {

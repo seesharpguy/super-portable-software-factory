@@ -1466,11 +1466,16 @@ export type WatchConfig = v.InferOutput<typeof WatchConfigSchema>;
  * `webhook_url_env` names the .env key holding the secret URL — never the
  * URL itself, matching GITHUB_TOKEN/JIRA_API_TOKEN. Empty = the kind's own
  * default key (see core/notify/notifier.ts's DEFAULT_ENV_KEY).
+ *
+ * `kind: herdr` is the exception: no URL, no env key. It drives the local
+ * herdr socket (see core/notify/herdr_channel.ts), resolves only when spf
+ * runs inside a herdr pane, and defaults to `events: all` rather than the
+ * top-level scope.
  */
 export const NotifyScopeSchema = v.picklist(["off", "errors", "attention", "all"]);
 export type NotifyScope = v.InferOutput<typeof NotifyScopeSchema>;
 
-export const NotifyChannelKindSchema = v.picklist(["slack", "teams", "webhook"]);
+export const NotifyChannelKindSchema = v.picklist(["slack", "teams", "webhook", "herdr"]);
 export type NotifyChannelKind = v.InferOutput<typeof NotifyChannelKindSchema>;
 
 export const NotifyChannelSchema = v.object({

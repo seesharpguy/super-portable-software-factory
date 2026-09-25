@@ -874,7 +874,7 @@ for those.
 notifications:
   events: attention         # off (default) | errors | attention | all
   channels:
-    - kind: slack            # slack | teams | webhook
+    - kind: slack            # slack | teams | webhook | herdr
       webhook_url_env: SLACK_WEBHOOK_URL   # optional; this is the default for slack
 ```
 
@@ -934,6 +934,21 @@ issue produces **two** notifications for the same failure — `run_failed`
 (keyed to the chain's own `adw_id`, e.g. `issue-142`) from the chain-run
 side, and `issue_blocked` (keyed to the issue) from watch itself. Both are
 genuinely informative, just worth expecting.
+
+**herdr.** One more channel kind needs no webhook: `kind: herdr` turns
+[herdr](https://herdr.dev)'s sidebar into a live board for `spf watch`. It
+opens one pane per claimed issue tailing that run's trace, and marks each
+pane working, blocked, or in review as the issue moves. Start `spf watch`
+from a herdr pane; outside herdr the channel is skipped with one warning.
+It's display only: no agent ever touches herdr, and spf never reads it back
+to decide anything. See the installed skill's `cookbooks/herdr.md`.
+
+```yaml
+notifications:
+  events: attention
+  channels:
+    - kind: herdr            # defaults to events: all
+```
 
 Full field reference: `spf install-skill`'s installed skill
 (`references/config.md`).

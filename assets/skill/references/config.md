@@ -292,7 +292,7 @@ default; adding it is entirely additive.
 | `project` | string | Label prefixed onto every outbound title (`[api] watch: ...`) and added as a `repo` field — for disambiguating multiple `spf` instances that share one webhook. Default `""`, which falls back to `watch.repo`. |
 | `channels[]` | array | See below. |
 
-`channels[].kind`: `"slack"` \| `"teams"` \| `"webhook"`. `channels[].events`
+`channels[].kind`: `"slack"` \| `"teams"` \| `"webhook"` \| `"herdr"`. `channels[].events`
 overrides `events` for just that channel (unset = inherit). `webhook_url_env`
 names the `.env` key holding the secret URL — never the URL itself, matching
 `GITHUB_TOKEN`/`JIRA_API_TOKEN`. Empty/omitted uses the kind's own default:
@@ -319,6 +319,14 @@ a check); a failed POST logs one line and is swallowed, never changing the
 run's exit code. See the main README's "Notifications" section for how to
 get each channel's webhook URL, and `spf init`'s interview, which asks for
 this section and collects the URL straight into `.env`.
+
+`kind: herdr` is the one channel with no URL: it drives the local
+[herdr](https://herdr.dev) socket so herdr's sidebar shows a pane per
+claimed issue and its state. It resolves only when spf runs inside a herdr
+pane (skipped with one warning otherwise), ignores `webhook_url_env`, and
+defaults to `events: all` rather than the top-level scope, since it needs
+the info-level milestones to keep pane state right. The top-level `events`
+still has to be something other than `off`. See `cookbooks/herdr.md`.
 
 ### `review`
 
