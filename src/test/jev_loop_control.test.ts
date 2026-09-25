@@ -36,7 +36,18 @@ import { JEV_DECISION_KINDS, LOOP_CONTROL_CHOICES, LOOP_CONTROL_KIND } from "../
 import * as tiering from "../core/tiering.js";
 import { FakeJevClient } from "./fake_jev.js";
 import * as steps from "../chains/steps.js";
-import { LOOP_CONTROL_OPTIONS, nextRung } from "../chains/loop_control.js";
+import {
+  LOOP_CONTROL_OPTIONS,
+  MAX_LIST_ITEMS,
+  boundState,
+  capList,
+  misplacedLoopSettings,
+  nextRung,
+  recordedDecisionReplay,
+  setLoopControlReplay,
+} from "../chains/loop_control.js";
+import { doctorCommand } from "../cli/commands/doctor.js";
+import { mkdirSync } from "node:fs";
 
 type StartedRun = Awaited<ReturnType<typeof steps.startRun>>;
 
@@ -84,7 +95,12 @@ interface Dispatch {
  * on (`effectiveAgent`, the real dispatch seam) and returns a canned
  * envelope. Code phases (the suite) run for real.
  */
-async function withRun(yaml: string, adwId: string, body: (run: StartedRun, dispatches: Dispatch[]) => Promise<void>): Promise<void> {
+async function withRun(
+  yaml: string,
+  adwId: string,
+  body: (run: StartedRun, dispatches: Dispatch[]) => Promise<void>,
+  opts: { throwOn?: string } = {},
+): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "spf-jev-loop-"));
   try {
     const configPath = join(dir, "spf.config.yaml");
@@ -108,9 +124,16 @@ async function withRun(yaml: string, adwId: string, body: (run: StartedRun, disp
                 log: (payload) => ph.log(payload),
                 call: async () => {
                   const base = run.cfg.agents.find((a) => a.name === params.owner)!;
-                  dispatches.push({ phase: params.name, owner: params.owner, model: tiering.effectiveAgent(run, base).model });
+                  const model = tiering.effectiveAgent(run, base).model;
+                  dispatches.push({ phase: params.name, owner: params.owner, model });
+                  // Mirror agents.ts's session bookkeeping: rejoin only on the
+                  // same model, else a fresh session — then saveAgentMap.
+                  const entry = run.agent_map[params.owner];
+                  const sessionId = entry && entry.model === model ? entry.session_id : `s-${params.name}`;
+                  run.saveAgentMap(params.owner, { session_id: sessionId, model, coding_agent: base.coding_agent });
+                  if (params.name === opts.throwOn) throw new Error(`stub: ${params.name} dispatch failed`);
                   return (
-                    params.owner === "reviewer"
+                    params.name.startsWith("review_")
                       ? { status: "success", summary: "not yet", artifacts: [], approved: false, blocking: ["README is missing"], findings: [{ requirement: "README", met: false, evidence: "" }] }
                       : { status: "success", summary: "tried a fix", artifacts: [], changed_files: [] }
                   ) as never;
@@ -450,4 +473,229 @@ test("nextRung: one rung up, bounded by max_tier, once, routed roles only, usabl
   assert.match(why(nextRung({ ...base, resolution: resolutionAt("t1", "openai/m1"), maxTier: "t2" })), /not usable/);
   // No rung above the top of the ladder, whatever max_tier says.
   assert.match(why(nextRung({ ...base, resolution: resolutionAt("t2", "opus"), maxTier: "t2" })), /already at or above/);
+});
+
+// ── review follow-ups: key uniqueness, replay, self-review, bounds ─────────
+
+test("loop_control: two fixLoops over one suite in one run get distinct keys (fix:test_1, fix#2:test_1)", async () => {
+  const fake = FakeJevClient.choosing("continue", 0.99);
+  await withFake(fake, () =>
+    withRun(QUALITY + AGENTS + jevBlock("shadow"), "adw_lc_two_loops", async (run) => {
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      await steps.reviseLoop({ max: 2 })(run, stateStub());
+      await steps.reviseLoop({ max: 2 })(run, stateStub());
+      const keys = (await decisions(run)).map((d) => d.key);
+      assert.deepEqual(keys, ["fix:test_1", "fix#2:test_1", "revise:review_1", "revise#2:review_1"]);
+      assert.equal(new Set(keys).size, keys.length);
+    }),
+  );
+});
+
+test("loop_control replay: a recorded escalate_tier replays with no Jev call — and as not_permitted once max_tier is removed", async () => {
+  // 1. Record a live escalate_tier (max_tier set), read back via recordedDecisionReplay.
+  let recorded: Decision | null = null;
+  await withFake(FakeJevClient.choosing("escalate_tier", 0.99), () =>
+    withRun(QUALITY + AGENTS + TIERING + jevBlock("act", "{max_tier: t2}"), "adw_lc_replay_src", async (run) => {
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      recorded = await recordedDecisionReplay(run.tracer.db, run.adw_id)("loop_control", "fix:test_1");
+      assert.equal(recorded?.choice, "escalate_tier");
+    }),
+  );
+  const resolver = async (kind: string, key: string) => (kind === "loop_control" && key === recorded!.key ? recorded : null);
+
+  // 2. Same policy: the recorded answer acts again, and Jev is never called.
+  const same = FakeJevClient.choosing("stop_blocked", 0.99);
+  await withFake(same, () =>
+    withRun(QUALITY + AGENTS + TIERING + jevBlock("act", "{max_tier: t2}"), "adw_lc_replay_same", async (run, dispatches) => {
+      setLoopControlReplay(run, resolver);
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      assert.equal(same.calls.length, 0);
+      assert.deepEqual(dispatches.map((d) => d.model), ["openai/m1"]);
+      const [d] = await decisions(run);
+      assert.equal(d!.replayed, true);
+      assert.equal(d!.choice, "escalate_tier");
+    }),
+  );
+
+  // 3. max_tier removed: the same recorded answer is re-judged against
+  //    today's `permitted` — not_permitted, continue on the original model.
+  const gone = FakeJevClient.choosing("escalate_tier", 0.99);
+  await withFake(gone, () =>
+    withRun(QUALITY + AGENTS + TIERING + jevBlock("act"), "adw_lc_replay_gone", async (run, dispatches) => {
+      setLoopControlReplay(run, resolver);
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      assert.equal(gone.calls.length, 0);
+      assert.deepEqual(dispatches.map((d) => d.model), ["openai/m0"]);
+      const [d] = await decisions(run);
+      assert.deepEqual([d!.replayed, d!.choice, d!.jev_choice, d!.reason], [true, "continue", "escalate_tier", "not_permitted"]);
+    }),
+  );
+
+  // 4. Replay mode with nothing recorded: replay_missing -> continue, no call.
+  const none = FakeJevClient.choosing("stop_blocked", 0.99);
+  await withFake(none, () =>
+    withRun(QUALITY + AGENTS + jevBlock("act"), "adw_lc_replay_none", async (run) => {
+      setLoopControlReplay(run, async () => null);
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      assert.equal(none.calls.length, 0);
+      assert.deepEqual(phaseNames(run), ["test_1", "fix_1", "test_2"]);
+      assert.equal((await decisions(run))[0]!.reason, "replay_missing");
+    }),
+  );
+});
+
+test("loop_control: reviseLoop with reviewer === builder never escalates (the critic would be retiered too)", async () => {
+  const fake = FakeJevClient.choosing("escalate_tier", 0.99);
+  await withFake(fake, () =>
+    withRun(QUALITY + AGENTS + TIERING + jevBlock("act", "{max_tier: t2}"), "adw_lc_self_review", async (run, dispatches) => {
+      await steps.reviseLoop({ reviewer: "builder", max: 2 })(run, stateStub());
+      assert.deepEqual(dispatches.map((d) => [d.phase, d.model]), [
+        ["review_1", "openai/m0"],
+        ["revise_1", "openai/m0"],
+        ["review_2", "openai/m0"],
+      ]);
+      const [d] = await decisions(run);
+      assert.deepEqual([d!.choice, d!.reason], ["continue", "not_permitted"]);
+      assert.match((fake.calls[0]!.state as { escalation: { why: string } }).escalation.why, /same agent/);
+    }),
+  );
+});
+
+test("loop_control: routing is restored even when the escalated repair phase throws", async () => {
+  const fake = FakeJevClient.choosing("escalate_tier", 0.99);
+  await withFake(fake, () =>
+    withRun(
+      QUALITY + AGENTS + TIERING + jevBlock("act", "{max_tier: t2}"),
+      "adw_lc_throw",
+      async (run, dispatches) => {
+        const before = run.tiering;
+        await assert.rejects(steps.fixLoop({ suite: "test", fixRetries: 0 })(run, stateStub()), /stub: fix_1 dispatch failed/);
+        assert.equal(dispatches[0]?.model, "openai/m1", "the failing phase did run escalated");
+        assert.equal(run.tiering, before);
+        assert.equal(run.tiering?.routing["builder"]?.effective, "openai/m0");
+      },
+      { throwOn: "fix_1" },
+    ),
+  );
+});
+
+test("loop_control: escalation opens a fresh session for the role, and restore() puts the original agent_map entry back", async () => {
+  const fake = FakeJevClient.choosing("escalate_tier", 0.99);
+  await withFake(fake, () =>
+    withRun(QUALITY + AGENTS + TIERING + jevBlock("act", "{max_tier: t2}"), "adw_lc_session", async (run) => {
+      const original = { session_id: "s-build", model: "openai/m0", coding_agent: "flue" };
+      run.saveAgentMap("builder", original);
+      let during: string | undefined;
+      const realSave = run.saveAgentMap.bind(run);
+      run.saveAgentMap = (agent, entry) => {
+        if (agent === "builder" && entry.model === "openai/m1") during = entry.session_id;
+        realSave(agent, entry);
+      };
+      await steps.fixLoop({ suite: "test", max: 2 })(run, stateStub());
+      assert.equal(during, "s-fix_1", "the escalated round did not rejoin the m0 session");
+      assert.deepEqual(run.agent_map["builder"], original);
+    }),
+  );
+});
+
+test("loop_control act: reviseLoop failure paths fall back to continue too (timeout, error)", async () => {
+  const cases: Array<{ name: string; fake: FakeJevClient; extra?: string; reason: string }> = [
+    { name: "timeout", fake: FakeJevClient.hanging(), extra: "  timeout_ms: 20\n", reason: "timeout" },
+    { name: "error", fake: FakeJevClient.failing(new Error("boom")), reason: "error" },
+    { name: "low_confidence", fake: FakeJevClient.choosing("stop_blocked", 0.3), reason: "low_confidence" },
+  ];
+  for (const c of cases) {
+    await withFake(c.fake, () =>
+      withRun(QUALITY + AGENTS + jevBlock("act", "", c.extra ?? ""), `adw_lc_rfb_${c.name}`, async (run) => {
+        const state = stateStub();
+        await steps.reviseLoop({ max: 2 })(run, state);
+        assert.deepEqual(phaseNames(run), ["review_1", "revise_1", "review_2"], c.name);
+        assert.equal(state.reason, "the reviewer never approved after 2 revision(s)", c.name);
+        const [d] = await decisions(run);
+        assert.deepEqual([d!.choice, d!.reason], ["continue", c.reason], c.name);
+      }),
+    );
+  }
+});
+
+test("loop_control act: no API key (and no client factory) — no_api_key, continue, no network", async () => {
+  // No setJevClientFactory: client resolution falls through to the env,
+  // where this api_key_env is never set.
+  await withRun(QUALITY + AGENTS + jevBlock("act", "", "  api_key_env: SPF_TEST_LOOP_CONTROL_NO_SUCH_KEY\n"), "adw_lc_no_key", async (run) => {
+    const state = stateStub();
+    await steps.fixLoop({ suite: "test", max: 2 })(run, state);
+    assert.deepEqual(phaseNames(run), ["test_1", "fix_1", "test_2"]);
+    const [d] = await decisions(run);
+    assert.deepEqual([d!.choice, d!.reason], ["continue", "no_api_key"]);
+  });
+});
+
+test("nextRung: a call-site refusal, and an unserved ollama rung, are both not permitted (never skipped past)", () => {
+  const cfg = v.parse(SFConfigSchema, {
+    agents: [{ name: "builder", coding_agent: "flue", model: "openai/configured", prompt_engineering: { system: "s", user: "u" } }],
+    tiering: {
+      enabled: true,
+      tiers: [
+        { name: "t0", coding_agent: "flue", model: "openai/m0" },
+        { name: "t1", coding_agent: "flue", model: "ollama/qwen3:8b" },
+        { name: "t2", coding_agent: "flue", model: "openai/m2" },
+      ],
+      roles: { builder: "t0" },
+    },
+  });
+  const base = { cfg, resolution: resolutionAt("t0", "openai/m0"), role: "builder", maxTier: "t2", alreadyEscalated: false };
+  const why = (r: ReturnType<typeof nextRung>) => (r.ok ? "" : r.why);
+  assert.match(why(nextRung({ ...base, servedOllamaTags: new Set() })), /not usable/);
+  assert.match(why(nextRung({ ...base, servedOllamaTags: new Set(["other:1b"]) })), /not usable/);
+  assert.equal(nextRung({ ...base, servedOllamaTags: new Set(["qwen3:8b"]) }).ok, true);
+  assert.equal(why(nextRung({ ...base, servedOllamaTags: null, refuse: "self-review" })), "self-review");
+  // max_tier unset still reads as the operator's switch, even with a refusal.
+  assert.match(why(nextRung({ ...base, servedOllamaTags: null, maxTier: undefined, refuse: "self-review" })), /max_tier is not set/);
+});
+
+test("loop_control state bounds: lists are capped, and the whole state is held under the budget", () => {
+  const many = Array.from({ length: 500 }, (_, i) => `failure ${i}`);
+  const capped = capList(many);
+  assert.equal(capped.length, MAX_LIST_ITEMS + 1);
+  assert.equal(capped[MAX_LIST_ITEMS], `… and ${500 - MAX_LIST_ITEMS} more`);
+  assert.deepEqual(capList(["a", "b"]), ["a", "b"]);
+
+  const small = { round: 1, latest: { x: 1 }, history: [] };
+  assert.equal(boundState(small, 1_000), small, "under budget: untouched");
+  const huge = { round: 9, latest: { failures: many.map((f) => f.repeat(50)) }, history: Array.from({ length: 8 }, (_, i) => ({ round: i, failures: many.slice(0, 20) })) };
+  const bounded = boundState(huge, 20_000);
+  assert.ok(JSON.stringify(bounded).length <= 20_000, `bounded size ${JSON.stringify(bounded).length}`);
+  assert.equal((bounded["history"] as unknown[]).length, 1);
+  assert.equal((bounded["latest"] as { truncated: boolean }).truncated, true);
+  assert.equal(bounded["round"], 9);
+});
+
+test("loop_control: a jev.loop block (the ticket's spelling) is flagged, since parse strips it", async () => {
+  assert.equal(misplacedLoopSettings({ jev: { enabled: true } }), null);
+  assert.equal(misplacedLoopSettings(null), null);
+  assert.match(misplacedLoopSettings({ jev: { loop: { max_tier: "strong" } } })!, /escalation stays DISABLED.*jev\.decisions\.loop_control\.max_tier/);
+
+  const dir = mkdtempSync(join(tmpdir(), "spf-jev-loop-doctor-"));
+  try {
+    mkdirSync(join(dir, ".spf"), { recursive: true });
+    writeFileSync(join(dir, ".spf", "spf.config.yaml"), "jev:\n  enabled: true\n  loop:\n    max_tier: strong\n");
+    const logs: string[] = [];
+    const orig = { log: console.log, error: console.error, warn: console.warn };
+    console.log = (...a: unknown[]) => void logs.push(a.join(" "));
+    console.error = () => {};
+    console.warn = () => {};
+    try {
+      await doctorCommand(["--cwd", dir, "--json", "--no-probe"]);
+    } finally {
+      Object.assign(console, orig);
+    }
+    const report = JSON.parse(logs.join("\n")) as { checks: Array<{ name: string; ok: boolean; detail: string; severity?: string }> };
+    const c = report.checks.find((x) => x.name === "jev.loop");
+    assert.ok(c, "expected a jev.loop doctor check");
+    assert.equal(c!.severity, "warn");
+    assert.match(c!.detail, /jev\.decisions\.loop_control\.max_tier/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -80,7 +80,7 @@ import type { ChainContext } from "./context.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
 import { parseDecisionExtras } from "../core/jev.ts";
 import { LOOP_CONTROL_KIND } from "../core/jev_kinds.ts";
-import { clipTail, createLoopControl } from "./loop_control.ts";
+import { capList, clipTail, createLoopControl } from "./loop_control.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -712,11 +712,16 @@ export function fixLoop(
             round: i,
             phase: `${stepName}_${i}`,
             brief: failed.failures.map((f) => clipTail(f, 300)),
+            // Lists capped (capList) so a suite with hundreds of failures
+            // stays inside Jev's state budget; totals say what was cut.
             detail: {
-              failures: failed.failures,
-              failed_checks: failed.checks
-                .filter((c) => !c.passed)
-                .map((c) => ({ name: c.name, command: c.command, returncode: c.returncode, output_tail: clipTail(c.output_tail) })),
+              failures: capList(failed.failures.map((f) => clipTail(f, 1_000))),
+              failures_total: failed.failures.length,
+              failed_checks: capList(
+                failed.checks
+                  .filter((c) => !c.passed)
+                  .map((c) => ({ name: c.name, command: c.command, returncode: c.returncode, output_tail: clipTail(c.output_tail) })),
+              ),
             },
           });
           if (choice === "stop_blocked") {
@@ -804,8 +809,20 @@ export function reviseLoop(
     // Jev loop control (#105) — same contract as in fixLoop above: `null`
     // unless the kind is live; may stop early or escalate the reviser one
     // rung, never approve and never add a round. The REVIEWER is never
-    // retiered — only the role doing the repair.
-    const control = createLoopControl(run, { loop: "revise", role: builder, subject: reviewer, max });
+    // retiered — only the role doing the repair. Tiering routes by agent
+    // NAME, so when one agent plays both roles (legitimate, see
+    // requiredAgents below) escalating the author would escalate the critic
+    // too: escalation is then refused outright, and only continue /
+    // stop_blocked remain.
+    const control = createLoopControl(run, {
+      loop: "revise",
+      role: builder,
+      subject: reviewer,
+      max,
+      ...(reviewer === builder
+        ? { refuseEscalation: `the reviewer and the builder are the same agent (${JSON.stringify(builder)}) — escalating the reviser would retier the reviewer too` }
+        : {}),
+    });
     let stoppedAfter = 0;
     try {
       for (let i = 1; i <= max; i++) {
@@ -829,9 +846,12 @@ export function reviseLoop(
             phase: `review_${i}`,
             brief: rejected.blocking.map((b) => clipTail(b, 300)),
             detail: {
-              summary: rejected.summary,
-              blocking: rejected.blocking,
-              unmet: rejected.findings.filter((f) => !f.met).map((f) => ({ requirement: f.requirement, evidence: clipTail(f.evidence, 1_000) })),
+              summary: clipTail(rejected.summary, 2_000),
+              blocking: capList(rejected.blocking.map((b) => clipTail(b, 1_000))),
+              blocking_total: rejected.blocking.length,
+              unmet: capList(
+                rejected.findings.filter((f) => !f.met).map((f) => ({ requirement: clipTail(f.requirement, 1_000), evidence: clipTail(f.evidence, 1_000) })),
+              ),
             },
           });
           if (choice === "stop_blocked") {

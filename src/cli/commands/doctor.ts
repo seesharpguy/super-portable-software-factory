@@ -6,7 +6,8 @@
  * protected_files pattern that matches nothing (how a stale path convention
  * announces itself), an env-file that didn't load.
  */
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -25,6 +26,7 @@ import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
 import { jevDoctorChecks } from "../../core/jev.ts";
+import { misplacedLoopSettings } from "../../chains/loop_control.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
 import { refineBudget } from "../../core/gates.ts";
@@ -861,6 +863,22 @@ export async function doctorCommand(argv: string[]): Promise<number> {
   // feature settings fail. See core/jev.ts's jevDoctorChecks.
   for (const jevCheck of jevDoctorChecks(cfg.jev)) {
     check(report, jevCheck.name, jevCheck.ok, jevCheck.detail, jevCheck.severity);
+  }
+  // Jev loop_control (#105): a `jev.loop:` block (the ticket's original
+  // spelling) is stripped at parse, so only the RAW layers can show it —
+  // re-read each one. A warn, not a failure: the run still works, it just
+  // never escalates. The file already parsed above, so a read error here is
+  // not this check's to report.
+  if (cfg.jev.enabled) {
+    for (const configPath of resolution.paths) {
+      let detail: string | null = null;
+      try {
+        if (existsSync(configPath)) detail = misplacedLoopSettings(parseYaml(readFileSync(configPath, "utf-8")));
+      } catch {
+        detail = null;
+      }
+      if (detail) check(report, "jev.loop", true, `${configPath}: ${detail}`, "warn");
+    }
   }
 
   for (const spec of cfg.quality.checks) {
