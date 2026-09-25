@@ -29,9 +29,9 @@ import * as agents from "../../core/agents.ts";
 import { parseCli, resolvePrompt } from "../../core/utils.ts";
 import { findChain, resolveRequiredAgents, resolveRequiredSuites } from "../../chains/index.ts";
 import { probeServedOllamaTags, resolveTiering, type RiskDecision, type TierResolution } from "../../core/tiering.ts";
-import { createJev, decisionsFromEvents, JEV_DECISION_EVENT, type Decision, type RecordedEventLike } from "../../core/jev.ts";
+import { createJev, type Decision } from "../../core/jev.ts";
 import { RISK_TIER_KIND } from "../../core/jev_kinds.ts";
-import { decideRiskTier, riskTierLive } from "../../core/risk_tier.ts";
+import { checkRiskTierConfig, decideRiskTier, riskTierLive } from "../../core/risk_tier.ts";
 import { openTraceIfExists } from "./trace.ts";
 import type { ChainHistorySession, SfDb } from "../../ui/server/db.ts";
 
@@ -246,31 +246,20 @@ export interface RiskSourceReport {
 
 /**
  * The latest `risk_tier` decision `adwId` recorded for `chainName` (the
- * decision's `key`), read through `SfDb.events`' own paging — estimate
- * holds an `SfDb`, not a raw `TraceDb`, so `findRecordedDecision` does not
- * apply; `decisionsFromEvents` is the same parser either way.
+ * decision's `key`) — `SfDb.recordedDecisions` runs `core/jev.ts`'s own
+ * filtered query + parser over the reader's trace db.
  */
 async function recordedRiskDecision(db: SfDb, adwId: string, chainName: string): Promise<Decision | null> {
-  const events: RecordedEventLike[] = [];
-  let cursor = 0;
-  for (;;) {
-    const page = await db.events(adwId, cursor, 1_000);
-    for (const e of page.events) {
-      if (e.type !== "log" || e.name !== JEV_DECISION_EVENT || e.payload_json === null) continue;
-      try {
-        events.push({ type: "log", name: JEV_DECISION_EVENT, payload: JSON.parse(e.payload_json) });
-      } catch {
-        // a corrupt row is not a decision
-      }
-    }
-    if (!page.has_more) break;
-    cursor = page.cursor;
-  }
-  const all = decisionsFromEvents(events, { kind: RISK_TIER_KIND.kind, key: chainName });
+  const all = await db.recordedDecisions(adwId, { kind: RISK_TIER_KIND.kind, key: chainName });
   return all.length > 0 ? all[all.length - 1]! : null;
 }
 
-function describeRiskSource(live: boolean, replayAdwId: string | null, res: TierResolution): RiskSourceReport {
+/**
+ * `hasTrace`: whether a trace db was found under `--cwd` at all — so a
+ * `replay_missing` with no db says "nothing to replay" instead of sending
+ * the operator looking for a chain/prompt mismatch.
+ */
+function describeRiskSource(live: boolean, replayAdwId: string | null, res: TierResolution, hasTrace: boolean): RiskSourceReport {
   const jev = res.jev ?? null;
   if (replayAdwId === null) {
     return {
@@ -294,10 +283,14 @@ function describeRiskSource(live: boolean, replayAdwId: string | null, res: Tier
     const conf = jev.confidence === null ? "?" : jev.confidence.toFixed(2);
     return { source: "recorded_decision", replay_adw_id: replayAdwId, detail: `replayed from ${replayAdwId}: jev chose ${jev.choice} @ ${conf}`, jev };
   }
-  const why =
-    jev.reason === "replay_missing"
-      ? `no matching ${RISK_TIER_KIND.kind} decision recorded in ${replayAdwId} for this chain + prompt's heuristic`
-      : `the recorded decision in ${replayAdwId} does not act under today's policy (${jev.reason})`;
+  let why: string;
+  if (jev.reason !== "replay_missing") {
+    why = `the recorded decision in ${replayAdwId} does not act under today's policy (${jev.reason})`;
+  } else if (!hasTrace) {
+    why = `no trace db found under --cwd; nothing to replay from ${replayAdwId}`;
+  } else {
+    why = `no matching ${RISK_TIER_KIND.kind} decision recorded in ${replayAdwId} for this chain + prompt's heuristic`;
+  }
   return { source: "heuristic", replay_adw_id: replayAdwId, detail: why, jev };
 }
 
@@ -360,11 +353,22 @@ export async function estimateCommand(argv: string[]): Promise<number> {
   const riskLive = riskTierLive(cfg, jev);
   let riskDecision: Decision<TierResolution["risk"]> | null = null;
   if (replayAdwId !== null && riskLive) {
+    // A replay reads `jev.decisions.risk_tier`'s extras (`max_risk` re-judges
+    // the recording), so invalid extras are a config error here exactly as
+    // at `startRun` — reported as that `jev.decisions.risk_tier: ...`
+    // message with exit 1, before any lookup. (Without `--replay-risk`
+    // estimate never reads the extras, and `spf doctor` is what flags them.)
+    try {
+      checkRiskTierConfig(cfg);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
     const recorded = trace.db ? await recordedRiskDecision(trace.db, replayAdwId, chain.name) : null;
     riskDecision = await decideRiskTier(jev, cfg, { chainName: chain.name, prompt, replay: recorded });
   }
   const res = resolveTiering({ cfg, chainName: chain.name, prompt, servedOllamaTags, required, riskDecision });
-  const riskSource = riskLive || replayAdwId !== null ? describeRiskSource(riskLive, replayAdwId, res) : undefined;
+  const riskSource = riskLive || replayAdwId !== null ? describeRiskSource(riskLive, replayAdwId, res, trace.db !== null) : undefined;
 
   // Same detector `validate()` itself runs at every real `startRun` — never
   // thrown here, only reported: `estimate` gates nothing (exit 3 is reserved

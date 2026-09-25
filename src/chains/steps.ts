@@ -50,7 +50,7 @@ import * as agentsCfg from "../core/agents.ts";
 import * as session from "../core/session.ts";
 import * as refineLib from "../core/refine.ts";
 import * as tiering from "../core/tiering.ts";
-import { checkRiskTierConfig, decideRiskTier } from "../core/risk_tier.ts";
+import { checkRiskTierConfig, decideRunRiskTier } from "../core/risk_tier.ts";
 import { DOCUMENT_NOTES } from "../core/prompts.ts";
 import {
   BuildOutput,
@@ -180,9 +180,19 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
   // no `jev_decision` row, and a resolution + `tiering` payload identical
   // to the pre-Jev ones. Otherwise `run.jev` has already recorded the full
   // decision as its own `jev_decision` row (phase_id "", run-scoped) by the
-  // time the `tiering` event below attaches its summary.
-  const servedOllamaTags = await tiering.probeServedOllamaTags(cfg);
-  const riskDecision = await decideRiskTier(run.jev, cfg, { chainName: ctx.chain_name, prompt: ctx.prompt });
+  // time the `tiering` event below attaches its summary. A re-entry under
+  // the same adw_id + chain (watch resume, spf:feedback) replays this run's
+  // own first decision instead of asking Jev again — see `decideRunRiskTier`.
+  //
+  // The ollama probe and the Jev call are independent network waits, so
+  // they run concurrently: risk_tier adds at most max(probe, timeout_ms) to
+  // run start, not their sum. Neither rejects for a runtime failure (the
+  // probe fails open to `null`, `decide()` falls back); invalid extras were
+  // already rejected by `checkRiskTierConfig` above.
+  const [servedOllamaTags, riskDecision] = await Promise.all([
+    tiering.probeServedOllamaTags(cfg),
+    decideRunRiskTier(run.jev, cfg, { db: run.tracer.db, adwId: run.adw_id, chainName: ctx.chain_name, prompt: ctx.prompt }),
+  ]);
   run.tiering = tiering.resolveTiering({
     cfg,
     chainName: ctx.chain_name,

@@ -9,12 +9,17 @@
  * SAME closed set (`low | standard | high`), with the heuristic as the
  * fallback, and hands the resulting `Decision` to `resolveTiering` as data.
  *
- * WHERE IT IS DECIDED: exactly once per `startRun` call (`chains/steps.ts`),
- * before any phase opens, run-scoped (`phase_id: ""`), `key` = the chain
- * name. `resolveTiering` itself never calls Jev (it stays pure — invariant
- * 7); `spf estimate` never calls Jev either: it reports the heuristic, or —
- * with `--replay-risk <adw_id>` — replays that run's recorded decision under
- * today's policy, with no call and no row written.
+ * WHERE IT IS DECIDED: exactly once per `startRun` call (`chains/steps.ts`,
+ * via `decideRunRiskTier`), before any phase opens, run-scoped
+ * (`phase_id: ""`), `key` = the chain name. A run that re-enters `startRun`
+ * under the SAME `adw_id` + chain (the watch lane's continue-refinement
+ * resume, the build lane's `spf:feedback` loop) REPLAYS its own first
+ * recording instead of asking Jev again (invariant 5), so both halves of one
+ * run route from the same answer. `resolveTiering` itself never calls Jev
+ * (it stays pure — invariant 7); `spf estimate` never calls Jev either: it
+ * reports the heuristic, or — with `--replay-risk <adw_id>` — replays that
+ * run's recorded decision under today's policy, with no call and no row
+ * written.
  *
  * WHEN IT IS DECIDED AT ALL (`riskTierLive`): `jev.enabled`, the kind's mode
  * is not `off`, AND `tiering.enabled`. Risk changes nothing but tiering's
@@ -35,11 +40,24 @@
  * would have got without Jev.
  */
 import type { SFConfig } from "./data_types.ts";
-import { parseDecisionExtras, resolveDecisionPolicy, type Decision, type Jev, type JevOption } from "./jev.ts";
-import { RISK_TIER_KIND } from "./jev_kinds.ts";
+import { findRecordedDecision, parseDecisionExtras, resolveDecisionPolicy, type Decision, type Jev, type JevOption } from "./jev.ts";
+import { RISK_TIER_KIND, RISK_TIER_VALUES } from "./jev_kinds.ts";
 import { classifyRisk, type Risk } from "./tiering.ts";
+import type { TraceDb } from "./trace_db.ts";
 
-/** What each risk means to Jev. Keyed by `Risk` so a new risk fails to compile here until it is described. */
+/**
+ * Compile-time drift guard between the kind's declared values
+ * (`jev_kinds.ts`'s `RISK_TIER_VALUES`, what doctor shows and what
+ * `max_risk` accepts) and `tiering.ts`'s `Risk` (what `RISK_STEP` indexes).
+ * Checked in BOTH directions: a value added to either side alone makes one
+ * of the conditional types below `false`, and `true` no longer assigns to
+ * it. (A one-way `as readonly Risk[]` cast would still compile when the
+ * tuple grew, and ship Jev an option with an `undefined` description.)
+ */
+type KindRisk = (typeof RISK_TIER_VALUES)[number];
+export const RISK_SETS_MATCH: [KindRisk] extends [Risk] ? ([Risk] extends [KindRisk] ? true : false) : false = true;
+
+/** What each risk means to Jev. Keyed by `Risk` — and `Risk` is pinned to `RISK_TIER_VALUES` above — so a new risk fails to compile here until it is described. */
 const RISK_DESCRIPTIONS: Record<Risk, string> = {
   low:
     "Trivial, mechanical, or read-only work — a typo, a rename, a docs-only edit, a question about the code, a small scouting pass — " +
@@ -52,10 +70,11 @@ const RISK_DESCRIPTIONS: Record<Risk, string> = {
 
 /**
  * The closed option set, built from the SAME constant `RISK_TIER_KIND`
- * declares for doctor (R4), in ladder order (weakest first). Code-built,
- * never operator- or Jev-supplied (invariant 2).
+ * declares for doctor (`RISK_TIER_VALUES`, R4), in ladder order (weakest
+ * first). Code-built, never operator- or Jev-supplied (invariant 2). No
+ * cast: `RISK_SETS_MATCH` makes `KindRisk` and `Risk` the same set.
  */
-export const RISK_TIER_OPTIONS: readonly JevOption<Risk>[] = (RISK_TIER_KIND.options as readonly Risk[]).map((value) => ({
+export const RISK_TIER_OPTIONS: readonly JevOption<Risk>[] = RISK_TIER_VALUES.map((value) => ({
   value,
   description: RISK_DESCRIPTIONS[value],
 }));
@@ -88,6 +107,12 @@ export function riskTierLive(cfg: Pick<SFConfig, "tiering">, jev: Pick<Jev, "ena
  * `agents.validate`, so a config error never leaves a half-opened session
  * row behind; `decideRiskTier` parses the same extras again (cheap) for
  * callers that skip this.
+ *
+ * DELIBERATELY gated on `tiering.enabled` too, exactly like `riskTierLive`:
+ * with tiering off the extras are never read, so a bad `max_risk` does not
+ * fail a run (invariant 1 — a feature that is off is a no-op). `spf doctor`
+ * validates extras unconditionally, so it is the place a latent typo shows
+ * up before the day tiering is turned on. Pinned by a test.
  */
 export function checkRiskTierConfig(cfg: Pick<SFConfig, "tiering" | "jev">): void {
   if (cfg.tiering.enabled && resolveDecisionPolicy(cfg.jev, RISK_TIER_KIND.kind).mode !== "off") {
@@ -149,5 +174,58 @@ export async function decideRiskTier(
     permitted: permittedRisks(extras.max_risk, fallback),
     ...(input.replay !== undefined ? { replay: input.replay } : {}),
     phase_id: "",
+  });
+}
+
+/**
+ * `startRun`'s entry point: `decideRiskTier` for a run, replaying the run's
+ * OWN earlier `risk_tier` decision for this chain when one is recorded.
+ *
+ * `session.ensure` supports re-entry under the same `adw_id` (the watch
+ * lane's continue-refinement resume, the build lane's `spf:feedback` loop,
+ * a joined session that keeps its chain). Without this, each re-entry would
+ * ask Jev again, could get a different answer, and would route the second
+ * half of one run on a different tier than the first. With it, the first
+ * answer is reused, re-judged under today's policy and `permitted` (a
+ * `max_risk` lowered in between still wins — invariant 6).
+ *
+ * Only a recording that asked the SAME question is replayed: same options
+ * (in order) and same fallback — the same match `decide()`'s replay makes.
+ * A resumed prompt that lands in a different word-count bucket (the watch
+ * resume folds the whole comment thread in) is a genuinely new question,
+ * so it goes LIVE and records a new row, which later resumes then replay.
+ * (Handing `decide()` a non-matching recording would instead give
+ * `replay_missing` with no call, pinning that resume to the heuristic.)
+ *
+ * Nothing recorded (`null`) likewise goes live, so a run's FIRST
+ * `startRun` asks Jev as before. A failed lookup
+ * (a D1 hiccup) likewise goes live rather than failing the run — the
+ * lookup is a consistency nicety, never a gate. No lookup at all unless
+ * the kind is live (invariant 1: a jev-less config never touches the db
+ * for this).
+ */
+export async function decideRunRiskTier(
+  jev: Jev,
+  cfg: Pick<SFConfig, "tiering">,
+  input: { db: TraceDb; adwId: string; chainName: string; prompt: string },
+): Promise<Decision<Risk> | null> {
+  if (!riskTierLive(cfg, jev)) return null;
+  let recorded: Decision | null = null;
+  try {
+    recorded = await findRecordedDecision(input.db, input.adwId, RISK_TIER_KIND.kind, input.chainName);
+  } catch {
+    recorded = null;
+  }
+  const fallback = classifyRisk(input.chainName, input.prompt).risk;
+  const sameQuestion =
+    recorded !== null &&
+    recorded.question === "choice" &&
+    recorded.fallback === fallback &&
+    recorded.options.length === RISK_TIER_VALUES.length &&
+    recorded.options.every((o, i) => o === RISK_TIER_VALUES[i]);
+  return decideRiskTier(jev, cfg, {
+    chainName: input.chainName,
+    prompt: input.prompt,
+    ...(sameQuestion ? { replay: recorded } : {}),
   });
 }

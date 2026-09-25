@@ -49,6 +49,10 @@ record independent of the commit log.
   adds `max_risk` (a ceiling on escalation driven by Jev) and
   `max_prompt_chars`. `spf estimate` says where its risk came from, and
   `--replay-risk <adw_id>` reuses a recorded decision without calling Jev.
+  A run resumed under the same `adw_id` and chain replays its own decision
+  instead of asking again. When the kind is live, the head of the prompt
+  (up to `max_prompt_chars`) is sent to Jev; `max_prompt_chars: 0` sends
+  only the chain name and the heuristic's signals.
 
 ### Changed — OpenTelemetry: real SDK encoder, process-scoped metrics, outbound propagation
 

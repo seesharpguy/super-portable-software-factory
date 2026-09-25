@@ -34,8 +34,8 @@ import {
   traceDecisionRecorder,
   type Decision,
 } from "../core/jev.js";
-import { JEV_DECISION_KINDS, RISK_TIER_KIND } from "../core/jev_kinds.js";
-import { decideRiskTier, permittedRisks, RISK_TIER_OPTIONS, riskTierLive, riskTierState } from "../core/risk_tier.js";
+import { JEV_DECISION_KINDS, RISK_TIER_KIND, RISK_TIER_VALUES } from "../core/jev_kinds.js";
+import { decideRiskTier, permittedRisks, RISK_SETS_MATCH, RISK_TIER_OPTIONS, riskTierLive, riskTierState } from "../core/risk_tier.js";
 import { classifyRisk, resolveTiering, type Risk, type RiskDecision } from "../core/tiering.js";
 import { startRun } from "../chains/steps.js";
 import { estimateCommand, type EstimateReport } from "../cli/commands/estimate.js";
@@ -582,6 +582,152 @@ test("estimate --replay-risk: nothing recorded for that run -> replay_missing, h
       assert.equal(fake.calls.length, 0);
     });
   });
+});
+
+// ── review follow-ups (#104) ────────────────────────────────────────────────
+
+test("risk_tier resume: a second startRun under the same adw_id + chain REPLAYS the run's own decision — no second call, same routing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-risk-resume-"));
+  const adwId = "adw_risk_resume";
+  const opened: StartedRun[] = [];
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, TIERING_YAML + "jev:\n  enabled: true\n  mode: act\n");
+    const start = async (fake: FakeJevClient, prompt: string): Promise<StartedRun> => {
+      let run: StartedRun | undefined;
+      await withFake(fake, async () => {
+        run = await startRun({ prompt, config_paths: [configPath], adw_id: adwId, cwd: dir, chain_name: "plan-build", unattended: true }, ["builder"], []);
+      });
+      opened.push(run!);
+      return run!;
+    };
+
+    const first = FakeJevClient.choosing("high", 0.95);
+    const run1 = await start(first, PROMPT);
+    assert.equal(first.calls.length, 1);
+    assert.equal(run1.tiering!.risk, "high");
+
+    // Same chain, same prompt bucket: Jev would now say "low" — it must not be asked.
+    const second = FakeJevClient.choosing("low", 0.99);
+    const run2 = await start(second, PROMPT);
+    assert.equal(second.calls.length, 0, "a resume never re-asks Jev the same question");
+    assert.equal(run2.tiering!.risk, "high", "both halves of the run route from the same answer");
+    assert.equal(run2.tiering!.routing.builder!.effective, MODEL_FOR.high);
+    assert.equal(run2.tiering!.jev!.replayed, true);
+    let decisions = await rows(run2, adwId, JEV_DECISION_EVENT);
+    assert.equal(decisions.length, 2, "the original + the replay (decide() records replays too, replayed: true)");
+    assert.deepEqual(
+      decisions.map((d) => d.payload.replayed),
+      [false, true],
+    );
+    assert.equal(decisions.filter((d) => d.payload.replayed === false).length, 1, "exactly one LIVE decision");
+
+    // A resumed prompt in a different word-count bucket (>=400 words -> heuristic high)
+    // is a new question: it goes live rather than pinning the resume to replay_missing.
+    const third = FakeJevClient.choosing("standard", 0.99);
+    const run3 = await start(third, words(400));
+    assert.equal(third.calls.length, 1, "a changed fallback is a new question — asked live");
+    assert.equal(run3.tiering!.jev!.replayed, false);
+    assert.equal(run3.tiering!.jev!.fallback, "high");
+    assert.equal(run3.tiering!.risk, "standard");
+    decisions = await rows(run3, adwId, JEV_DECISION_EVENT);
+    assert.equal(decisions.length, 3);
+  } finally {
+    for (const run of opened) await run.tracer.db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("risk_tier: tiering OFF + jev live + invalid risk_tier extras — startRun does NOT throw (extras are unread); doctor is what flags them", async () => {
+  const fake = FakeJevClient.choosing("high", 0.99);
+  await withFake(fake, async () => {
+    const adwId = "adw_risk_tiering_off_bad_extras";
+    const yaml = TIERING_YAML.replace("enabled: true", "enabled: false") + "jev:\n  enabled: true\n  mode: act\n  decisions:\n    risk_tier: {max_risk: extreme}\n";
+    await withRun(yaml, adwId, async (run, cfg) => {
+      assert.equal(fake.calls.length, 0);
+      assert.equal((await rows(run, adwId, JEV_DECISION_EVENT)).length, 0);
+      assert.deepEqual(run.tiering, heuristicResolution(cfg));
+    });
+  });
+});
+
+test("risk_tier registry: every option carries a real description (the kind's values and tiering's Risk cannot drift)", () => {
+  for (const option of RISK_TIER_OPTIONS) {
+    assert.equal(typeof option.description, "string", option.value);
+    assert.ok(option.description.length > 0, option.value);
+  }
+  assert.deepEqual(RISK_TIER_OPTIONS.map((o) => o.value), [...RISK_TIER_VALUES]);
+  assert.equal(RISK_SETS_MATCH, true);
+});
+
+test("estimate --replay-risk: a recording made under a different prompt word-count bucket -> replay_missing, heuristic, no call", async () => {
+  const fake = FakeJevClient.failing(new Error("estimate must never call Jev"));
+  await withFake(fake, async () => {
+    await withEstimateRepo("jev:\n  enabled: true\n  mode: act\n", "high", async (dir, configPath) => {
+      const longer = words(100); // scout (-1) + 100 words (0) -> heuristic "standard", vs the recording's "low" fallback
+      const report = await estimateJson(["scout", longer, "--config", configPath, "--cwd", dir, "--no-probe", "--replay-risk", "r1"]);
+      assert.equal(report.risk, classifyRisk("scout", longer).risk);
+      assert.equal(report.risk, "standard");
+      assert.equal(report.risk_source?.source, "heuristic");
+      assert.equal(report.risk_source?.jev?.reason, "replay_missing");
+      assert.match(report.risk_source!.detail, /no matching risk_tier decision/);
+      assert.equal(fake.calls.length, 0);
+    });
+  });
+});
+
+test("estimate --replay-risk: a recording above today's max_risk is not_permitted on replay (invariant 6) — heuristic acts", async () => {
+  const fake = FakeJevClient.failing(new Error("estimate must never call Jev"));
+  await withFake(fake, async () => {
+    // Recorded "high" under the default max_risk (high); replayed today under max_risk: standard.
+    await withEstimateRepo("jev:\n  enabled: true\n  mode: act\n  decisions:\n    risk_tier: {max_risk: standard}\n", "high", async (dir, configPath) => {
+      const report = await estimateJson(["scout", ESTIMATE_PROMPT, "--config", configPath, "--cwd", dir, "--no-probe", "--replay-risk", "r1"]);
+      assert.equal(report.risk, classifyRisk("scout", ESTIMATE_PROMPT).risk);
+      assert.equal(report.risk_source?.source, "heuristic");
+      assert.equal(report.risk_source?.jev?.reason, "not_permitted");
+      assert.equal(report.risk_source?.jev?.jev_choice, "high");
+      assert.equal(fake.calls.length, 0);
+    });
+  });
+});
+
+async function captureStderr(fn: () => Promise<number>): Promise<{ code: number; stderr: string[] }> {
+  const stderr: string[] = [];
+  const { log, error, warn } = console;
+  console.log = () => {};
+  console.error = (...args: unknown[]) => void stderr.push(args.join(" "));
+  console.warn = () => {};
+  try {
+    return { code: await fn(), stderr };
+  } finally {
+    console.log = log;
+    console.error = error;
+    console.warn = warn;
+  }
+}
+
+test("estimate --replay-risk with invalid risk_tier extras: exit 1 with the jev.decisions.risk_tier config error", async () => {
+  await withEstimateRepo("jev:\n  enabled: true\n  mode: act\n  decisions:\n    risk_tier: {max_risk: extreme}\n", null, async (dir, configPath) => {
+    const { code, stderr } = await captureStderr(() =>
+      estimateCommand(["scout", ESTIMATE_PROMPT, "--config", configPath, "--cwd", dir, "--no-probe", "--replay-risk", "r1"]),
+    );
+    assert.equal(code, 1);
+    assert.match(stderr.join("\n"), /jev\.decisions\.risk_tier: max_risk/);
+  });
+});
+
+test("estimate --replay-risk with no trace db at all: says there is nothing to replay (not a chain/prompt mismatch)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-risk-estimate-notrace-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, estimateYaml("jev:\n  enabled: true\n  mode: act\n"));
+    const report = await estimateJson(["scout", ESTIMATE_PROMPT, "--config", configPath, "--cwd", dir, "--no-probe", "--replay-risk", "r1"]);
+    assert.equal(report.risk, "low");
+    assert.equal(report.risk_source?.jev?.reason, "replay_missing");
+    assert.match(report.risk_source!.detail, /no trace db found under --cwd/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // Type-level: a full Decision<Risk> is assignable to the riskDecision input.
