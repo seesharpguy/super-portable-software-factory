@@ -98,11 +98,25 @@ function assertVerdictConsistent(run: StartedRun, handoff: ReviewOutputT): void 
   assert.ok(report.passed, `the triaged handoff must still satisfy verdictConsistent: ${report.violations.join("; ")}`);
 }
 
+/**
+ * Sibling Jev kinds that fire in the same run (`loop_control` after each
+ * failed review round of `reviseLoop`/`simple_sdlc`) are pinned `off` in
+ * every jev-enabled config below, so every Jev call and `jev_decision` row
+ * these tests count belongs to `finding_triage`. An explicit
+ * `finding_triage` entry in the test's own yaml is kept as written.
+ */
+function siblingKindsOff(yaml: string): string {
+  const OFF = "    loop_control: { mode: off }\n";
+  if (!yaml.startsWith("jev:\n")) return yaml;
+  if (yaml.includes("\n  decisions:\n")) return yaml.replace("\n  decisions:\n", `\n  decisions:\n${OFF}`);
+  return yaml.replace("jev:\n", `jev:\n  decisions:\n${OFF}`);
+}
+
 async function withStartedRun(yaml: string, adwId: string, body: (run: StartedRun) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "spf-jev-triage-"));
   try {
     const configPath = join(dir, "spf.config.yaml");
-    writeFileSync(configPath, yaml);
+    writeFileSync(configPath, siblingKindsOff(yaml));
     const run = await steps.startRun(
       { prompt: "Add POST /items", config_paths: [configPath], adw_id: adwId, cwd: dir, chain_name: "build-review", unattended: true },
       [],
@@ -531,7 +545,7 @@ function sdlcRepo(jevYaml: string): { dir: string; configPath: string } {
  * `respond`. The reviewer rejects every round.
  */
 async function runSimpleSdlc(jevYaml: string, adwId: string): Promise<{ code: number; handoffs: Handoff[]; phases: string[]; review: ReviewOutputT; dir: string }> {
-  const { dir, configPath } = sdlcRepo(jevYaml);
+  const { dir, configPath } = sdlcRepo(siblingKindsOff(jevYaml));
   const review = rejectingReview();
   const handoffs: Handoff[] = [];
   const phases: string[] = [];

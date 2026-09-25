@@ -338,7 +338,9 @@ Jev classifies each **unmet** finding (`met: false` in the reviewer's
   record it. An invalid value fails the run in `startRun` with
   `jev.decisions.finding_triage: ...`, before the first phase and so
   before any agent spend (`startRun` parses the settings of every
-  registered kind that is not `off`). `spf doctor` reports it too.
+  registered kind that is not `off`; `risk_tier` keeps its own narrower
+  rule and is parsed only while tiering is on too). `spf doctor` reports
+  it too.
 
 ### `loop_control`
 
