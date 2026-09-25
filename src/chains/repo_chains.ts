@@ -74,6 +74,7 @@ import { parse as parseYaml } from "yaml";
 import type * as paths from "../core/paths.ts";
 import * as steps from "./steps.ts";
 import { BUILTIN_CHAIN_NAMES, stepChain, type ChainDefinition } from "./index.ts";
+import { MAX_STEPS_LIMIT, MAX_VISITS_LIMIT, defaultMaxSteps, graphProblems, type ChainGraph, type GraphNode } from "./graph.ts";
 
 /** What went wrong in one file, and which file. */
 export interface RepoChainProblem {
@@ -287,6 +288,15 @@ export const RepoChainFileSchema = v.strictObject({
     v.array(v.looseObject({ step: v.string("each step entry needs a `step:` naming a step factory") }), "steps must be a list"),
     v.minLength(1, "steps must name at least one step — a chain with no steps would run nothing and report success"),
   ),
+  /** The step budget of a graph chain (one that declares `next:`) — see `./graph.ts`. Meaningless, and rejected, on a linear chain. */
+  max_steps: v.optional(
+    v.pipe(
+      v.number("max_steps must be a number"),
+      v.integer("max_steps must be a whole number"),
+      v.minValue(1, "max_steps must be at least 1"),
+      v.maxValue(MAX_STEPS_LIMIT, `max_steps above ${MAX_STEPS_LIMIT} — raise this bound deliberately in graph.ts if a chain genuinely needs it`),
+    ),
+  ),
 });
 export type RepoChainFile = v.InferOutput<typeof RepoChainFileSchema>;
 
@@ -323,6 +333,106 @@ const RESERVED_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "version",
   "help",
 ]);
+
+// ── declared transitions (graph chains) ─────────────────────────────────
+
+/**
+ * The keys a step entry may carry BESIDE its factory params, to declare
+ * edges (#109 — see `./graph.ts`). They are stripped before the factory's
+ * own strict param schema runs, so they can never reach a factory, and no
+ * factory param is named like them.
+ *
+ *   id          a name other steps' `next:` can point at
+ *   next        the step ids this step may hand off to; `[]` ends the chain here
+ *   default     the edge taken when Jev is off or falls back (must be in `next`)
+ *   max_visits  how many times this step may run in one walk (bounds a cycle)
+ */
+export const GRAPH_KEYS: readonly string[] = Object.freeze(["id", "next", "default", "max_visits"]);
+
+/** A step id is referenced from yaml and recorded in the trace: kept to one plain word, and never containing `@` (implicit ids use it). */
+const STEP_ID_RE = /^[a-z][a-z0-9_-]*$/;
+
+const GraphKeysSchema = v.object({
+  id: v.optional(v.pipe(v.string("id must be a string"), v.regex(STEP_ID_RE, "id must be lowercase letters/digits/_- and start with a letter"))),
+  next: v.optional(v.array(v.string("next must list step ids"), "next must be a list of step ids")),
+  default: v.optional(v.string("default must name a step id")),
+  max_visits: v.optional(
+    v.pipe(
+      v.number("max_visits must be a number"),
+      v.integer("max_visits must be a whole number"),
+      v.minValue(1, "max_visits must be at least 1"),
+      v.maxValue(MAX_VISITS_LIMIT, `max_visits above ${MAX_VISITS_LIMIT} — raise this bound deliberately in graph.ts if a chain genuinely needs it`),
+    ),
+  ),
+});
+type GraphKeys = v.InferOutput<typeof GraphKeysSchema>;
+
+/** Steps that set `state.accepted` — the gating steps a graph chain's commit rules are about. */
+const GATING_STEPS: ReadonlySet<string> = new Set(["qualityCheck", "fixLoop", "reviseLoop"]);
+
+/**
+ * Assemble the graph from the parsed entries, or say what is wrong with the
+ * declared edges. Returns `{ graph: null }` for a chain that declares no
+ * `next:` at all — a plain list, run exactly as before this existed.
+ */
+function buildGraph(
+  name: string,
+  entries: Array<{ keys: GraphKeys; stepName: string; params: Record<string, unknown>; step: steps.Step }>,
+  maxSteps: number | undefined,
+): { graph: ChainGraph | null } | { message: string } {
+  const where = (i: number) => `steps[${i}] (${entries[i]!.keys.id ?? entries[i]!.stepName})`;
+  const isGraph = entries.some((e) => e.keys.next !== undefined);
+  if (!isGraph) {
+    const stray = entries.findIndex((e) => e.keys.default !== undefined || e.keys.max_visits !== undefined);
+    if (stray >= 0) return { message: `${where(stray)}: default/max_visits only mean something in a chain that declares next: edges` };
+    if (maxSteps !== undefined) return { message: "max_steps only means something in a chain that declares next: edges" };
+    return { graph: null };
+  }
+
+  const ids = new Map<string, number>();
+  for (const [i, e] of entries.entries()) {
+    if (e.keys.id === undefined) continue;
+    const prior = ids.get(e.keys.id);
+    if (prior !== undefined) return { message: `${where(i)}: id ${JSON.stringify(e.keys.id)} is already used by steps[${prior}]` };
+    ids.set(e.keys.id, i);
+  }
+
+  for (const [i, e] of entries.entries()) {
+    const { next, default: dflt } = e.keys;
+    if (next === undefined) {
+      if (dflt !== undefined) return { message: `${where(i)}: default needs a next: list to choose from` };
+      continue;
+    }
+    if (e.keys.id === undefined) return { message: `${where(i)}: a step that declares next: needs an id (it keys Jev's decision and the trace)` };
+    if (new Set(next).size !== next.length) return { message: `${where(i)}: next lists the same step twice` };
+    const missing = next.filter((t) => !ids.has(t));
+    if (missing.length > 0) {
+      return { message: `${where(i)}: next names unknown step id(s) ${missing.map((m) => JSON.stringify(m)).join(", ")} — declared ids: ${[...ids.keys()].join(", ") || "(none)"}` };
+    }
+    if (dflt !== undefined && !next.includes(dflt)) return { message: `${where(i)}: default ${JSON.stringify(dflt)} is not one of its next: edges` };
+    if (next.length > 1 && dflt === undefined) {
+      const linear = entries[i + 1]?.keys.id;
+      if (linear === undefined || !next.includes(linear)) {
+        return { message: `${where(i)}: declares ${next.length} next: edges but no default, and the step after it is not one of them — add default:` };
+      }
+    }
+  }
+
+  const nodes: GraphNode[] = entries.map((e, i) => ({
+    id: e.keys.id ?? `${e.stepName}@${i}`,
+    step_name: e.stepName,
+    step: e.step,
+    next: e.keys.next ?? null,
+    default: e.keys.default ?? null,
+    max_visits: e.keys.max_visits ?? null,
+    gate: GATING_STEPS.has(e.stepName),
+    commit: e.stepName === "commit" ? (e.params["onlyIfAccepted"] === true ? "only_if_accepted" : "plain") : null,
+  }));
+  const graph: ChainGraph = { chain: name, nodes, max_steps: maxSteps ?? defaultMaxSteps(nodes.length) };
+  const problems = graphProblems(graph);
+  if (problems.length > 0) return { message: problems.join("; ") };
+  return { graph };
+}
 
 // ── loading ──────────────────────────────────────────────────────────────
 
@@ -426,15 +536,28 @@ function loadOne(file: string): { chain: ChainDefinition } | { message: string }
     return { message: `name ${JSON.stringify(file_chain.name)} is an spf subcommand — \`spf ${file_chain.name}\` would never reach this chain; pick another name` };
   }
 
-  const built: steps.Step[] = [];
+  const built: Array<{ keys: GraphKeys; stepName: string; params: Record<string, unknown>; step: steps.Step }> = [];
   for (const [index, entry] of file_chain.steps.entries()) {
-    const result = buildStep(index, entry as Record<string, unknown>);
+    // Split the edge-declaring keys off first: the factory's own strict
+    // schema must never see them (and would reject them as unknown params).
+    const raw = entry as Record<string, unknown>;
+    const graphRaw: Record<string, unknown> = {};
+    const stepEntry: Record<string, unknown> = {};
+    for (const [k, value] of Object.entries(raw)) (GRAPH_KEYS.includes(k) ? graphRaw : stepEntry)[k] = value;
+    const keys = v.safeParse(GraphKeysSchema, graphRaw);
+    if (!keys.success) return { message: `steps[${index}] (${String(raw["step"])}): ${describeIssues(keys.issues)}` };
+    const result = buildStep(index, stepEntry);
     if ("message" in result) return { message: result.message };
-    built.push(result.step);
+    const { step: stepName, ...params } = stepEntry;
+    built.push({ keys: keys.output, stepName: String(stepName), params, step: result.step });
   }
 
+  const graph = buildGraph(file_chain.name, built, file_chain.max_steps);
+  if ("message" in graph) return { message: graph.message };
+
   // The same constructor the built-ins use — see stepChain()'s comment.
-  return { chain: { ...stepChain(file_chain.name, file_chain.describe, built), source: file } };
+  const list = built.map((b) => b.step);
+  return { chain: { ...stepChain(file_chain.name, file_chain.describe, list, graph.graph ?? undefined), source: file } };
 }
 
 /**

@@ -99,6 +99,77 @@ disposer stays the OPERATOR's, never the branch's, which is exactly what
 keeps an agent from rewriting its own quality gate mid-run by editing a chain
 file as part of the change it's making.
 
+### Declared transitions (`next:`)
+
+A repo chain normally runs its steps top to bottom. It can instead declare
+**edges**, which lets a step hand off to one of several steps. At a step
+with more than one edge, Jev (`docs/jev.md`, kind `chain_edge`) picks among
+the declared edges only. With Jev off, or on any fallback, the `default`
+edge is taken.
+
+```yaml
+# .spf/chains/triage-ship.yaml
+name: triage-ship
+describe: build and test, with an optional extra review before landing
+max_steps: 12                  # optional step budget; default = 2 × the step count, at most 50
+steps:
+  - id: request
+    step: request
+  - id: build
+    step: build
+    max_visits: 2              # bounds the build <-> test retry cycle
+  - id: test
+    step: fixLoop
+    suite: test
+    next: [land, review, build]  # the declared edges
+    default: land              # taken with Jev off, or on any fallback
+  - id: review
+    step: reviseLoop
+    next: [land]
+  - id: land
+    step: commit
+    onlyIfAccepted: true
+```
+
+- **Keys.** `id`, `next`, `default` and `max_visits` sit beside `step:`,
+  like params, but they never reach the step factory. The file can also set
+  `max_steps` at top level.
+- **`id`.** Lowercase letters, digits, `_` and `-`. It is required on any
+  step that declares `next:`, because it names that step's decision
+  (`<id>#<visit>`) in the trace.
+- **Edges.** A step without `next:` hands off to the step after it, or
+  ends the chain if it is the last one. `next: []` ends the chain at that
+  step. With several edges and no `default:`, the step after it must be one
+  of the edges, and it becomes the default.
+- **Old chains are unaffected.** A chain with no `next:` anywhere runs
+  exactly as before. `default`, `max_visits` and `max_steps` are load
+  problems in a chain like that.
+- **Every edge target must be a declared `id`, and every step must be
+  reachable** from the first step.
+- **Cycles need a bound.** Every cycle must pass through a step with
+  `max_visits` (at most 10). `max_steps` caps total step executions for the
+  whole run. An edge into a step that has used up its `max_visits` is not
+  offered. If no edge is left, or the budget runs out, the run stops and
+  is **not accepted**. The default path (what runs with Jev off) must
+  finish within `max_steps`, or the file does not load.
+- **Edges add checks, never skip them.** If the default path runs a
+  gating step (`qualityCheck`, `fixLoop`, `reviseLoop`) before a `commit`,
+  every path to that commit must run it too. An `onlyIfAccepted` commit
+  must have at least one gating step on every path to it. The example
+  above passes both rules: `review` is an extra check on the way to
+  `land`, and no edge skips `test`.
+- **`accepted` is aggregated.** On a graph chain, `accepted` means every
+  gating step's latest run passed. A review that Jev routes to after a red
+  suite cannot turn the run green. Re-running the suite through a declared
+  cycle can.
+- **`spf list` shows the edges.** It prints branch points as
+  `test:code(test) … =>(land|review|build)`. Agents and suites are derived
+  from every step, including steps only a branch reaches, so
+  `spf doctor`/`validate()` check all of them up front.
+- **The trace keeps the path.** Each transition is a `chain_edge` event,
+  and the whole path is one `chain_path` event, so a run can be replayed
+  deterministically.
+
 Everything below this section is about the OTHER three doors: designing a
 brand-new built-in chain, adding a step to the vocabulary above, or adding an
 engine primitive (gate/envelope type/phase primitive) — none of which a

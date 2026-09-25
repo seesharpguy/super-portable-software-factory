@@ -41,6 +41,17 @@ record independent of the commit log.
 
 <!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
+- **`chain_edge`** (#109): repo chains (`.spf/chains/*.yaml`) can declare
+  transitions. A step can take an `id`, a `next:` list of step ids, a
+  `default` edge and `max_visits`, and the file can set `max_steps`. At a
+  step with more than one edge, Jev picks among those edges only. The
+  fallback is the `default` edge, or the linear next step. The loader
+  rejects a graph with a missing target, an unreachable step, an unbounded
+  cycle, a default path over budget, or a path that reaches a `commit`
+  while skipping a gate the default path runs. On a graph chain,
+  `accepted` is the AND of every gating step's latest result. Transitions
+  are traced as `chain_edge`/`chain_path` events and replay by key
+  (`<step id>#<visit>`). Chains without `next:` run exactly as before.
 - **`chain_router`** (#107): an optional `watch.chains` allowlist lets Jev
   route each claimed `spf watch` issue to one of the operator's chains,
   choosing from each chain's `describe`/`phases` text and the issue's

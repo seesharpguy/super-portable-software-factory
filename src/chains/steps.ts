@@ -82,6 +82,7 @@ import { parseDecisionExtras, resolveDecisionPolicy } from "../core/jev.ts";
 import { JEV_DECISION_KINDS, RISK_TIER_KIND } from "../core/jev_kinds.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
 import { capList, clipTail, createLoopControl } from "./loop_control.ts";
+import { walkGraph, type ChainGraph } from "./graph.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -1192,18 +1193,32 @@ export function derivePhases(steps: Step[]): string {
 
 // ── the driver ────────────────────────────────────────────────────────────
 
-/** Run a chain's step list start to finish: prologue, every step in order, then run.finish(). */
+/**
+ * Run a chain's step list start to finish: prologue, every step in order,
+ * then run.finish().
+ *
+ * `graph` is set only for a repo chain that declares `next:` edges (see
+ * `./graph.ts`): the steps are then walked along their declared edges, with
+ * Jev picking among a branch point's declared edges only, instead of in list
+ * order. Every chain without one — every built-in, and every repo chain with
+ * no `next:` — takes the unchanged loop below.
+ */
 export async function runSteps(
   ctx: ChainContext,
   requiredAgents: string[],
   requiredSuites: string[],
   steps: Step[],
   options: Record<string, string> = {},
+  graph: ChainGraph | null = null,
 ): Promise<number> {
   const run = await startRun(ctx, requiredAgents, requiredSuites);
   const state = makeState(ctx.prompt, options, ctx.issue_id ?? null);
-  for (const step of steps) {
-    await step(run, state);
+  if (graph) {
+    await walkGraph(run, state, graph);
+  } else {
+    for (const step of steps) {
+      await step(run, state);
+    }
   }
   return await run.finish(state.accepted, state.reason);
 }
