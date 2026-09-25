@@ -172,8 +172,14 @@ export interface WatchFanoutDeps {
   concurrency: number;
   /** The MAIN repo root. `GitHandle` has no accessor for it — `cli/commands/watch.ts` passes its anchor's `repo_root`, the same value `deps.git` is bound to. */
   repoRoot: string;
-  /** One attempt's chain, in that attempt's own worktree — the same ctx `runChain` builds, per attempt. */
-  runAttempt: (dispatch: AttemptDispatch) => Promise<number>;
+  /**
+   * One attempt's chain, in that attempt's own worktree — the same ctx
+   * `runChain` builds, per attempt. `chain` is set only when the Jev chain
+   * router (`WatchDeps.routeChain`) picked something other than
+   * `WatchDeps.chain` for this issue; absent means the configured chain,
+   * exactly as before routing existed.
+   */
+  runAttempt: (dispatch: AttemptDispatch, chain?: string) => Promise<number>;
   /** Gate/usage rows for one attempt's adw_id, from the SHARED db. Must not throw. */
   readMetrics: (adwId: string) => Promise<AttemptMetrics>;
   /**
@@ -193,7 +199,15 @@ export interface WatchFanoutDeps {
    */
   adwIdsFree: (adwIds: string[]) => Promise<boolean>;
   /** The winner's review posture, read back post-hoc — the same two fields `runChain` returns, keyed on a WINNER instead of the sole attempt. */
-  reviewFor: (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => Promise<{ reviewRequired: boolean; reviewSummary?: string }>;
+  reviewFor: (opts: { cwd: string; adwId: string; chainOptions: Record<string, string>; chain?: string }) => Promise<{ reviewRequired: boolean; reviewSummary?: string }>;
+}
+
+/** What `WatchDeps.routeChain` answers for one claimed issue. */
+export interface WatchChainRoute {
+  /** The chain to run. Must be `WatchDeps.chain` or a member of the operator's `watch.chains` allowlist. */
+  chain: string;
+  /** One markdown line for the issue comment and PR body, or null/absent when there is nothing to tell a human (Jev off, or no real menu). */
+  note?: string | null;
 }
 
 export interface WatchDeps {
@@ -243,7 +257,30 @@ export interface WatchDeps {
    */
   linkDataDir: (worktreePath: string) => void;
   dryRun: boolean;
-  runChain: (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }) => Promise<ChainRunResult>;
+  /**
+   * `chain` is set only when `routeChain` picked something other than
+   * `WatchDeps.chain` for this issue; absent means the configured chain,
+   * exactly as before routing existed.
+   */
+  runChain: (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string>; chain?: string }) => Promise<ChainRunResult>;
+  /**
+   * The Jev chain router (#107) — picks which chain builds a plain `ready`
+   * claim, from `watch.chain` plus the operator's `watch.chains` allowlist
+   * (`cli/commands/watch.ts`'s `makeWatchChainRouter` over
+   * `core/chain_router.ts`). `undefined` — the default, with no
+   * `watch.chains` configured, and what every existing test constructs —
+   * means no routing: `chain` runs, byte-identical to before.
+   *
+   * Called once per claim, at claim time, by `runIssueSingle` (plain claims
+   * only — a `feedback` revision keeps `chain`) and `runIssueFanout`, which
+   * passes `requireCommit: true` so the menu is filtered to commit chains
+   * BEFORE Jev is asked (best-of-N discards losing worktrees; see
+   * `spf watch`'s startup refusal). Injected as a callback for the same
+   * reason `runChain` is: this module never imports `src/chains/`.
+   * `resolveRoute` below wraps it — a throw, or an answer that is not a
+   * string, degrades to `chain` and never blocks the issue.
+   */
+  routeChain?: (issue: Issue, opts: { adwId: string; requireCommit: boolean }) => Promise<WatchChainRoute>;
   /**
    * `IssueAuthoringProvider.listChildren`'s read-back, injected as a bound
    * function rather than a whole provider object — same reasoning as
@@ -1118,6 +1155,8 @@ async function openPrForWinner(
      * revisionRound)`) — see `runIssueSingle`.
      */
     revisionRound?: number;
+    /** The chain router's one-line note (`WatchChainRoute.note`) — appended to a NEW PR's body. Absent (the default) leaves the body byte-identical. */
+    routeNote?: string | null;
   },
 ): Promise<void> {
   const wtGit = deps.worktreeGit(won.worktreePath);
@@ -1173,7 +1212,7 @@ async function openPrForWinner(
     pr = await deps.codeHost.openPr({
       branch: won.branch,
       title: `${issue.title} (${issue.id})`,
-      body: `${askSection}\n\n---\n\n**Review:** ${reviewLine}${supersedeNote}\n\n_Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}._`,
+      body: `${askSection}\n\n---\n\n**Review:** ${reviewLine}${supersedeNote}${won.routeNote ? `\n\n${won.routeNote}` : ""}\n\n_Automated by \`spf watch\` — chain \`${deps.chain}\`, adw_id \`${won.adwId}\`, issue ${issue.id}._`,
       base: deps.baseBranch,
     });
   }
@@ -1294,6 +1333,15 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
       deps.log(`watch: ${issue.id}: exhausted ${MAX_FANOUT_SALT + 1} deterministic fan-out base id(s) — falling back to a random one (${baseAdwId})`);
     }
 
+    // Jev chain router (#107), before anything is created on disk.
+    // `requireCommit: true`: best-of-N discards every losing worktree, so
+    // the router's menu is filtered to commit chains IN CODE before Jev is
+    // asked — the same eligibility rule `spf watch`'s startup refusal
+    // applies to `watch.chain`. A no-op when `deps.routeChain` is unset.
+    const route = await resolveRoute(deps, issue, { adwId: baseAdwId, requireCommit: true });
+    deps = route.deps;
+    const routed = route.routed;
+
     // PRE-SWEEP: one list, two passes (sweepPairs) — marker0's own recorded
     // pair (the only way to reach a stale RENAMED winner from a crash after
     // §8.3's rename), the canonical single-lane pair (the rename target
@@ -1356,7 +1404,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
       worktreesDir: deps.worktreesDir,
       git: pinnedGit,
       linkDataDir: deps.linkDataDir,
-      runAttempt: fanout.runAttempt,
+      runAttempt: routed ? (dispatch) => fanout.runAttempt(dispatch, routed) : fanout.runAttempt,
       readMetrics: fanout.readMetrics,
       log: deps.log,
     });
@@ -1411,7 +1459,11 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
     won = { worktree: winner.worktree, branch };
     await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
 
-    const review = await fanout.reviewFor({ cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions });
+    const review = await fanout.reviewFor(
+      routed
+        ? { cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions, chain: routed }
+        : { cwd: winner.worktree, adwId: winner.adw_id, chainOptions: deps.chainOptions },
+    );
 
     // `won` stays set from here on — openPrForWinner catches nothing, so
     // this function's own catch (below) is the only cleanup for a throw
@@ -1425,6 +1477,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
       reviewRequired: review.reviewRequired,
       reviewSummary: review.reviewSummary,
       extraNotifyFields: [["fanout", `${n} attempts, won by ${winner.adw_id}`]],
+      ...(route.note ? { routeNote: route.note } : {}),
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -1439,6 +1492,46 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
     await deps.provider.transition(issue, "blocked", `spf watch error: ${message}`).catch(() => undefined);
     cleanupWorktree(deps, won);
   }
+}
+
+/**
+ * Ask `deps.routeChain` (the Jev chain router) which chain builds this
+ * claim, and return `deps` with `chain` swapped for the answer — every
+ * downstream reader of `deps.chain` (the blocked/PR messages, the
+ * `pr_opened` notify, `runBestOf`'s `chainName`) then names the chain that
+ * ACTUALLY ran. `routed` is set only when the answer differs from the
+ * configured chain; callers pass it to `runChain`/`runAttempt`, so an
+ * unrouted claim hands them exactly the arguments it always did.
+ *
+ * NEVER THROWS and never blocks an issue: no router, a router that throws,
+ * or a non-string answer all mean the configured chain. When the router has
+ * something to say (`note`), it is logged and posted once on the issue —
+ * best-effort, a failed comment is only logged — so the human watching the
+ * tracker sees which chain was chosen and why before the PR exists.
+ */
+async function resolveRoute(
+  deps: WatchDeps,
+  issue: Issue,
+  opts: { adwId: string; requireCommit: boolean },
+): Promise<{ deps: WatchDeps; routed?: string; note: string | null }> {
+  if (!deps.routeChain) return { deps, note: null };
+  let route: WatchChainRoute;
+  try {
+    route = await deps.routeChain(issue, opts);
+  } catch (error) {
+    deps.log(`watch: ${issue.id}: chain router failed (${(error as Error).message}) — running the default chain "${deps.chain}"`);
+    return { deps, note: null };
+  }
+  const chain = typeof route?.chain === "string" && route.chain.length > 0 ? route.chain : deps.chain;
+  const note = route?.note ?? null;
+  if (note) {
+    deps.log(`watch: ${issue.id}: chain router -> "${chain}" (default "${deps.chain}")`);
+    await deps.provider.comment(issue, `spf watch: this issue will be built by chain \`${chain}\`.\n\n${note}`).catch((error: Error) => {
+      deps.log(`watch: ${issue.id}: could not post the chain-router comment: ${error.message}`);
+    });
+  }
+  if (chain === deps.chain) return { deps, note };
+  return { deps: { ...deps, chain }, routed: chain, note };
 }
 
 /**
@@ -1479,7 +1572,9 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
     let diffBase: string;
     let prompt: string;
     let prCarry: number | undefined;
-    let openPrOpts: { existingPr?: number; supersedesPr?: number; revisionRound?: number } = {};
+    let openPrOpts: { existingPr?: number; supersedesPr?: number; revisionRound?: number; routeNote?: string | null } = {};
+    let routed: string | undefined;
+    let openPrRouteNote: string | null = null;
 
     if (revision) {
       if (!priorMarker?.pr) {
@@ -1529,13 +1624,20 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
       // `branchNameFor`'s own doc comment for the non-fast-forward rejection
       // this specifically fixes.
       const plainRound = priorMarker?.pr ? priorRound + 1 : 0;
+      // Jev chain router (#107): plain claims only, before anything is
+      // created on disk. A no-op (same `deps`, no `routed`, no note) when
+      // `deps.routeChain` is unset — the default.
+      const route = await resolveRoute(deps, issue, { adwId, requireCommit: false });
+      deps = route.deps;
+      routed = route.routed;
+      openPrRouteNote = route.note;
       branch = branchNameFor(issue, plainRound);
       deps.git.fetch("origin", deps.baseBranch);
       startPoint = `origin/${deps.baseBranch}`;
       diffBase = `origin/${deps.baseBranch}`;
       prompt = buildIssuePrompt(issue);
       prCarry = undefined;
-      openPrOpts = { revisionRound: plainRound };
+      openPrOpts = openPrRouteNote ? { revisionRound: plainRound, routeNote: openPrRouteNote } : { revisionRound: plainRound };
     }
 
     // worktreePath/branch are fully deterministic given the round just
@@ -1560,7 +1662,9 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
     // touched yet.
     await deps.provider.writeMarker(issue, { pr: prCarry, revision: revisionCarry, worktree: worktreePath, branch, attempt: 0 });
 
-    const result = await deps.runChain({ prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions });
+    const result = await deps.runChain(
+      routed ? { prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions, chain: routed } : { prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions },
+    );
 
     if (!result.accepted) {
       deps.log(`watch: ${issue.id}: chain "${deps.chain}" did not succeed — blocked`);

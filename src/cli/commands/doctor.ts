@@ -25,7 +25,8 @@ import { cloudflareAiBaseUrl } from "../../core/cloudflare_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
-import { jevDoctorChecks } from "../../core/jev.ts";
+import { jevDoctorChecks, resolveDecisionPolicy } from "../../core/jev.ts";
+import { CHAIN_ROUTER_KIND } from "../../core/jev_kinds.ts";
 import { misplacedLoopSettings } from "../../chains/loop_control.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
@@ -1428,6 +1429,49 @@ export async function doctorCommand(argv: string[]): Promise<number> {
         true,
         `${hasReviewer ? "includes" : "does not include"} a reviewer; ${hasCommitPhase ? "includes" : "does not include"} a commit phase`,
       );
+    }
+
+    // watch.chains — the Jev chain router's allowlist (#107, docs/jev.md
+    // "`chain_router`"). Silent when empty (no routing at all). Every name
+    // must resolve, exactly as `spf watch` refuses to start otherwise; each
+    // routable chain gets the same suites/owners requirements check
+    // `watch.chain` gets above, because a routed claim dispatches it for
+    // real. Under best-of-N, a chain with no commit step is never offered
+    // (the router filters it in code) — a warn, so an operator is not
+    // surprised that it never runs there.
+    if (cfg.watch.chains.length > 0) {
+      const unknown = cfg.watch.chains.filter((name) => !findChain(name));
+      const policy = resolveDecisionPolicy(cfg.jev, CHAIN_ROUTER_KIND.kind);
+      const menu = [...new Set([cfg.watch.chain, ...cfg.watch.chains])];
+      check(
+        report,
+        "watch.chains",
+        unknown.length === 0,
+        unknown.length > 0
+          ? `not registered: ${unknown.map((n) => JSON.stringify(n)).join(", ")} — \`spf watch\` refuses to start; run \`spf list\` to see every chain`
+          : `chain router menu: ${menu.join(", ")} (fallback ${cfg.watch.chain}) — ` +
+              (cfg.jev.enabled ? `jev chain_router mode=${policy.mode}` : "jev is off, so every claim runs watch.chain"),
+      );
+      for (const name of cfg.watch.chains) {
+        if (name === cfg.watch.chain) continue; // already checked as watch.chain above
+        const def = findChain(name);
+        if (def) checkChainRequirements(report, `watch.chains "${name}"`, def, cfg);
+      }
+      if (cfg.watch.fanout.n > 1) {
+        const nonCommit = cfg.watch.chains.filter((name) => {
+          const def = findChain(name);
+          return def !== undefined && !hasCommitStep(def.phases);
+        });
+        if (nonCommit.length > 0) {
+          check(
+            report,
+            "watch.chains fanout eligibility",
+            true,
+            `${nonCommit.join(", ")} ${nonCommit.length === 1 ? "has" : "have"} no commit phase — never offered while watch.fanout.n > 1 (best-of-N needs committed work)`,
+            "warn",
+          );
+        }
+      }
     }
 
     // watch.fanout — the best-of-N multiplier `watch.fanout.n`/

@@ -82,6 +82,20 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 // ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
 
 /**
+ * `spf watch`'s chain router (#107) — which operator-allowlisted chain
+ * (`watch.chains`, plus the default `watch.chain`) builds a claimed issue.
+ * No static `options`: the menu is built by CODE from `watch.chains` at
+ * claim time (core/chain_router.ts), filtered to commit chains when
+ * best-of-N needs one. No `extras`: the common mode/threshold/timeout_ms
+ * knobs are the only settings.
+ */
+export const CHAIN_ROUTER_KIND = defineJevKind({
+  kind: "chain_router",
+  summary: "route a claimed spf watch issue to one chain from watch.chains (fallback: watch.chain)",
+  question: "choice",
+});
+
+/**
  * `finding_triage` (#106): before an unmet `ReviewOutput` finding is handed
  * to the fixing agent (`reviseLoop`'s review -> revise handoff), classify it
  * as a genuine defect (`real`) or something the fixer should not spend its
@@ -167,6 +181,7 @@ export const RISK_TIER_KIND = defineJevKind({
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  CHAIN_ROUTER_KIND,
   FINDING_TRIAGE_KIND,
   LOOP_CONTROL_KIND,
   RISK_TIER_KIND,

@@ -41,6 +41,15 @@ record independent of the commit log.
 
 <!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
+- **`chain_router`** (#107): an optional `watch.chains` allowlist lets Jev
+  route each claimed `spf watch` issue to one of the operator's chains,
+  choosing from each chain's `describe`/`phases` text and the issue's
+  title/body. The fallback is `watch.chain`. Under `watch.fanout.n > 1`,
+  non-commit chains are filtered out in code before Jev is asked. When a
+  decision is made, the chosen chain is logged, posted on the issue, and
+  written into the PR body. Unknown names fail `spf watch` startup and
+  `spf doctor`. With no `watch.chains` or no `jev:` block, behavior is
+  unchanged. See `docs/jev.md`.
 - **`finding_triage`** (#106): before a rejected review's unmet findings
   reach the fixing agent (`reviseLoop` and `simple_sdlc`'s revise phase),
   Jev classifies each one `real | noise | style` in one batched call. In

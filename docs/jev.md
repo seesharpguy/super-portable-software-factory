@@ -230,6 +230,67 @@ settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
+### `chain_router`
+
+Picks which chain builds an issue that `spf watch` claims. Ticket #107.
+
+```yaml
+watch:
+  chain: plan-build-test              # the default, and the fallback
+  chains: [plan-build, build-review]  # the allowlist the router may pick from
+jev:
+  enabled: true
+  decisions:
+    chain_router: { mode: shadow }    # or act / off; threshold, timeout_ms as usual
+```
+
+- **Kind:** `chain_router`, a `choice` question.
+- **Options:** built by code at claim time, not static. The menu is
+  `watch.chain` first, then each `watch.chains` entry in the order written,
+  with duplicates removed. Each option's value is the chain name. Its
+  description, which only Jev sees, is the chain's `describe` line plus its
+  derived `phases` string. The state Jev reads is the issue's id, title and
+  body (the body is cut to 4,000 characters), the default chain, and whether
+  a commit chain is required. The trace records only a sha256 of that state.
+- **Fallback:** `watch.chain`, the one chain `spf watch` ran before this
+  feature existed. It is always on the menu, so you do not need to repeat it
+  in `watch.chains`.
+- **Where it is resolved:** in `core/watch.ts`, at claim time and before
+  any worktree is created, through the `WatchDeps.routeChain` callback. That
+  callback is built by `makeWatchChainRouter` in `cli/commands/watch.ts`
+  over `core/chain_router.ts`. `key` is the issue id and `phase_id` is `""`,
+  because no chain has started yet. The decision is written to the main
+  repo's trace db under the claim's adw_id: `issue-<id>` for single
+  dispatch, or the best-of-N base id (for example `issue-<id>`) that the
+  attempt ids derive from. `spf phases issue-<id>` shows it. If the trace db
+  cannot be opened, the decision still acts but is not traced, and one log
+  line says so. Plain `ready` claims are routed. A `feedback` revision is
+  not, and always runs `watch.chain`.
+- **Best-of-N:** when `watch.fanout.n > 1`, chains with no commit step are
+  removed from the menu in code before Jev is asked, so Jev never sees
+  them. This uses the same `hasCommitStep` check as the startup refusal. A
+  routed chain is checked again when each attempt dispatches.
+- **Degenerate menus skip Jev:** if the menu has fewer than two chains
+  after filtering (for example the allowlist holds only non-commit chains
+  under best-of-N), `decide()` is not called. The fallback runs and no
+  trace row is written.
+- **What acting can do:** swap which operator-allowlisted chain runs for
+  this one issue. When a decision was made (Jev enabled and the kind not
+  `off`), spf posts one issue comment naming the chosen chain and why, and
+  the PR body gets the same line. With Jev off, nothing appears on the
+  tracker.
+- **What acting cannot do:** name a chain outside the menu (that answer is
+  `invalid_choice` and the fallback runs), pick a non-commit chain under
+  best-of-N, or change anything inside a chain. Every chain's own gates,
+  retry limits and budget ceilings run unchanged. Routing never changes
+  `watch.chain_options`, the adw_id, the branch, or the worktree.
+- **Validation:** every `watch.chains` name must resolve through
+  `findChain`. `spf watch` refuses to start otherwise, and `spf doctor`
+  fails a `watch.chains` check. Doctor also runs the same suites and owners
+  checks on each allowlisted chain as on `watch.chain`, and under best-of-N
+  it warns which allowlisted chains will never be offered.
+- **Extras:** none.
+
 ### `finding_triage`
 
 Ticket #106. Before a rejected review's findings reach the fixing agent,

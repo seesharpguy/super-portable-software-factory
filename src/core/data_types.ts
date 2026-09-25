@@ -1422,6 +1422,18 @@ export const WatchConfigSchema = v.object({
   issue_repo: v.optional(v.string(), ""),
   label_prefix: v.optional(v.string(), "spf"),
   chain: v.optional(v.string(), "plan-build-test"),
+  /**
+   * The Jev chain router's allowlist (#107, `docs/jev.md` "`chain_router`")
+   * — extra chain names a claimed issue MAY be routed to instead of
+   * `chain`. Empty (the default) means no routing at all: every claim runs
+   * `chain`, exactly as before this field existed. Non-empty only offers a
+   * menu; with `jev:` off (the default) the router still returns `chain`.
+   * `chain` itself is always on the menu (it is the deterministic
+   * fallback), so it need not be repeated here. Every name must resolve via
+   * `findChain` — `spf watch` refuses to start otherwise and `spf doctor`
+   * fails it. Whole-array replace on merge, like `quality.checks`.
+   */
+  chains: v.optional(v.array(v.string()), () => []),
   base_branch: v.optional(v.string(), "main"),
   poll_ms: v.optional(v.number(), 60_000),
   concurrency: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 2),

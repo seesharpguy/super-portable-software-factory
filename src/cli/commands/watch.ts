@@ -20,6 +20,10 @@ import { isAuthoringProvider } from "../../core/issues/provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import * as refineLib from "../../core/refine.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps, type WatchFanoutDeps } from "../../core/watch.ts";
+import { routeChain, type RoutableChain } from "../../core/chain_router.ts";
+import { createJev, traceDecisionRecorder, type JevClient } from "../../core/jev.ts";
+import { CHAIN_ROUTER_KIND } from "../../core/jev_kinds.ts";
+import { Tracer } from "../../core/tracer.ts";
 import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
@@ -304,7 +308,23 @@ export function makeWatchFanoutDispatch(
   dataPaths: DataPaths,
   chainDef: ChainDefinition,
 ): Pick<WatchFanoutDeps, "runAttempt" | "readMetrics" | "adwIdsFree" | "reviewFor"> {
-  const runAttempt = async (dispatch: AttemptDispatch): Promise<number> => {
+  /**
+   * `chain` is set only when the Jev chain router routed this issue away
+   * from `watch.chain` (`core/watch.ts`'s `resolveRoute`). The router's
+   * menu is already filtered to commit chains for this lane; the
+   * `hasCommitStep` re-check here is defense in depth — a routed chain that
+   * could not survive best-of-N is refused with a throw (the issue blocks
+   * with the message) rather than run N times and discarded.
+   */
+  const chainFor = (chain: string | undefined): ChainDefinition => {
+    if (!chain || chain === chainDef.name) return chainDef;
+    const routed = findChain(chain);
+    if (!routed) throw new Error(`chain router picked ${JSON.stringify(chain)}, which is not a registered chain`);
+    if (!hasCommitStep(routed.phases)) throw new Error(`chain router picked ${JSON.stringify(chain)}, which has no commit phase — not eligible for watch.fanout`);
+    return routed;
+  };
+  const runAttempt = async (dispatch: AttemptDispatch, chain?: string): Promise<number> => {
+    const def = chainFor(chain);
     // NO `dispatch.isAborted()` early return, unlike `spf fanout`'s own
     // runAttempt: that check only ever fires under `firstSuccess`, which
     // `spf watch` never sets (`decided` is never flipped — see
@@ -315,13 +335,13 @@ export function makeWatchFanoutDispatch(
       config_paths: configPaths,
       adw_id: dispatch.adwId, // "issue-<id>-<i>" (or the salted/random base's own) — fanout.ts's attemptAdwId
       cwd: dispatch.cwd, // THIS attempt's own worktree — the Run's repo_root anchor
-      chain_name: chainDef.name,
+      chain_name: def.name,
       unattended: true, // same as runChain's and spf fanout's own dispatch — nobody is at a TTY for attempt 2 of 3
-      chain_source: chainDef.source,
+      chain_source: def.source,
     };
     // `cfg.watch.chain_options` reaches every attempt exactly as it reaches
     // the single dispatch above — one shared map for all N attempts.
-    return withRunScope(dispatch.adwId, () => runChainDef(chainDef, ctx, cfg.watch.chain_options));
+    return withRunScope(dispatch.adwId, () => runChainDef(def, ctx, cfg.watch.chain_options));
   };
 
   /**
@@ -375,12 +395,93 @@ export function makeWatchFanoutDispatch(
     }
   };
 
-  const reviewFor = async (opts: { cwd: string; adwId: string; chainOptions: Record<string, string> }) => ({
-    reviewRequired: resolveRequiredAgents(chainDef, opts.chainOptions).includes("reviewer"),
+  const reviewFor = async (opts: { cwd: string; adwId: string; chainOptions: Record<string, string>; chain?: string }) => ({
+    reviewRequired: resolveRequiredAgents(chainFor(opts.chain), opts.chainOptions).includes("reviewer"),
     reviewSummary: await reviewSummaryFor(cfg, opts.cwd, opts.adwId),
   });
 
   return { runAttempt, readMetrics, adwIdsFree, reviewFor };
+}
+
+/** A resolved chain as `core/chain_router.ts` sees it — plain data, with `commits` computed here, where the chain registry lives. */
+function routableChain(def: ChainDefinition): RoutableChain {
+  return { name: def.name, describe: def.describe, phases: def.phases, commits: hasCommitStep(def.phases) };
+}
+
+/**
+ * Every `watch.chains` entry that does NOT resolve via `findChain` — what
+ * `spf watch` refuses to start on and `spf doctor` fails. Empty when the
+ * allowlist is empty or entirely valid.
+ */
+export function unknownWatchChains(cfg: SFConfig): string[] {
+  return cfg.watch.chains.filter((name) => !findChain(name));
+}
+
+/**
+ * The Jev chain router's `WatchDeps.routeChain` (#107) — or `undefined`
+ * when `watch.chains` is empty, which leaves the daemon on `watch.chain`
+ * with no routing code on the path at all.
+ *
+ * Exported as a plain function of its inputs (the same reason
+ * `makeWatchFanoutDispatch` is): `watchCommand` calls this SAME factory, so
+ * the router `src/test/chain_router.test.ts` drives against a real trace db
+ * is the router the daemon ships.
+ *
+ * PER CLAIM: resolve the menu with `findChain` (startup already refused an
+ * unknown name; one vanishing since is simply left off the menu), then —
+ * only when Jev is enabled and `chain_router` is not `off` — open a Tracer
+ * on the main repo's trace db for this claim's adw_id, so the decision
+ * lands as a `jev_decision` event beside the run it chose (`spf phases
+ * issue-<id>`; for best-of-N, the base id `issue-<id>` the attempts derive
+ * from). A Tracer that fails to open degrades to an UNTRACED decision (it
+ * still acts) with one log line, never a blocked issue. With Jev off the
+ * tracer is never opened and `decide()` answers `watch.chain` with no call
+ * and no row — invariant 1.
+ *
+ * `jevOptions` is the test seam (`client`/`env`); production passes
+ * nothing, and `createJev` resolves the HTTP client from `cfg.jev`.
+ */
+export function makeWatchChainRouter(
+  cfg: SFConfig,
+  dataPaths: DataPaths,
+  log: (message: string) => void,
+  jevOptions: { client?: JevClient | null; env?: NodeJS.ProcessEnv } = {},
+): WatchDeps["routeChain"] {
+  if (cfg.watch.chains.length === 0) return undefined;
+  const base = createJev({ config: cfg.jev, client: jevOptions.client, env: jevOptions.env });
+  return async (issue, opts) => {
+    const fallbackDef = findChain(cfg.watch.chain);
+    if (!fallbackDef) return { chain: cfg.watch.chain }; // startup already checked; never route off a vanished default
+    const allowlist = cfg.watch.chains.map((name) => findChain(name)).filter((def): def is ChainDefinition => Boolean(def)).map(routableChain);
+    const live = base.enabled && base.policy(CHAIN_ROUTER_KIND.kind).mode !== "off";
+    let tracer: Tracer | null = null;
+    if (live) {
+      try {
+        tracer = await Tracer.open(dataPaths.db, path.join(dataPaths.sessions_dir, opts.adwId, "events.jsonl"));
+      } catch (error) {
+        log(`watch: ${issue.id}: chain router could not open the trace db (${(error as Error).message}) — deciding untraced`);
+      }
+    }
+    try {
+      const jev = base.withRecorder(tracer ? traceDecisionRecorder(tracer, opts.adwId) : null);
+      const route = await routeChain(jev, {
+        fallback: routableChain(fallbackDef),
+        allowlist,
+        requireCommit: opts.requireCommit,
+        issue: { id: issue.id, title: issue.title, body: issue.body },
+      });
+      if (route.decision) {
+        const d = route.decision;
+        log(
+          `watch: ${issue.id}: jev chain_router mode=${d.mode} choice="${d.choice}" jev_choice=${d.jev_choice === null ? "none" : `"${d.jev_choice}"`} ` +
+            `confidence=${d.confidence ?? "n/a"} fallback="${d.fallback}"${d.reason ? ` reason=${d.reason}` : ""} (${d.latency_ms}ms)`,
+        );
+      }
+      return { chain: route.chain, note: route.note };
+    } finally {
+      await tracer?.close().catch(() => undefined);
+    }
+  };
 }
 
 export async function watchCommand(argv: string[]): Promise<number> {
@@ -399,6 +500,14 @@ export async function watchCommand(argv: string[]): Promise<number> {
   }
   if (!findChain(cfg.watch.chain)) {
     console.error(`watch.chain ${JSON.stringify(cfg.watch.chain)} is not a registered chain — run \`spf list\` to see every chain`);
+    return 1;
+  }
+  // The Jev chain router's allowlist (#107) — same rule as watch.chain: a
+  // name that cannot resolve stops the daemon before it claims anything,
+  // rather than silently shrinking the menu Jev is offered.
+  const unknownChains = unknownWatchChains(cfg);
+  if (unknownChains.length > 0) {
+    console.error(`watch.chains names chain(s) that are not registered: ${unknownChains.map((n) => JSON.stringify(n)).join(", ")} — run \`spf list\` to see every chain`);
     return 1;
   }
   if (cfg.watch.refine.enabled) {
@@ -580,7 +689,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     excludeSpfDataFromGit(worktreePath);
   }
 
-  const runChain = async (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string> }): Promise<ChainRunResult> => {
+  const runChain = async (opts: { prompt: string; cwd: string; adwId: string; chainOptions: Record<string, string>; chain?: string }): Promise<ChainRunResult> => {
     // WATCH DIVERGENCE: `findChain` here resolves against the registry
     // `cli/index.ts`'s `main()` built ONCE, at daemon start, from the MAIN
     // repo anchor (the `registerRepoChains(...)` call before the command
@@ -591,7 +700,14 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // quality gate mid-run by editing a chain file as part of the change
     // it's making. (Also documented in the `spf init` scaffold, since that's
     // the one place an author is invited to edit a chain file at all.)
-    const chainDef = findChain(cfg.watch.chain)!; // checked above
+    //
+    // `opts.chain` is set only when the Jev chain router routed this issue
+    // away from `watch.chain` — always a `watch.chains` member, every one of
+    // which startup resolved. A name that has since vanished throws, and
+    // `runIssueSingle`'s catch blocks the issue with the message: never a
+    // silent swap back to a chain nobody chose.
+    const chainDef = opts.chain ? findChain(opts.chain) : findChain(cfg.watch.chain)!; // checked above
+    if (!chainDef) throw new Error(`chain router picked ${JSON.stringify(opts.chain)}, which is not a registered chain`);
     const ctx: ChainContext = {
       prompt: opts.prompt,
       config_paths: configPaths,
@@ -625,7 +741,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
       cfg,
       opts.cwd,
       opts.adwId,
-      `Chain "${cfg.watch.chain}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
+      `Chain "${chainDef.name}" (adw_id ${opts.adwId}) did not complete successfully. Run \`spf phases ${opts.adwId} --cwd ${opts.cwd}\` for detail.`,
     );
     return { accepted: false, adwId: opts.adwId, detail, reviewRequired };
   };
@@ -758,6 +874,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
     linkDataDir,
     dryRun: Boolean(flags["dry-run"]),
     runChain,
+    // The Jev chain router (#107): `undefined` unless `watch.chains` is
+    // set — see `makeWatchChainRouter`. Logs through `deps.log` (read at
+    // call time, so the dashboard swap above applies).
+    routeChain: makeWatchChainRouter(cfg, dataPaths, (message) => deps.log(message)),
     listChildren: authoringProvider ? (parent) => authoringProvider.listChildren(parent) : undefined,
     // See `WatchDeps.publishSpecs`'s own doc comment: `authoringProvider` is
     // guaranteed non-null whenever `refine.enabled` is true (the startup
@@ -830,6 +950,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
     console.log(
       `[spf] watch     ${cfg.watch.issue_provider}+${cfg.watch.code_host}  ${cfg.watch.repo}  label "${cfg.watch.label_prefix}:*"  chain "${cfg.watch.chain}"  concurrency ${cfg.watch.concurrency}` +
         (cfg.watch.refine.enabled ? `  refine "${cfg.watch.refine.chain}" concurrency ${cfg.watch.refine.concurrency}` : "") +
+        (cfg.watch.chains.length > 0 ? `  chain router [${cfg.watch.chains.join(", ")}] (jev ${cfg.jev.enabled ? "on" : "off"})` : "") +
         (flags["dry-run"] ? "  (dry run)" : ""),
     );
   }
