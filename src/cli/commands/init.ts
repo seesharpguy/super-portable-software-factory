@@ -219,6 +219,64 @@ export const EXAMPLE_CHAIN_YAML = `# .spf/chains/example.yaml — a repo-local c
 #     onlyIfAccepted: true
 `;
 
+/**
+ * Second scaffold, same contract as EXAMPLE_CHAIN_YAML: every line a `#`
+ * comment, so it registers nothing and reports no problem. It shows the other
+ * thing a repo-local chain is for — putting an EXTERNAL CLI (a third-party
+ * reviewer, a linter) into the sequence. A chain can't run an arbitrary
+ * command inline; the command is declared as a `quality.checks[]` entry,
+ * grouped into a `quality.suites` suite, and the chain names that suite via
+ * `fixLoop`. The checks half lives in spf.config.yaml, so it is shown here as
+ * a comment rather than written for you.
+ */
+export const EXAMPLE_REVIEW_FIX_CHAIN_YAML = `# .spf/chains/review-fix.yaml — an external CLI reviewer + lint as a gate.
+#
+# A chain step can't run an arbitrary shell command inline. The command is
+# declared once under quality.checks in .spf/spf.config.yaml, grouped into a
+# suite, and the chain names the suite. fixLoop runs the suite, hands any
+# failing output VERBATIM to the fix agent, and re-runs it — bounded by max,
+# and never leaving an unverified fix on the last iteration.
+#
+# 1. Add to .spf/spf.config.yaml (this half is config, not chain):
+#
+#   quality:
+#     checks:
+#       - { name: ocr,  area: backend, operation: lint, argv: ["./scripts/ocr-gate.sh"], timeout_seconds: 600 }
+#       - { name: lint, area: backend, operation: lint, argv: ["npm", "run", "lint"], timeout_seconds: 120 }
+#     suites:
+#       review-lint: [ocr, lint]     # ONE suite for both — see the note below
+#
+# 2. Write ./scripts/ocr-gate.sh. A check passes or fails on its exit code
+#    ALONE, and open-code-review (https://github.com/alibaba/open-code-review)
+#    does not document one for "found issues" — so wrap it: run
+#    \`ocr review --format json --output <tmp>\` (a path OUTSIDE the repo, so
+#    nothing dirties the tree that \`commit\` will stage), print the findings
+#    to stdout (that is what the fix agent reads), and exit nonzero if there
+#    are any. Without that wrapper this gate can never fail.
+#    ocr calls its own LLM with your credentials; that spend never appears in
+#    \`spf sessions\`. See cookbooks/ocr_reviewer.md for the reviewer-agent
+#    alternative.
+#
+# 3. Uncomment the chain below — spf build-review-fix "<prompt>"
+#
+# Use ONE suite, not two fixLoop steps: every step overwrites state.accepted,
+# so a failing review loop followed by a passing lint loop would be reported
+# as accepted, and both loops would name their repair phases fix_1, fix_2, ...
+#
+# name: build-review-fix
+# describe: plan, build, then an ocr + lint gate with a bounded auto-fix loop
+# steps:
+#   - step: request
+#   - step: plan
+#   - step: build
+#   - step: fixLoop
+#     suite: review-lint            # must name a key under quality.suites
+#     owner: builder                # optional — the agent that repairs failures
+#     max: 3
+#   - step: commit
+#     onlyIfAccepted: true
+`;
+
 const GENERATED_HEADER = `# .spf/spf.config.yaml — written by \`spf init\`'s interview, merged ON TOP of
 # spf's packaged built-in defaults. Only what you changed is here; run
 # \`spf doctor\` any time to see what's actually in effect for this repo, and
@@ -242,6 +300,10 @@ export async function initCommand(argv: string[]): Promise<number> {
   const exampleChainPath = path.join(chainsDir, "example.yaml");
   if (!existsSync(exampleChainPath)) {
     writeFileSync(exampleChainPath, EXAMPLE_CHAIN_YAML);
+  }
+  const reviewFixChainPath = path.join(chainsDir, "review-fix.yaml");
+  if (!existsSync(reviewFixChainPath)) {
+    writeFileSync(reviewFixChainPath, EXAMPLE_REVIEW_FIX_CHAIN_YAML);
   }
 
   // Idempotent (a no-op once the skill is already up to date, a `.new`

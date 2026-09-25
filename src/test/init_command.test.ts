@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { initCommand, EXAMPLE_CHAIN_YAML } from "../cli/commands/init.js";
+import { initCommand, EXAMPLE_CHAIN_YAML, EXAMPLE_REVIEW_FIX_CHAIN_YAML } from "../cli/commands/init.js";
 import { loadRepoChains } from "../chains/repo_chains.js";
 import { resolveAnchor } from "../core/paths.js";
 
@@ -134,6 +134,39 @@ test("EXAMPLE_CHAIN_YAML's commented-out template, uncommented verbatim, is a ch
   assert.deepEqual(problems, [], `expected zero problems, got: ${JSON.stringify(problems)}`);
   assert.equal(chains.length, 1);
   assert.equal(chains[0]?.name, "example");
+});
+
+test("scaffolds .spf/chains/review-fix.yaml, fully commented out, and it loads clean", async () => {
+  const code = await initCommand(["--cwd", dir, "--yes"]);
+  assert.equal(code, 0);
+  const content = readFileSync(join(dir, ".spf", "chains", "review-fix.yaml"), "utf-8");
+  for (const line of content.split("\n")) {
+    if (line.trim() === "") continue;
+    assert.ok(line.startsWith("#"), `every non-blank line in the review-fix scaffold must be commented out: ${JSON.stringify(line)}`);
+  }
+  const { chains, problems } = loadRepoChains(resolveAnchor(dir));
+  assert.deepEqual(chains, []);
+  assert.deepEqual(problems, []);
+});
+
+test("EXAMPLE_REVIEW_FIX_CHAIN_YAML's commented-out chain, uncommented verbatim, is a chain the loader accepts", async () => {
+  const lines = EXAMPLE_REVIEW_FIX_CHAIN_YAML.split("\n");
+  const startIdx = lines.findIndex((l) => l.startsWith("# name: build-review-fix"));
+  assert.ok(startIdx !== -1, "expected a `# name: build-review-fix` line to anchor the template block");
+  const uncommented = lines
+    .slice(startIdx)
+    .map((l) => l.replace(/^#\s?/, ""))
+    .join("\n");
+
+  const chainsDir = join(dir, ".spf", "chains");
+  execFileSync("mkdir", ["-p", chainsDir]);
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(chainsDir, "uncommented.yaml"), uncommented);
+
+  const { chains, problems } = loadRepoChains(resolveAnchor(dir));
+  assert.deepEqual(problems, [], `expected zero problems, got: ${JSON.stringify(problems)}`);
+  assert.equal(chains.length, 1);
+  assert.equal(chains[0]?.name, "build-review-fix");
 });
 
 test("re-running spf init doesn't overwrite an already-scaffolded example.yaml", async () => {
