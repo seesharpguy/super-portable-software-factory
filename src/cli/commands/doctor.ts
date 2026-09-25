@@ -29,7 +29,7 @@ import { jevDoctorChecks, resolveDecisionPolicy } from "../../core/jev.ts";
 import { CHAIN_ROUTER_KIND } from "../../core/jev_kinds.ts";
 import { misplacedLoopSettings } from "../../chains/loop_control.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
-import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
+import { allChains, chainHasCommitStep, findChain, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
 import { refineBudget } from "../../core/gates.ts";
 import * as sandbox from "../../core/sandbox.ts";
 import { loadOpenSandboxSdk } from "../../core/sandbox_opensandbox.ts";
@@ -1417,12 +1417,13 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       // that is entirely built around a review loop, the moment its reviewer
       // is renamed.
       const hasReviewer = watchChain.phases.includes("(revise)");
-      // `hasCommitStep` (structural: the derived phase string shows a real
-      // `git(commit` step), not a substring match on the word "commit" — the
+      // `chainHasCommitStep` (structural: the derived phase string shows a
+      // real `git(commit` step, or — for a graph chain — its default path
+      // runs a commit step), not a substring match on the word "commit" — the
       // same predicate `watch.fanout commit phase` below uses, so a chain
       // whose phase LABEL merely contains "commit" without an actual commit
       // step can't get "includes" here and a hard ✗ on the very next line.
-      const hasCommitPhase = hasCommitStep(watchChain.phases);
+      const hasCommitPhase = chainHasCommitStep(watchChain);
       check(
         report,
         "watch.chain review posture",
@@ -1527,8 +1528,8 @@ export async function doctorCommand(argv: string[]): Promise<number> {
           check(
             report,
             "watch.fanout commit phase",
-            hasCommitStep(watchChain.phases),
-            hasCommitStep(watchChain.phases)
+            chainHasCommitStep(watchChain),
+            chainHasCommitStep(watchChain)
               ? `watch.chain "${cfg.watch.chain}" has a commit phase`
               : `watch.fanout.n is ${n} but watch.chain "${cfg.watch.chain}" has no commit phase (${watchChain.phases}) — ` +
                   `best-of-N discards every losing attempt's worktree, uncommitted work included; see \`spf watch\`'s own startup refusal for the full explanation`,

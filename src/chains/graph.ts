@@ -23,11 +23,19 @@
  *     budget caps total step executions regardless;
  *   - the DEFAULT PATH — what runs with Jev off, or on any fallback — must
  *     finish within that budget;
- *   - a `commit` can only be reached through paths on which every gating
- *     step (`qualityCheck`/`fixLoop`/`reviseLoop`) that the default path
- *     runs before it also runs. A Jev-picked edge may ADD checks before a
- *     commit; it can never skip one (invariant 6, and the same rule
- *     `steps.ts`'s GATE_ALLOWLIST applies to gates);
+ *   - EVERY reachable `commit` — on the default path or reachable only
+ *     through a Jev-picked edge — can only be reached through paths on which
+ *     every gating step (a `Step` with `gate: true`: qualityCheck/fixLoop/
+ *     reviseLoop) that the default path runs before its own commit also
+ *     runs. For a commit ON the default path that is the gates the default
+ *     path runs before THAT commit; for one OFF it, the gates the default
+ *     path runs before its FIRST commit (or before its end, when it never
+ *     commits). A Jev-picked edge may ADD checks before a commit; it can
+ *     never skip one (invariant 6, and the same rule `steps.ts`'s
+ *     GATE_ALLOWLIST applies to gates);
+ *   - a `commit` only a Jev-picked edge reaches must be `onlyIfAccepted`: a
+ *     plain commit there would land even when the gates it is dominated by
+ *     failed, which is approving past them;
  *   - a `commit` with `onlyIfAccepted` is reachable only through paths on
  *     which at least one gating step runs, so `accepted` can never be the
  *     untouched initial `true` when it lands.
@@ -45,11 +53,16 @@
  *
  * DETERMINISTIC REPLAY. Every transition is written to the trace as a
  * `chain_edge` log event (from, to, how it was chosen, the Jev decision key),
- * and a completed walk writes one `chain_path` event with the whole path.
+ * and every walk — completed, stopped short, or ended by a step throwing —
+ * writes one `chain_path` event with the path it took (`stopped` says why
+ * it ended early: the budget, exhausted edges, or `threw: <message>`).
  * A Jev decision's key is `<step id>#<visit>` — stable across runs, never an
  * array index — so `walkGraph(..., { replay })` can feed a recorded decision
  * back in (`findRecordedDecision(db, adwId, "chain_edge", key)`) and retrace
- * the same path without calling Jev.
+ * the same path without calling Jev. That hook is, today, an API for tooling
+ * and tests: `steps.runSteps` never passes one, and no CLI command (`spf
+ * trace`, `spf estimate`, `spf watch`) re-drives a run from its recorded
+ * edges yet — the same state jev-core's own replay is in (see docs/jev.md).
  *
  * Pure except for `walkGraph`: validation and the transition rule are plain
  * functions over data, so the load-time check and the run-time walk use the
@@ -263,25 +276,43 @@ export function graphProblems(graph: ChainGraph): string[] {
     return problems;
   }
 
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const gateIds = new Set(graph.nodes.filter((n) => n.gate).map((n) => n.id));
+  /** The distinct gates the default path runs before position `end` of its path, in first-run order. */
+  const gatesBefore = (end: number) => [...new Set(walk.path.slice(0, end).filter((id) => gateIds.has(id)))];
+  // The gates the default path — the trusted path — runs before it first
+  // commits (or before it ends, if it never commits). A commit that only a
+  // Jev-picked edge reaches is held to at least this set: otherwise Jev
+  // could route around exactly the checks the default path enforces.
+  const firstCommit = walk.path.findIndex((id) => byId.get(id)!.commit !== null);
+  const defaultGates = gatesBefore(firstCommit >= 0 ? firstCommit : walk.path.length);
   for (const node of graph.nodes) {
     if (node.commit === null || !live.has(node.id)) continue;
-    // (a) every gate the default path runs before this commit must lie on
-    // EVERY path to it: remove the gate, and the commit must become
-    // unreachable.
     const firstVisit = walk.path.indexOf(node.id);
-    if (firstVisit >= 0) {
-      const before = [...new Set(walk.path.slice(0, firstVisit).filter((id) => gateIds.has(id)))];
-      for (const gate of before) {
-        if (reachable(graph, new Set([gate])).has(node.id)) {
-          problems.push(
-            `step "${node.id}" (commit) can be reached without running "${gate}", which the default path runs before it — ` +
-              `a declared edge may add checks before a commit, never skip one`,
-          );
-        }
+    const onDefaultPath = firstVisit >= 0;
+    // (a) every gate the default path runs before this commit (or, for a
+    // commit OFF the default path, before the default path's first commit)
+    // must lie on EVERY path to it: remove the gate, and the commit must
+    // become unreachable. Checked for every reachable commit, not only the
+    // default path's own — a Jev-only commit is the one that could skip.
+    const required = onDefaultPath ? gatesBefore(firstVisit) : defaultGates;
+    for (const gate of required) {
+      if (reachable(graph, new Set([gate])).has(node.id)) {
+        problems.push(
+          `step "${node.id}" (commit) can be reached without running "${gate}", which the default path runs before ` +
+            `${onDefaultPath ? "it" : "it commits"} — a declared edge may add checks before a commit, never skip one`,
+        );
       }
     }
-    // (b) an onlyIfAccepted commit must never be reachable with NO gate run.
+    // (b) a commit only a Jev-picked edge reaches must be onlyIfAccepted: a
+    // plain one would land whatever the gates before it concluded.
+    if (!onDefaultPath && node.commit === "plain") {
+      problems.push(
+        `step "${node.id}" (commit) is reachable only off the default path but is not onlyIfAccepted — a commit that ` +
+          `only a Jev-picked edge reaches must set onlyIfAccepted: true, or Jev could land work its gates rejected`,
+      );
+    }
+    // (c) an onlyIfAccepted commit must never be reachable with NO gate run.
     if (node.commit === "only_if_accepted" && reachable(graph, gateIds).has(node.id)) {
       problems.push(
         `step "${node.id}" (commit, onlyIfAccepted) is reachable through a path on which no gating step ` +
@@ -340,7 +371,9 @@ function edgeState(graph: ChainGraph, state: ChainState, from: string, path: str
  * an end, a stop, or the step budget. Sets `state.accepted`/`reason` from
  * the aggregated gate results (see the header) and to `false` if the walk
  * stopped short. Throws only what a step throws — exactly as the linear
- * driver does.
+ * driver does — and even then writes the `chain_path` event first (with
+ * `stopped: "threw: <message>"`), so a crashed run's path is on record in
+ * one place, not only as scattered `chain_edge` events.
  */
 export async function walkGraph(run: Run, state: ChainState, graph: ChainGraph, opts: { replay?: EdgeReplay } = {}): Promise<GraphWalk> {
   const index = nodeIndex(graph);
@@ -354,76 +387,90 @@ export async function walkGraph(run: Run, state: ChainState, graph: ChainGraph, 
 
   const edgeEvent = (payload: Record<string, unknown>) =>
     run.tracer.event(makeEventRecord({ adw_id: run.adw_id, type: "log", name: CHAIN_EDGE_EVENT, payload }));
+  const pathEvent = (why: string | null) =>
+    run.tracer.event(
+      makeEventRecord({ adw_id: run.adw_id, type: "log", name: CHAIN_PATH_EVENT, payload: { path, steps: path.length, max_steps: graph.max_steps, stopped: why } }),
+    );
 
-  while (current !== null) {
-    const node: GraphNode = graph.nodes[current]!;
-    if (path.length >= graph.max_steps) {
-      stopped = budgetMessage(graph, node.id);
-      break;
-    }
-    const visit = (visits.get(node.id) ?? 0) + 1;
-    visits.set(node.id, visit);
-    path.push(node.id);
+  try {
+    while (current !== null) {
+      const node: GraphNode = graph.nodes[current]!;
+      if (path.length >= graph.max_steps) {
+        stopped = budgetMessage(graph, node.id);
+        break;
+      }
+      const visit = (visits.get(node.id) ?? 0) + 1;
+      visits.set(node.id, visit);
+      path.push(node.id);
 
-    await node.step(run, state);
+      await node.step(run, state);
 
-    if (node.gate) {
-      gates.delete(node.id); // re-insert: a re-run gate's result is its latest
-      gates.set(node.id, { accepted: state.accepted, reason: state.reason });
-      const failing = [...gates.values()].find((g) => !g.accepted);
-      state.accepted = failing === undefined;
-      state.reason = failing?.reason ?? "";
-    }
+      if (node.gate) {
+        gates.delete(node.id); // re-insert: a re-run gate's result is its latest
+        gates.set(node.id, { accepted: state.accepted, reason: state.reason });
+        const failing = [...gates.values()].find((g) => !g.accepted);
+        state.accepted = failing === undefined;
+        state.reason = failing?.reason ?? "";
+      }
 
-    const t = transition(graph, current, visits);
-    if (t.kind === "end") break;
-    if (t.kind === "stop") {
-      stopped = t.reason;
-      break;
-    }
-    if (t.kind === "go") {
-      await edgeEvent({ from: node.id, to: t.to, via: t.via, visit });
-      current = index.get(t.to)!;
-      continue;
-    }
+      const t = transition(graph, current, visits);
+      if (t.kind === "end") break;
+      if (t.kind === "stop") {
+        stopped = t.reason;
+        break;
+      }
+      if (t.kind === "go") {
+        await edgeEvent({ from: node.id, to: t.to, via: t.via, visit });
+        current = index.get(t.to)!;
+        continue;
+      }
 
-    const key = `${node.id}#${visit}`;
-    const options: JevOption<string>[] = t.options.map((id) => ({
-      value: id,
-      description: `run step "${id}" next (${byId.get(id)?.step.label ?? byId.get(id)?.step_name ?? "?"})`,
-    }));
-    let to = t.fallback;
-    let via = "fallback";
-    // R3: the set is operator-built (yaml). The loader already guarantees it
-    // is well formed; this guard is what keeps a surprise from ever turning
-    // into a thrown decide() mid-run.
-    if (isValidOptionSet(options, t.fallback, { permitted: t.permitted })) {
-      const decision = await run.jev.decide({
-        kind: CHAIN_EDGE_KIND.kind,
-        key,
-        options,
-        instructions:
-          `The declared chain "${graph.chain}" just finished step "${node.id}". ` +
-          `Pick which of its declared next steps should run now, given the request and how the run is going.`,
-        state: edgeState(graph, state, node.id, path),
-        fallback: t.fallback,
-        permitted: t.permitted,
-        phase_id: "",
-        replay: opts.replay ? await opts.replay(key) : undefined,
-      });
-      to = decision.choice;
-      via = decision.used_fallback ? "fallback" : "jev";
+      const key = `${node.id}#${visit}`;
+      const options: JevOption<string>[] = t.options.map((id) => ({
+        value: id,
+        description: `run step "${id}" next (${byId.get(id)?.step.label ?? byId.get(id)?.step_name ?? "?"})`,
+      }));
+      let to = t.fallback;
+      let via = "fallback";
+      // R3: the set is operator-built (yaml). The loader already guarantees it
+      // is well formed; this guard is what keeps a surprise from ever turning
+      // into a thrown decide() mid-run.
+      if (isValidOptionSet(options, t.fallback, { permitted: t.permitted })) {
+        const decision = await run.jev.decide({
+          kind: CHAIN_EDGE_KIND.kind,
+          key,
+          options,
+          instructions:
+            `The declared chain "${graph.chain}" just finished step "${node.id}". ` +
+            `Pick which of its declared next steps should run now, given the request and how the run is going.`,
+          state: edgeState(graph, state, node.id, path),
+          fallback: t.fallback,
+          permitted: t.permitted,
+          phase_id: "",
+          replay: opts.replay ? await opts.replay(key) : undefined,
+        });
+        to = decision.choice;
+        via = decision.used_fallback ? "fallback" : "jev";
+      }
+      await edgeEvent({ from: node.id, to, via, visit, key, options: t.options, permitted: t.permitted, fallback: t.fallback });
+      current = index.get(to)!;
     }
-    await edgeEvent({ from: node.id, to, via, visit, key, options: t.options, permitted: t.permitted, fallback: t.fallback });
-    current = index.get(to)!;
+  } catch (error) {
+    // Record the path the crashed walk took, then rethrow the STEP's error:
+    // a failure to write this event must never mask the real one.
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await pathEvent(`threw: ${message}`);
+    } catch {
+      // swallowed on purpose — see above
+    }
+    throw error;
   }
 
   if (stopped !== null) {
     state.accepted = false;
     state.reason = stopped;
   }
-  await run.tracer.event(
-    makeEventRecord({ adw_id: run.adw_id, type: "log", name: CHAIN_PATH_EVENT, payload: { path, steps: path.length, max_steps: graph.max_steps, stopped } }),
-  );
+  await pathEvent(stopped);
   return { path, stopped };
 }

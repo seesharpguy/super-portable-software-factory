@@ -28,9 +28,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RepoAnchor } from "../core/paths.js";
 import { loadRepoChains } from "../chains/repo_chains.js";
-import { runChain, resolveRequiredSuites, stepChain, type ChainDefinition } from "../chains/index.js";
+import { chainHasCommitStep, hasCommitStep, runChain, resolveRequiredSuites, stepChain, type ChainDefinition } from "../chains/index.js";
 import * as steps from "../chains/steps.js";
-import { defaultPath, walkGraph } from "../chains/graph.js";
+import { defaultPath, graphProblems, walkGraph, type ChainGraph } from "../chains/graph.js";
 import { Tracer } from "../core/tracer.js";
 import { JEV_DECISION_EVENT, findRecordedDecision, parseRecordedDecision, setJevClientFactory } from "../core/jev.js";
 import { CHAIN_EDGE_KIND, JEV_DECISION_KINDS } from "../core/jev_kinds.js";
@@ -113,7 +113,10 @@ interface EventRow {
 }
 
 interface GraphRun {
+  /** The exit code, or -1 when the run threw (see `thrown`). */
   code: number;
+  /** What `runChain` threw, if it did — a step's own error propagates, exactly as in a linear chain. */
+  thrown: unknown;
   adwId: string;
   events: EventRow[];
   phases: string[];
@@ -126,7 +129,13 @@ interface GraphRun {
  * `runChain` (the real dispatch path) with `configYaml`, then read the
  * trace back. `body` gets the scratch dir while it still exists.
  */
-async function runGraph(chainYaml: string, configYaml: string, adwId: string, body?: (dir: string, chain: ChainDefinition, run: GraphRun) => Promise<void>): Promise<GraphRun> {
+async function runGraph(
+  chainYaml: string,
+  configYaml: string,
+  adwId: string,
+  body?: (dir: string, chain: ChainDefinition, run: GraphRun) => Promise<void>,
+  opts: { expectThrow?: boolean } = {},
+): Promise<GraphRun> {
   const dir = mkdtempSync(path.join(tmpdir(), "spf-graph-run-"));
   try {
     const spfDir = path.join(dir, ".spf");
@@ -137,15 +146,21 @@ async function runGraph(chainYaml: string, configYaml: string, adwId: string, bo
     const { chains, problems } = loadRepoChains({ cwd: dir, repo_root: dir, spf_dir: spfDir });
     assert.deepEqual(problems, []);
     const chain = chains[0]!;
-    const code = await runChain(chain, {
-      prompt: "exercise the graph",
-      config_paths: [configPath],
-      adw_id: adwId,
-      cwd: dir,
-      chain_name: chain.name,
-      chain_source: chain.source,
-      unattended: true,
-    });
+    let code = -1;
+    let thrown: unknown = undefined;
+    try {
+      code = await runChain(chain, {
+        prompt: "exercise the graph",
+        config_paths: [configPath],
+        adw_id: adwId,
+        cwd: dir,
+        chain_name: chain.name,
+        chain_source: chain.source,
+        unattended: true,
+      });
+    } catch (error) {
+      thrown = error;
+    }
     const tracer = await Tracer.open(path.join(dir, ".spf", "data", "spf.db"), path.join(dir, ".spf", "data", "sessions", "events.jsonl"));
     let result: GraphRun;
     try {
@@ -153,6 +168,7 @@ async function runGraph(chainYaml: string, configYaml: string, adwId: string, bo
       const pathEvent = events.find((e) => e.name === "chain_path");
       result = {
         code,
+        thrown,
         adwId,
         events,
         phases: events.filter((e) => e.type === "phase_start").map((e) => e.name),
@@ -162,6 +178,7 @@ async function runGraph(chainYaml: string, configYaml: string, adwId: string, bo
     } finally {
       await tracer.close();
     }
+    if (thrown !== undefined && !opts.expectThrow) throw thrown;
     if (body) await body(dir, chain, result);
     return result;
   } finally {
@@ -494,6 +511,315 @@ test("replay: a recorded path is retraced from the trace without calling Jev, ev
         const replayed = await findRecordedDecision(run.tracer.db, "adw_graph_replay", CHAIN_EDGE_KIND.kind, "check#1");
         assert.equal(replayed?.replayed, true);
         assert.equal(replayed?.choice, "right");
+      } finally {
+        await run.tracer.close();
+      }
+    }),
+  );
+});
+
+// ── review follow-ups (#109): commits off the default path ─────────────────
+
+/** Probe 1: `build` may hand off to a plain `quick` commit that skips the `test` gate the default path runs. */
+const SKIP_TO_PLAIN_COMMIT = [
+  ...head("skippy"),
+  "  - id: start",
+  "    step: request",
+  "  - id: build",
+  "    step: build",
+  "    next: [test, quick]",
+  "    default: test",
+  "  - id: test",
+  "    step: fixLoop",
+  "    suite: test",
+  "    next: [land]",
+  "  - id: land",
+  "    step: commit",
+  "    onlyIfAccepted: true",
+  "    next: []",
+  "  - id: quick",
+  "    step: commit",
+  "",
+].join("\n");
+
+/** Probe 2: `lint` satisfies "some gate ran" for `land2`, but `land2` never runs the `test` gate the default path requires. */
+const SKIP_VIA_OTHER_GATE = [
+  ...head("linty"),
+  "  - id: start",
+  "    step: request",
+  "  - id: build",
+  "    step: build",
+  "    next: [test, lint]",
+  "    default: test",
+  "  - id: test",
+  "    step: fixLoop",
+  "    suite: test",
+  "    next: [land]",
+  "  - id: land",
+  "    step: commit",
+  "    onlyIfAccepted: true",
+  "    next: []",
+  "  - id: lint",
+  "    step: qualityCheck",
+  "    suite: lint",
+  "    next: [land2]",
+  "  - id: land2",
+  "    step: commit",
+  "    onlyIfAccepted: true",
+  "",
+].join("\n");
+
+test("a commit reachable ONLY through a Jev-picked edge is held to the default path's gates (probe: plain commit skipping the test gate)", () => {
+  const msg = loadProblem(SKIP_TO_PLAIN_COMMIT);
+  assert.match(msg, /"quick" \(commit\) can be reached without running "test", which the default path runs before it commits/);
+  assert.match(msg, /"quick" \(commit\) is reachable only off the default path but is not onlyIfAccepted/);
+});
+
+test("a commit reachable ONLY through a Jev-picked edge cannot swap the default path's gate for a different one (probe: lint instead of test)", () => {
+  const msg = loadProblem(SKIP_VIA_OTHER_GATE);
+  assert.match(msg, /"land2" \(commit\) can be reached without running "test"/);
+});
+
+test("the gate rule is enforced by graphProblems itself, so a hand-built graph gets the same verdict as a yaml one", () => {
+  // Same shape as SKIP_VIA_OTHER_GATE, built without the loader.
+  const node = (id: string, step: steps.Step, extra: Partial<ChainGraph["nodes"][number]> = {}): ChainGraph["nodes"][number] => ({
+    id,
+    step_name: id,
+    step,
+    next: null,
+    default: null,
+    max_visits: null,
+    gate: step.gate === true,
+    commit: null,
+    ...extra,
+  });
+  const graph: ChainGraph = {
+    chain: "hand",
+    max_steps: 12,
+    nodes: [
+      node("start", steps.request()),
+      node("build", steps.build(), { next: ["test", "lint"], default: "test" }),
+      node("test", steps.fixLoop({ suite: "test" }), { next: ["land"] }),
+      node("land", steps.commit({ onlyIfAccepted: true }), { next: [], commit: "only_if_accepted" }),
+      node("lint", steps.qualityCheck({ suite: "lint" }), { next: ["land2"] }),
+      node("land2", steps.commit({ onlyIfAccepted: true }), { commit: "only_if_accepted" }),
+    ],
+  };
+  assert.ok(graphProblems(graph).some((p) => /"land2" \(commit\) can be reached without running "test"/.test(p)));
+});
+
+test("a plain commit off the default path is rejected even when every default gate runs before it", () => {
+  const msg = loadProblem(
+    [
+      ...head(),
+      "  - id: build",
+      "    step: build",
+      "  - id: test",
+      "    step: fixLoop",
+      "    suite: test",
+      "    next: [land, quick]",
+      "    default: land",
+      "  - id: land",
+      "    step: commit",
+      "    onlyIfAccepted: true",
+      "    next: []",
+      "  - id: quick",
+      "    step: commit",
+      "",
+    ].join("\n"),
+  );
+  assert.match(msg, /"quick" \(commit\) is reachable only off the default path but is not onlyIfAccepted/);
+  assert.doesNotMatch(msg, /can be reached without running/, "test dominates quick; only the plain-commit rule fires");
+});
+
+/** Legal: tests (failing) -> {land (default) | extra -> land2}; land2 is an onlyIfAccepted commit only Jev reaches, and `tests` dominates it. */
+const JEV_ONLY_COMMIT = [
+  ...head("jevland"),
+  "  - id: start",
+  "    step: request",
+  "  - id: tests",
+  "    step: qualityCheck",
+  "    suite: fail",
+  "    next: [land, extra]",
+  "    default: land",
+  "  - id: extra",
+  "    step: qualityCheck",
+  "    suite: pass",
+  "    next: [land2]",
+  "  - id: land",
+  "    step: commit",
+  "    onlyIfAccepted: true",
+  "    next: []",
+  "  - id: land2",
+  "    step: commit",
+  "    onlyIfAccepted: true",
+  "",
+].join("\n");
+
+test("act: Jev routing to a commit only it can reach still runs every default-path gate first, and the commit phase never opens past a red one", async () => {
+  const chain = loadOk(JEV_ONLY_COMMIT);
+  assert.deepEqual(defaultPath(chain.graph!).path, ["start", "tests", "land"]);
+  const fake = FakeJevClient.choosing("extra", 0.99);
+  const r = await withFake(fake, () => runGraph(JEV_ONLY_COMMIT, JEV_ACT, "adw_graph_jevland"));
+  assert.deepEqual(r.path, ["start", "tests", "extra", "land2"]);
+  assert.ok(r.path.indexOf("tests") < r.path.indexOf("land2"), "the default path's gate ran before the Jev-only commit");
+  assert.equal(r.code, 1);
+  assert.ok(!r.phases.includes("commit"), "the commit phase never opened: the default gate failed");
+  assert.match(JSON.parse(r.events.find((e) => e.name === "not_accepted")!.payload_json).reason, /quality failed/);
+});
+
+// ── review follow-ups: fanout eligibility follows the default path ─────────
+
+test("chainHasCommitStep: a graph chain counts only commits on its DEFAULT path — a Jev-only commit does not make it fanout-eligible", () => {
+  const offPath = loadOk(
+    [
+      ...head("offpath"),
+      "  - id: start",
+      "    step: request",
+      "  - id: test",
+      "    step: qualityCheck",
+      "    suite: pass",
+      "    next: [done, land]",
+      "    default: done",
+      "  - id: done",
+      "    step: document",
+      "    next: []",
+      "  - id: land",
+      "    step: commit",
+      "    onlyIfAccepted: true",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(defaultPath(offPath.graph!).path, ["start", "test", "done"]);
+  assert.equal(hasCommitStep(offPath.phases), true, "the display string lists every step, the Jev-only commit included");
+  assert.equal(chainHasCommitStep(offPath), false, "with Jev off / in shadow / on fallback this chain never commits");
+
+  const onPath = loadOk(
+    [
+      ...head("onpath"),
+      "  - id: start",
+      "    step: request",
+      "  - id: test",
+      "    step: qualityCheck",
+      "    suite: pass",
+      "    next: [land, done]",
+      "    default: land",
+      "  - id: land",
+      "    step: commit",
+      "    onlyIfAccepted: true",
+      "    next: []",
+      "  - id: done",
+      "    step: document",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(chainHasCommitStep(onPath), true);
+
+  // A linear chain answers exactly as hasCommitStep(phases) always did.
+  const linear = stepChain("lin", "x", [steps.request(), steps.build(), steps.commit()]);
+  assert.equal(chainHasCommitStep(linear), hasCommitStep(linear.phases));
+  assert.equal(chainHasCommitStep(linear), true);
+});
+
+// ── review follow-ups: run-time edge cases ─────────────────────────────────
+
+/** `again` may loop (max 2), go to `extra`, or end at `done` (the default). */
+const THREE_EDGE_LOOP = [
+  "name: loopy3",
+  "describe: a bounded loop with three edges",
+  "steps:",
+  "  - id: start",
+  "    step: request",
+  "  - id: again",
+  "    step: qualityCheck",
+  "    suite: again",
+  "    max_visits: 2",
+  "    next: [done, again, extra]",
+  "    default: done",
+  "  - id: extra",
+  "    step: qualityCheck",
+  "    suite: pass",
+  "    next: [done]",
+  "  - id: done",
+  "    step: qualityCheck",
+  "    suite: done",
+  "",
+].join("\n");
+
+test("max_visits: Jev picking an exhausted target while two edges are still open is not_permitted, and the default edge is taken", async () => {
+  const fake = FakeJevClient.choosing("again", 0.99);
+  const r = await withFake(fake, () => runGraph(THREE_EDGE_LOOP, JEV_ACT, "adw_graph_notperm"));
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.path, ["start", "again", "again", "done"]);
+  assert.equal(fake.calls.length, 2, "asked on both visits: on visit 2 two edges (done, extra) are still open");
+  const decisions = r.jevRows.map((row) => parseRecordedDecision(JSON.parse(row.payload_json))!);
+  const second = decisions.find((d) => d.key === "again#2")!;
+  assert.equal(second.jev_choice, "again");
+  assert.equal(second.reason, "not_permitted");
+  assert.equal(second.choice, "done");
+  const edge = r.events.filter((e) => e.name === "chain_edge").map((e) => JSON.parse(e.payload_json)).find((e) => e.key === "again#2");
+  assert.deepEqual(edge.options, ["done", "again", "extra"]);
+  assert.deepEqual(edge.permitted, ["done", "extra"]);
+  assert.equal(edge.via, "fallback");
+});
+
+test("a step throwing mid-walk propagates, and the trace still holds the path so far (chain_edge events AND a chain_path marked threw)", async () => {
+  // `land` is a plain commit on the default path after a gate; with no agent
+  // step before it there is no envelope, so commit() throws.
+  const chain = [
+    ...head("throwy"),
+    "  - id: start",
+    "    step: request",
+    "    next: [check]",
+    "  - id: check",
+    "    step: qualityCheck",
+    "    suite: pass",
+    "  - id: land",
+    "    step: commit",
+    "",
+  ].join("\n");
+  const r = await runGraph(chain, "", "adw_graph_throw", undefined, { expectThrow: true });
+  assert.ok(r.thrown instanceof Error);
+  assert.match((r.thrown as Error).message, /nothing to commit/);
+  const edges = r.events.filter((e) => e.name === "chain_edge").map((e) => JSON.parse(e.payload_json));
+  assert.deepEqual(
+    edges.map((e) => [e.from, e.to]),
+    [
+      ["start", "check"],
+      ["check", "land"],
+    ],
+  );
+  assert.deepEqual(r.path, ["start", "check", "land"]);
+  const pathEvent = JSON.parse(r.events.find((e) => e.name === "chain_path")!.payload_json);
+  assert.match(pathEvent.stopped, /^threw: .*nothing to commit/);
+});
+
+test("replay: a recorded decision whose options no longer match the edited yaml replays as replay_missing — the fallback acts, never a stale edge, and Jev is not called", async () => {
+  const first = FakeJevClient.choosing("right", 0.95);
+  const replayFake = FakeJevClient.choosing("right", 0.99);
+  // The same chain, edited: `check` gained a third edge.
+  const edited = loadOk(
+    BRANCH_CHAIN.replace("    next: [left, right]", "    next: [left, right, other]") + ["  - id: other", "    step: qualityCheck", "    suite: righty", ""].join("\n"),
+  );
+  await withFake(first, () =>
+    runGraph(BRANCH_CHAIN, JEV_ACT, "adw_graph_rec2", async (dir, chain, recorded) => {
+      assert.deepEqual(recorded.path, ["start", "check", "right"]);
+      setJevClientFactory(() => replayFake);
+      const run = await steps.startRun(
+        { prompt: "exercise the graph", config_paths: [path.join(dir, "spf.config.yaml")], adw_id: "adw_graph_replay2", cwd: dir, chain_name: chain.name, unattended: true },
+        [],
+        ["pass", "lefty", "righty"],
+      );
+      try {
+        const state: steps.ChainState = { prompt: "exercise the graph", options: {}, previous: null, quality: null, review: null, changeset: null, baseline: "", issue_id: null, accepted: true, reason: "" };
+        const walk = await walkGraph(run, state, edited.graph!, {
+          replay: (key) => findRecordedDecision(run.tracer.db, "adw_graph_rec2", CHAIN_EDGE_KIND.kind, key),
+        });
+        assert.deepEqual(walk.path, ["start", "check", "left"], "the fallback edge, not the recorded (stale) one");
+        assert.equal(replayFake.calls.length, 0);
+        const replayed = await findRecordedDecision(run.tracer.db, "adw_graph_replay2", CHAIN_EDGE_KIND.kind, "check#1");
+        assert.equal(replayed?.reason, "replay_missing");
+        assert.equal(replayed?.choice, "left");
       } finally {
         await run.tracer.close();
       }

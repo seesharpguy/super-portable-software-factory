@@ -47,8 +47,10 @@ record independent of the commit log.
   step with more than one edge, Jev picks among those edges only. The
   fallback is the `default` edge, or the linear next step. The loader
   rejects a graph with a missing target, an unreachable step, an unbounded
-  cycle, a default path over budget, or a path that reaches a `commit`
-  while skipping a gate the default path runs. On a graph chain,
+  cycle, a default path over budget, a path that reaches any `commit`
+  (including one only a Jev-picked edge reaches) while skipping a gate the
+  default path runs, or a plain commit that only a Jev-picked edge
+  reaches. Fan-out eligibility follows the default path. On a graph chain,
   `accepted` is the AND of every gating step's latest result. Transitions
   are traced as `chain_edge`/`chain_path` events and replay by key
   (`<step id>#<visit>`). Chains without `next:` run exactly as before.

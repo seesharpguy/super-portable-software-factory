@@ -127,16 +127,26 @@ export interface Step {
   requiredSuites?: string[] | ((options: Record<string, string>) => string[]);
   /** Display fragment for derivePhases() — e.g. "planner", "git(commit)". */
   label?: string;
+  /**
+   * True for a GATING step: one that writes `state.accepted`/`reason` (today
+   * qualityCheck, fixLoop, reviseLoop). Declared here, beside the step's
+   * other metadata, so the graph loader (`./repo_chains.ts` -> `./graph.ts`)
+   * derives which steps gate a commit from the step itself rather than from
+   * a hand-kept list of factory names a new writer could forget to join.
+   * `steps.test.ts` pins that every factory writing `state.accepted` sets it.
+   */
+  gate?: boolean;
 }
 
 function makeStep(
   fn: (run: Run, state: ChainState) => Promise<void>,
-  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: Step["requiredSuites"]; label?: string } = {},
+  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: Step["requiredSuites"]; label?: string; gate?: boolean } = {},
 ): Step {
   const step = fn as Step;
   step.requiredAgents = meta.requiredAgents;
   step.requiredSuites = meta.requiredSuites;
   step.label = meta.label;
+  if (meta.gate) step.gate = true;
   return step;
 }
 
@@ -658,6 +668,7 @@ export function qualityCheck(opts: { suite: string; description?: string } = { s
   return makeStep(fn, {
     requiredSuites: (options) => [options["suite"] ?? opts.suite],
     label: `code(${staticName})`,
+    gate: true,
   });
 }
 
@@ -782,6 +793,7 @@ export function fixLoop(
     requiredAgents: [owner],
     requiredSuites: (options) => [options["suite"] ?? opts.suite],
     label: `code(${staticStepName}) [-> ${owner}(fix) -> code(${staticStepName}) ...] bounded`,
+    gate: true,
   });
 }
 
@@ -916,6 +928,7 @@ export function reviseLoop(
   return makeStep(fn, {
     requiredAgents: [reviewer, builder],
     label: `${reviewer} [-> ${builder}(revise) -> ${reviewer} ...] bounded`,
+    gate: true,
   });
 }
 

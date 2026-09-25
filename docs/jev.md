@@ -265,19 +265,35 @@ Picks the next step at a branch point of a repo graph chain: a
   - every cycle must pass through a `max_visits` step, and `max_steps`
     caps total step executions;
   - no path may reach a `commit` without every gating step
-    (`qualityCheck`, `fixLoop`, `reviseLoop`) that the default path runs
-    before it;
+    (`qualityCheck`, `fixLoop`, `reviseLoop`: a `Step` with `gate: true`)
+    that the default path runs before it. A commit that only a Jev-picked
+    edge reaches is held to the gates the default path runs before its
+    first commit, or before its end if it never commits;
+  - a commit that only a Jev-picked edge reaches must be `onlyIfAccepted`;
   - an `onlyIfAccepted` commit needs at least one gating step on every
     path to it.
+
+  `spf fanout`, `watch.fanout` and `spf doctor` decide whether a graph
+  chain commits from its default path (`chainHasCommitStep`). A commit
+  that only Jev can reach does not make a chain eligible for fan-out.
 
   At run time, `accepted` on a graph chain is the AND of each gating
   step's latest result. A passing check Jev routes to therefore cannot
   overwrite an earlier failure.
 - **Replay.** Every transition is a `chain_edge` log event, with
   `from`/`to`/`via`/`visit` and, at a branch point, `key`, `options`,
-  `permitted` and `fallback`. A finished walk also writes one `chain_path`
-  event holding the whole path. To retrace a run without calling Jev, pass
+  `permitted` and `fallback`. Every walk also writes one `chain_path`
+  event holding the whole path. That includes a walk that ends because a
+  step threw, in which case `stopped` reads `threw: <message>`. To retrace
+  a run without calling Jev, pass
   `walkGraph(run, state, graph, { replay: (key) => findRecordedDecision(db, adwId, "chain_edge", key) })`.
+  Replay is currently an API for tooling and tests only. `steps.runSteps`
+  does not pass a replay, and no CLI command (`spf trace`, `spf estimate`,
+  `spf watch`) re-drives a run from its recorded edges yet. Wiring a
+  `--replay <adw_id>` through `runSteps` is follow-up work. If the yaml
+  has changed since the recording so that a branch point's options differ,
+  the recorded decision does not match and replays as `replay_missing`.
+  The fallback edge then acts.
 - **Extras.** None. Tune it with `jev.decisions.chain_edge.{mode,threshold,timeout_ms}` only.
 
 

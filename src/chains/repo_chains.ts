@@ -367,9 +367,6 @@ const GraphKeysSchema = v.object({
 });
 type GraphKeys = v.InferOutput<typeof GraphKeysSchema>;
 
-/** Steps that set `state.accepted` — the gating steps a graph chain's commit rules are about. */
-const GATING_STEPS: ReadonlySet<string> = new Set(["qualityCheck", "fixLoop", "reviseLoop"]);
-
 /**
  * Assemble the graph from the parsed entries, or say what is wrong with the
  * declared edges. Returns `{ graph: null }` for a chain that declares no
@@ -425,7 +422,9 @@ function buildGraph(
     next: e.keys.next ?? null,
     default: e.keys.default ?? null,
     max_visits: e.keys.max_visits ?? null,
-    gate: GATING_STEPS.has(e.stepName),
+    // Declared by the factory itself (`Step.gate`, set by every step that
+    // writes `state.accepted`), never a hand-kept list of factory names.
+    gate: e.step.gate === true,
     commit: e.stepName === "commit" ? (e.params["onlyIfAccepted"] === true ? "only_if_accepted" : "plain") : null,
   }));
   const graph: ChainGraph = { chain: name, nodes, max_steps: maxSteps ?? defaultMaxSteps(nodes.length) };

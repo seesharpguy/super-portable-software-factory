@@ -154,10 +154,18 @@ steps:
   finish within `max_steps`, or the file does not load.
 - **Edges add checks, never skip them.** If the default path runs a
   gating step (`qualityCheck`, `fixLoop`, `reviseLoop`) before a `commit`,
-  every path to that commit must run it too. An `onlyIfAccepted` commit
-  must have at least one gating step on every path to it. The example
-  above passes both rules: `review` is an extra check on the way to
-  `land`, and no edge skips `test`.
+  every path to that commit must run it too. This holds for EVERY commit,
+  including one that only a non-default edge reaches: such a commit must
+  be reached only through the gating steps the default path runs before
+  its own first commit (or before it ends, if it never commits). A commit
+  that only a non-default edge reaches must also be `onlyIfAccepted`. An
+  `onlyIfAccepted` commit must have at least one gating step on every
+  path to it. The example above passes every rule: `review` is an extra
+  check on the way to `land`, and no edge skips `test`.
+- **Fan-out counts the default path.** `spf fanout` and `watch.fanout`
+  accept a graph chain only if its default path commits. A commit that
+  only a non-default edge reaches does not count, because with Jev off it
+  never runs.
 - **`accepted` is aggregated.** On a graph chain, `accepted` means every
   gating step's latest run passed. A review that Jev routes to after a red
   suite cannot turn the run green. Re-running the suite through a declared
@@ -168,7 +176,8 @@ steps:
   `spf doctor`/`validate()` check all of them up front.
 - **The trace keeps the path.** Each transition is a `chain_edge` event,
   and the whole path is one `chain_path` event, so a run can be replayed
-  deterministically.
+  deterministically. `chain_path` is written even when a step throws; its
+  `stopped` field then reads `threw: <message>`.
 
 Everything below this section is about the OTHER three doors: designing a
 brand-new built-in chain, adding a step to the vocabulary above, or adding an

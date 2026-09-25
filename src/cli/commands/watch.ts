@@ -24,7 +24,7 @@ import { chainRouteReplay, routeChain, type RoutableChain } from "../../core/cha
 import { createJev, findRecordedDecision, parseDecisionExtras, traceDecisionRecorder, type Decision, type Jev, type JevClient } from "../../core/jev.ts";
 import { CHAIN_ROUTER_KIND, INTAKE_FEEDBACK_KIND, INTAKE_READINESS_KIND } from "../../core/jev_kinds.ts";
 import { Tracer } from "../../core/tracer.ts";
-import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
+import { chainHasCommitStep, findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
 import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
@@ -688,9 +688,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // candidates outright and then block the issue anyway once the winner's
     // own empty diff is discovered.
     const watchChain = findChain(cfg.watch.chain)!; // already checked above
-    if (!hasCommitStep(watchChain.phases)) {
+    if (!chainHasCommitStep(watchChain)) {
       console.error(
-        `watch.fanout.n is ${cfg.watch.fanout.n} but watch.chain ${JSON.stringify(cfg.watch.chain)} has no commit phase ` +
+        `watch.fanout.n is ${cfg.watch.fanout.n} but watch.chain ${JSON.stringify(cfg.watch.chain)} has no commit phase` +
+          `${watchChain.graph ? " on its default path (what runs with Jev off or on any fallback)" : ""} ` +
           `(${watchChain.phases}) — best-of-N discards every losing attempt's worktree (uncommitted work included), ` +
           `so a chain that leaves its payload uncommitted would destroy N-1 candidates and then block the issue for ` +
           `an empty diff. Use a chain that commits (plan-build, plan-build-test, plan-build-test-quality, simple-sdlc, ` +

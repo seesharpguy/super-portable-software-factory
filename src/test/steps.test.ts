@@ -67,3 +67,31 @@ test("clearStaleRefineOutputFiles: a first-ever run with neither file present is
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Step.gate: every writer of state.accepted declares itself (#109) ──────
+
+test("Step.gate: every step factory that writes state.accepted carries gate: true, and the ones that don't, don't", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const steps = await import("../chains/steps.js");
+  // Read the SOURCE (tests run from dist/test/, the source sits at src/chains/)
+  // so a future factory that starts assigning state.accepted is caught here
+  // even if nobody remembers the graph loader derives commit gating from it.
+  const source = readFileSync(fileURLToPath(new URL("../../src/chains/steps.ts", import.meta.url)), "utf8");
+  const starts = [...source.matchAll(/^export function (\w+)\(/gm)];
+  const writers: string[] = [];
+  for (const [i, m] of starts.entries()) {
+    const block = source.slice(m.index, starts[i + 1]?.index ?? source.length);
+    if (!/state\.accepted\s*=(?!=)/.test(block)) continue;
+    writers.push(m[1]!);
+    assert.match(block, /gate: true/, `${m[1]} writes state.accepted but does not declare gate: true`);
+  }
+  assert.deepEqual(writers.sort(), ["fixLoop", "qualityCheck", "reviseLoop"]);
+
+  assert.equal(steps.qualityCheck({ suite: "test" }).gate, true);
+  assert.equal(steps.fixLoop({ suite: "test" }).gate, true);
+  assert.equal(steps.reviseLoop().gate, true);
+  for (const s of [steps.request(), steps.plan(), steps.build(), steps.commit(), steps.commit({ onlyIfAccepted: true }), steps.document()]) {
+    assert.equal(s.gate, undefined);
+  }
+});

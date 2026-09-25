@@ -32,7 +32,7 @@
  */
 import type { ChainContext } from "./context.ts";
 import * as steps from "./steps.ts";
-import { graphPhases, type ChainGraph } from "./graph.ts";
+import { defaultPath, graphPhases, type ChainGraph } from "./graph.ts";
 import * as simpleSdlc from "./simple_sdlc.ts";
 import * as otel from "../core/otel.ts";
 import * as session from "../core/session.ts";
@@ -70,6 +70,25 @@ export interface ChainDefinition {
 /** Chains eligible to fan out: their derived phase string must show at least one commit step. */
 export function hasCommitStep(phases: string): boolean {
   return phases.includes("git(commit");
+}
+
+/**
+ * Whether a chain commits on the path that is TRUSTED to run — the guard
+ * `spf fanout`, `watch.fanout` and `spf doctor` use to refuse a chain whose
+ * winner would carry zero commits.
+ *
+ * For a linear chain (every built-in, every repo chain without `next:`)
+ * that is exactly `hasCommitStep(chain.phases)`. A graph chain's `phases`
+ * lists EVERY step, including a commit that only a Jev-picked edge reaches,
+ * so it answers from the graph's DEFAULT path instead — what runs with Jev
+ * off, in shadow, and on every fallback. A commit Jev alone could route to
+ * is not a commit the guard may count on (invariant 3).
+ */
+export function chainHasCommitStep(chain: Pick<ChainDefinition, "phases" | "graph">): boolean {
+  if (!chain.graph) return hasCommitStep(chain.phases);
+  const graph = chain.graph;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return defaultPath(graph).path.some((id) => byId.get(id)?.commit != null);
 }
 
 /**
