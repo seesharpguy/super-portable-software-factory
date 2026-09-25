@@ -257,6 +257,16 @@ export interface WatchMarker {
   split?: { specs: SpecSplit[]; proposed_at: string; rounds: number };
   revision?: { rounds: number; since: string };
   chain?: string;
+  /**
+   * Set only by the Jev intake readiness router (`watch.ts`'s
+   * `routeReadiness`, #108) when it moved a `ready` issue AWAY from the
+   * build lane (`refine` -> `spec-ready`, `needs_human` -> `blocked`). Its
+   * mere presence — like any marker at all — makes the router stand down on
+   * that issue for good: a human who relabels it `ready` has overruled the
+   * router, and the next claim builds it as-is. Overwritten (dropped) by the
+   * build lane's own claim-time marker write, like every other lane field.
+   */
+  intake?: { routed: "refine" | "needs_human"; at: string };
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */

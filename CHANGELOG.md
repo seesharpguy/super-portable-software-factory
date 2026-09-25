@@ -71,6 +71,17 @@ record independent of the commit log.
   `jev.decisions.finding_triage.drop`, like every kind's settings. Invalid
   `jev.decisions.<kind>` settings now fail `startRun`, before any phase,
   and `PhaseHandle` exposes `phase_id` for decisions made inside a phase.
+- **`intake_feedback` / `intake_readiness`** (#108): Jev watch intake. The
+  first classifies the new PR comments behind `<prefix>:feedback` as
+  `revise`, `question`, `approve`, or `out_of_scope`. Only `revise` reruns
+  the chain, `question` posts an acknowledgement, and the others are
+  logged. The fallback is `revise`. The second routes a `ready` issue
+  before it is claimed, as `build`, `refine`, or `needs_human`. `refine`
+  goes to `spec-ready` and is permitted only while `watch.refine.enabled`.
+  `needs_human` goes to `blocked` with a needs-info comment. The fallback
+  is `build`, and the router runs only once per issue. Each kind has its
+  own `jev.decisions.<kind>.mode` toggle. Decisions are traced under the
+  issue's `issue-<id>` adw_id.
 - **`loop_control`** (#105): after each failed, non-final round of
   `fixLoop`/`reviseLoop`, Jev chooses `continue | escalate_tier |
   stop_blocked` (fallback `continue`, today's loop). The configured `max`

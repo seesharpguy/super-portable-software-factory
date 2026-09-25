@@ -316,6 +316,7 @@ jev:
   **Replay** above. An invalid value stops `spf watch` at startup and fails
   `spf doctor`.
 
+
 ### `finding_triage`
 
 Ticket #106. Before a rejected review's findings reach the fixing agent,
@@ -428,6 +429,89 @@ Jev classifies each **unmet** finding (`met: false` in the reviewer's
   rule and is parsed only while tiering is on too). `spf doctor` reports
   it too.
 
+
+### `intake_feedback`
+
+Ticket #108. It classifies the new PR comments behind a `<prefix>:feedback`
+label in the build lane's revision loop.
+
+- **Options** (`choice`): `revise` | `question` | `approve` | `out_of_scope`.
+- **Fallback**: `revise`. This is today's behavior: every `feedback` claim
+  reruns the chain.
+- **Resolved in** `core/watch.ts` `classifyFeedback`, called from
+  `runIssueSingle`'s revision branch after `claimFeedback` claims the issue
+  and the PR's comments are read. This happens before any worktree or
+  marker write. The adw_id is `issue-<id>`, which the revision run reuses,
+  and `phase_id` is `""`. The key is `pr<n>:r<round>:<last comment id>`.
+  Jev reads the same comments `buildIssuePrompt` shows as "Corrections to
+  address": the comments since the last push, or all comments when there is
+  no watermark. The issue body is not included. If there are no such
+  comments, Jev is not called and the result is `revise`.
+- **Acting on it**:
+  - `revise` runs the revision exactly as before.
+  - `question` posts an acknowledgement comment on the issue and does not
+    run the chain.
+  - `approve` and `out_of_scope` are logged only.
+  - Every choice except `revise` moves the issue back to `review` if the PR
+    is open, or `blocked` if it is closed. The PR, its branch, and the
+    watch marker are not changed.
+- **What it cannot do**: skip a revision's gates, merge or approve a PR, or
+  move anything to `done`. `approve` only means "no rerun". The PR still
+  needs a human to merge it, and `finishReviews` still decides `done`. The
+  worst a wrong answer can do is skip a revision a human asked for. The
+  human then adds the label again, and turning the kind to `off` restores
+  today's behavior.
+- **Extras**: none. Use `jev.decisions.intake_feedback.mode` to turn it on
+  or off independently of `intake_readiness`.
+
+
+### `intake_readiness`
+
+Ticket #108. It decides, before `spf watch` claims a `<prefix>:ready`
+issue, whether to build it as written.
+
+- **Options** (`choice`): `build` | `refine` | `needs_human`.
+- **Fallback**: `build`. This is today's behavior.
+- **Resolved in** `core/watch.ts` `routeReadiness`, called from
+  `claimNewWork` after the frontier check and local lock, and before the
+  tracker-side `claim()`. The adw_id is `issue-<id>`, `phase_id` is `""`,
+  and the key is `""`. Jev reads the issue's id, title, labels, and body
+  (truncated).
+- **`permitted`**:
+  - `build` and `needs_human` are always permitted.
+  - `refine` is permitted only while `watch.refine.enabled` is true, and
+    only for an issue the refine lane did not create itself (no
+    `spf-refine:` marker in the body). This prevents a loop.
+- **Runs once per issue**: an issue that already has any watch marker is
+  always `build`, and Jev is not called. This covers an earlier routing, an
+  earlier build, or a PR. Relabeling a routed issue `ready` therefore
+  overrules the router.
+- **Acting on it**: the router writes the marker
+  (`WatchMarker.intake = {routed, at}`), then:
+  - `refine` moves the issue to `<prefix>:spec-ready` with an explanatory
+    comment.
+  - `needs_human` moves the issue to `<prefix>:blocked` with a needs-info
+    comment and an `issue_blocked` notification. This reuses the existing
+    blocked state, so there is no new label.
+
+  A routed issue is never claimed and never uses the concurrency budget.
+  A tracker error while routing skips the issue for that tick, so it stays
+  `ready`.
+- **What it cannot do**: skip a gate or push work forward. It can only send
+  unclaimed work away from the build lane, to a human or to decomposition.
+  `refine` is impossible while the refine lane is off. A mode of `off`
+  skips the marker read too, so it adds no tracker call.
+- **Extras**: none. Use `jev.decisions.intake_readiness.mode` to toggle it.
+
+**Tracing for both kinds**: `spf watch` has no `Run` before a claim. When
+`jev.enabled` is true and at least one intake kind is not `off`,
+`cli/commands/watch.ts` `openWatchIntakeJev` opens one Tracer for the
+daemon's lifetime on the normal trace db. It records each decision under
+the issue's adw_id. The JSONL copy goes to
+`<data_dir>/watch/jev_events.jsonl`. Otherwise nothing is opened and
+`WatchDeps.intakeJev` is unset.
+
+
 ### `loop_control`
 
 Ticket #105. After a failed round in `fixLoop` or `reviseLoop`
@@ -538,6 +622,7 @@ Ticket #105. After a failed round in `fixLoop` or `reviseLoop`
   malformed value fails `spf doctor`. It also fails `startRun` whenever the
   kind is live. A `max_tier` that names no declared rung disables
   escalation, and the reason appears in the state Jev sees.
+
 
 ### `risk_tier`
 

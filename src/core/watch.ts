@@ -77,6 +77,8 @@ import { PRIORITY_RANK, type RefinedPriority } from "./data_types.ts";
 import { redact } from "./otel.ts";
 import { parseRefineMarker } from "./refine.ts";
 import { acquirePidLock, newId, releasePidLock } from "./utils.ts";
+import type { Decision, Jev, JevOption } from "./jev.ts";
+import { INTAKE_FEEDBACK_KIND, INTAKE_FEEDBACK_OPTIONS, INTAKE_READINESS_KIND, INTAKE_READINESS_OPTIONS } from "./jev_kinds.ts";
 
 const MAX_ORPHAN_ATTEMPTS = 2;
 /** GitHub's own documented sub-issue nesting cap (see `github_provider.ts`'s `linkChild` doc comment) — `rollUp`'s own recursion bound, so a malformed/cyclic hierarchy can't spin forever. */
@@ -337,6 +339,19 @@ export interface WatchDeps {
    * no "optional but secretly required" member to get wrong.
    */
   fanout?: WatchFanoutDeps;
+  /**
+   * Jev watch intake (#108, docs/jev.md's `intake_feedback` /
+   * `intake_readiness`): a `Jev` for one issue's decisions, already wired to
+   * record into that issue's trace under `adwId` (`issue-<id>`) — or with no
+   * recorder at all, in which case the decisions still act but go untraced.
+   * `undefined` — the default, what `cli/commands/watch.ts` passes whenever
+   * `jev.enabled` is false (or both intake kinds are `off`), and what every
+   * existing test constructs — means both intake decisions are never asked:
+   * every `feedback` claim revises and every `ready` claim builds, exactly
+   * as before this field existed. Same injected-callback shape as
+   * `runChain`: this module never builds a client or opens a tracer itself.
+   */
+  intakeJev?: (adwId: string) => Jev;
 }
 
 export interface WatchRunState {
@@ -1586,6 +1601,180 @@ async function resolveRoute(
   return { ...withChain(deps, answered), note };
 }
 
+// ── Jev watch intake (#108) ─────────────────────────────────────────────────
+//
+// Two advisory decisions at the build lane's two front doors, both resolved
+// HERE (a watch hook — never inside a pure helper) and both a strict no-op
+// while `deps.intakeJev` is unset. Each computes its deterministic fallback
+// first — `revise` / `build`, exactly what the lane did before this existed —
+// and acts on `Decision.choice`, which is that fallback whenever Jev is off,
+// in shadow, failing, unsure, or answering outside `permitted`. Neither
+// option set holds a move that approves past a gate: `approve` only
+// declines to rerun the chain (the PR still needs a human to merge it), and
+// `refine` / `needs_human` only move a not-yet-claimed issue AWAY from the
+// build lane. Stopping early is the one authority either decision has.
+
+export type FeedbackIntent = (typeof INTAKE_FEEDBACK_OPTIONS)[number];
+export type IssueReadiness = (typeof INTAKE_READINESS_OPTIONS)[number];
+
+const FEEDBACK_INTENT_DESCRIPTIONS: Record<FeedbackIntent, string> = {
+  revise: "The comments ask for a change to the code or the PR (a correction, a fix, a missing test, a different approach).",
+  question: "The comments only ask a question about the change and request no code change.",
+  approve: "The comments approve or thank — no change is requested.",
+  out_of_scope: "The comments ask for work that belongs in a different issue, not a change to this PR.",
+};
+/** Built from `INTAKE_FEEDBACK_OPTIONS` (the registry constant `spf doctor` displays) — never a second hand-written list. */
+const FEEDBACK_INTENT_OPTIONS: readonly JevOption<FeedbackIntent>[] = INTAKE_FEEDBACK_OPTIONS.map((value) => ({ value, description: FEEDBACK_INTENT_DESCRIPTIONS[value] }));
+
+const READINESS_DESCRIPTIONS: Record<IssueReadiness, string> = {
+  build: "The issue is a concrete, buildable unit of work with enough detail to implement and verify.",
+  refine: "The issue is a product spec or epic too large or broad for one change, and should be decomposed into smaller issues first.",
+  needs_human: "The issue lacks information a builder needs (unclear goal, missing acceptance criteria, an open decision) and should go back to a human.",
+};
+const READINESS_OPTIONS: readonly JevOption<IssueReadiness>[] = INTAKE_READINESS_OPTIONS.map((value) => ({ value, description: READINESS_DESCRIPTIONS[value] }));
+
+/** Per-comment and per-state caps for what Jev reads — well inside its ~32k-token budget, like `MAX_THREAD_CHARS` for the prompt. */
+const MAX_INTAKE_COMMENT_CHARS = 2_000;
+const MAX_INTAKE_COMMENTS = 20;
+const MAX_INTAKE_BODY_CHARS = 8_000;
+
+/** `Decision` -> one log-line suffix, so a shadow disagreement is visible in the daemon's own output, not only in the trace. */
+function describeDecision(d: Decision): string {
+  const conf = d.confidence === null ? "" : ` @ ${d.confidence.toFixed(2)}`;
+  const jev = d.jev_choice === null ? "" : `, jev said ${d.jev_choice}${conf}`;
+  return `jev ${d.kind} ${d.mode}: ${d.choice}${d.reason ? ` (fallback: ${d.reason}${jev})` : jev}`;
+}
+
+/**
+ * The `<prefix>:feedback` classifier — `revise` unless Jev, in act mode and
+ * confident, says the new PR comments ask for something else. The comments
+ * Jev reads are exactly the ones `buildIssuePrompt` would render as
+ * "Corrections to address" (at or after `revision.since`, or every comment
+ * with no watermark). With none of those, there is nothing to classify and
+ * Jev is not asked: the human added the label with no new words, and today's
+ * behavior (revise) stands.
+ *
+ * `key` is `pr<n>:r<round>:<last comment id>` — stable across daemon
+ * restarts and distinct per labeled batch of comments (a `question` answer
+ * leaves `revision.rounds` unchanged, so the round alone would repeat).
+ */
+export async function classifyFeedback(
+  deps: WatchDeps,
+  issue: Issue,
+  pr: number,
+  prComments: PrComment[],
+  revision: WatchMarker["revision"],
+): Promise<{ intent: FeedbackIntent; decision: Decision<FeedbackIntent> | null }> {
+  const fallback: FeedbackIntent = "revise";
+  const jev = deps.intakeJev?.(`issue-${issue.id}`);
+  if (!jev) return { intent: fallback, decision: null };
+  const sinceAt = revision?.since ? Date.parse(revision.since) : null;
+  const corrections = sinceAt !== null ? prComments.filter((c) => Date.parse(c.created_at) >= sinceAt) : prComments;
+  if (corrections.length === 0) return { intent: fallback, decision: null };
+  const round = (revision?.rounds ?? 0) + 1;
+  const decision = await jev.decide<FeedbackIntent>({
+    kind: INTAKE_FEEDBACK_KIND.kind,
+    key: `pr${pr}:r${round}:${corrections.at(-1)!.id}`,
+    options: FEEDBACK_INTENT_OPTIONS,
+    instructions:
+      "A developer added a feedback label to an issue whose pull request an automated coding agent opened, asking the agent to act on the PR comments below. " +
+      "Classify what these comments, taken together, ask the agent to do. If any comment asks for a change, the answer is revise.",
+    state: {
+      issue: { id: issue.id, title: issue.title },
+      pr,
+      round,
+      comments: corrections.slice(-MAX_INTAKE_COMMENTS).map((c) => ({
+        author: c.author,
+        created_at: c.created_at,
+        ...(c.path ? { path: c.path, line: c.line } : {}),
+        ...(c.verdict ? { verdict: c.verdict } : {}),
+        body: c.body.slice(0, MAX_INTAKE_COMMENT_CHARS),
+      })),
+    },
+    fallback,
+  });
+  deps.log(`watch: ${issue.id}: feedback intake — ${describeDecision(decision)}`);
+  return { intent: decision.choice, decision };
+}
+
+/**
+ * The readiness router, asked once per `ready` issue right before
+ * `claimNewWork` claims it. Returns the EFFECTIVE route; for anything but
+ * `build` it has already moved the issue (and `claimNewWork` must skip it):
+ *
+ *   - `refine` -> `spec-ready`, with a comment — permitted only while
+ *     `watch.refine.enabled` (nothing would ever pick it up otherwise) and
+ *     only for an issue the refine lane did NOT itself create (an
+ *     `spf-refine:` marker in the body) — routing a refiner's own leaf back
+ *     to the refiner would loop.
+ *   - `needs_human` -> `blocked`, with a comment asking for the missing
+ *     detail — the lane's existing "a human needs to act" state, so no new
+ *     label, and a human's usual `blocked -> ready` relabel resumes it.
+ *
+ * Only a FIRST claim is routed: an issue that already carries a watch
+ * marker — a prior routing (see `WatchMarker.intake`), a previous build, a
+ * PR — is always `build`, with no Jev call. That is what makes a human's
+ * relabel an override: the router speaks once per issue, then stands down.
+ */
+export async function routeReadiness(deps: WatchDeps, issue: Issue): Promise<IssueReadiness> {
+  const fallback: IssueReadiness = "build";
+  const adwId = `issue-${issue.id}`;
+  const jev = deps.intakeJev?.(adwId);
+  // `off` (or Jev disabled) short-circuits BEFORE the marker read below, so a
+  // daemon with only `intake_feedback` turned on pays no extra tracker call
+  // per claim for a router it isn't using.
+  if (!jev || !jev.enabled || jev.policy(INTAKE_READINESS_KIND.kind).mode === "off") return fallback;
+  if (await deps.provider.readMarker(issue)) return fallback;
+
+  const permitted: IssueReadiness[] = ["build", "needs_human"];
+  if (deps.refineEnabled && !/<!--\s*spf-refine:/.test(issue.body)) permitted.push("refine");
+  const decision = await jev.decide<IssueReadiness>({
+    kind: INTAKE_READINESS_KIND.kind,
+    options: READINESS_OPTIONS,
+    instructions:
+      "An automated coding agent is about to pick up this tracker issue and implement it as one pull request. " +
+      "Decide whether it can be built as written, needs to be decomposed into smaller issues first, or needs more information from a human.",
+    state: {
+      id: issue.id,
+      title: issue.title,
+      labels: issue.labels,
+      body: issue.body.slice(0, MAX_INTAKE_BODY_CHARS),
+    },
+    fallback,
+    permitted,
+  });
+  deps.log(`watch: ${issue.id}: readiness intake — ${describeDecision(decision)}`);
+  const route = decision.choice;
+  if (route === "build") return route;
+
+  const conf = decision.confidence === null ? "" : ` (confidence ${decision.confidence.toFixed(2)})`;
+  // Marker first: a crash between the two writes leaves the issue `ready`
+  // WITH a marker, which the next tick builds as-is — today's behavior —
+  // rather than routing it a second time.
+  await deps.provider.writeMarker(issue, { intake: { routed: route, at: new Date().toISOString() } });
+  if (route === "refine") {
+    const detail =
+      `spf's intake check${conf} judged this issue too broad to build as one change, so it has been handed to the refine lane ` +
+      `(\`${deps.labelPrefix}:spec-ready\`) to be decomposed into smaller issues. ` +
+      `To build it as-is instead, relabel it \`${deps.labelPrefix}:ready\` — the intake check runs only once per issue.`;
+    await deps.provider.transition(issue, "spec-ready", detail);
+    return route;
+  }
+  const detail =
+    `spf's intake check${conf} judged this issue not ready to build as written: it needs more information from a human ` +
+    `(for example the goal, acceptance criteria, or an open decision). Add the missing detail, then relabel it ` +
+    `\`${deps.labelPrefix}:ready\` — spf will build it as-is from then on (the intake check runs only once per issue).`;
+  deps.notify({
+    kind: "issue_blocked",
+    level: "notice",
+    title: `issue ${issue.id} needs info`,
+    detail,
+    fields: [["issue", issue.id], ["title", issue.title], ["decision", INTAKE_READINESS_KIND.kind]],
+  });
+  await deps.provider.transition(issue, "blocked", detail);
+  return route;
+}
+
 /**
  * The single-dispatch path — `runIssue`'s entire body before fan-out
  * existed, its post-win tail extracted into `openPrForWinner` above, and now
@@ -1643,6 +1832,25 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
       }
       const prRef: PrRef = { number: priorMarker.pr, branch: priorMarker.branch ?? "", url: "" };
       const [status, prComments] = await Promise.all([deps.codeHost.prStatus(prRef), deps.codeHost.listPrComments(prRef)]);
+      // Jev intake (#108): only `revise` — the fallback, and the only answer
+      // while `deps.intakeJev` is unset — reruns the chain. Anything else
+      // puts the issue back where the PR says it belongs (`review` while the
+      // PR is open, `blocked` once it's closed), before any worktree or
+      // marker write: the PR and its marker stay exactly as they were.
+      const { intent } = await classifyFeedback(deps, issue, priorMarker.pr, prComments, priorMarker.revision);
+      if (intent !== "revise") {
+        const back: WatchState = status.state === "open" ? "review" : "blocked";
+        if (intent === "question") {
+          const detail =
+            `spf read the new comments on PR #${priorMarker.pr} as a question rather than a requested change, so it did not rebuild. ` +
+            `A human will need to answer it. To have spf revise the PR, leave the correction as a PR comment and add \`${deps.labelPrefix}:feedback\` again.`;
+          await deps.provider.transition(issue, back, detail);
+        } else {
+          await deps.provider.transition(issue, back);
+        }
+        deps.log(`watch: ${issue.id}: \`${deps.labelPrefix}:feedback\` classified ${intent} — no revision run, back to ${back}`);
+        return;
+      }
       prompt = buildIssuePrompt(issue, prComments, priorMarker.revision);
       const revisionRound = priorRound + 1;
 
@@ -2037,6 +2245,24 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
     if (!lock.ok) {
       deps.log(`watch: ${issue.id} is locked by another live \`spf watch\` process (pid ${lock.holderPid}) — skipping`);
       continue;
+    }
+    // Jev intake (#108): route BEFORE the tracker-side claim, so an issue
+    // sent to refine or back to a human never touches `working` or the
+    // concurrency budget. A no-op returning `build` while `deps.intakeJev`
+    // is unset. An error here (a tracker read/write) skips the issue for
+    // this tick, like a lost claim race — it is still `ready` next tick.
+    if (deps.intakeJev) {
+      let build: boolean;
+      try {
+        build = (await routeReadiness(deps, issue)) === "build";
+      } catch (error) {
+        deps.log(`watch: ${issue.id}: readiness intake error: ${(error as Error).message} — skipping this tick`);
+        build = false;
+      }
+      if (!build) {
+        releasePidLock(lockPath);
+        continue;
+      }
     }
     const claimed = await deps.provider.claim(issue);
     if (!claimed) {
