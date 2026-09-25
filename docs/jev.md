@@ -230,6 +230,83 @@ settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
+### `finding_triage`
+
+Ticket #106. Before a rejected review's findings reach the fixing agent,
+Jev classifies each **unmet** finding (`met: false` in the reviewer's
+`ReviewOutput`) so the fixer spends its round on what matters.
+
+- **Question:** `choice`, one per unmet finding, all asked in ONE
+  `decideBatch` call per round. The state is the request plus the review
+  (summary, `blocking`, unmet findings), clipped to fit the call budget. At
+  most 50 distinct findings are asked about per round; any beyond that
+  keep the fallback.
+- **Options:** `real | noise | style` (`FINDING_TRIAGE_CLASSES` in
+  `core/jev_kinds.ts`; the call site builds its options from that tuple).
+  `real` = a genuine unmet requirement or defect; `noise` = a false
+  positive, already satisfied, out of scope, or unactionable; `style` = a
+  cosmetic preference that does not decide whether the request is met.
+- **Fallback:** `real` for every finding, which is today's behavior: the
+  fixer is asked to close all of them.
+- **Key:** `revise_<round>:<fingerprint>`, where the fingerprint is the
+  first 16 hex chars of sha256 of the finding's normalized requirement text
+  (case, whitespace, and evidence do not change it). Findings with the same
+  requirement share one question.
+- **Where:** inside the revise phase of `reviseLoop` (`chains/steps.ts`) and
+  of the built-in `simple_sdlc` chain's review loop, so each decision's
+  `phase_id` is that `revise_<round>` phase. The call site is live only; it
+  does not pass `replay` yet, but the keys are stable, so a replay caller
+  can look decisions up with `findRecordedDecision(db, adwId,
+  "finding_triage", key)`.
+- **What acting on it does (act mode, confident answer):** a `noise` or
+  `style` finding is removed from the handoff's `findings`. Any `blocking`
+  entry whose text is the same requirement (after case and whitespace
+  normalization) goes with it. A blocker worded differently stays, because
+  spf never guesses which free-text blocker a finding means. With the
+  default `drop: none`, each demoted finding is listed again under a
+  `## Deprioritized by jev` section appended to the envelope's
+  `notes_for_next_agent`, so the fixer still sees it, ranked after the real
+  work. When anything was demoted, one `log`/`jev_triage` event on the
+  revise phase records what was kept, deprioritized, and dropped.
+- **What it can never do:**
+  - It never changes `approved`. The loop's verdict, `state.review`, and
+    `state.accepted` all come from the reviewer's original envelope, and
+    the reviewer rules on every requirement again next round. Triage shapes
+    what the fixer is asked to fix. It cannot turn a rejection into an
+    approval.
+  - It never empties the ask. If every unmet finding comes back demoted,
+    dropping is suspended for that round (`drop_suspended: true` in the
+    `jev_triage` event) and all of them are passed as deprioritized.
+  - It never triages `met: true` findings or an approving review.
+- **Shadow mode:** Jev is called and every decision is recorded, but the
+  fallback (`real`) acts, so the fixer receives the reviewer's envelope
+  unchanged.
+- **Not triaged:** `fixLoop`'s suite output. A `QualityResult` holds one
+  verbatim output blob per check (whatever the linter or test runner
+  printed), not a list of findings, and splitting arbitrary tool output per
+  finding would mean parsing formats spf does not own. To get triage for an
+  external reviewer, have a reviewer agent consult it and use `reviseLoop`
+  (see `cookbooks/ocr_reviewer.md`).
+- **Extras** (`jev.decisions.finding_triage`):
+
+  ```yaml
+  jev:
+    enabled: true
+    decisions:
+      finding_triage:
+        mode: act
+        drop: none    # none | noise | noise_and_style
+  ```
+
+  `drop` picks which demoted findings are withheld from the fixer entirely
+  rather than deprioritized. `none` (default): every finding still reaches
+  the fixer. `noise`: `noise` findings are withheld and `style` findings are
+  deprioritized. `noise_and_style`: both are withheld. A withheld finding
+  is never silent: its `jev_decision` row and the `jev_triage` event both
+  record it. An invalid value fails the step with
+  `jev.decisions.finding_triage: ...` before any phase opens, and
+  `spf doctor` reports it too.
+
 ### `loop_control`
 
 Ticket #105. After a failed round in `fixLoop` or `reviseLoop`

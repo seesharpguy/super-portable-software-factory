@@ -77,6 +77,7 @@ import {
 import type { ChangeSet } from "../core/data_types.ts";
 import { Run, type PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
+import { resolveFindingTriage, triageReviewFindings } from "./finding_triage.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
 import { parseDecisionExtras } from "../core/jev.ts";
 import { LOOP_CONTROL_KIND } from "../core/jev_kinds.ts";
@@ -805,6 +806,10 @@ export function reviseLoop(
   preflightDescription("review", opts.description);
   preflightDescription("revise", opts.reviseDescription);
   const fn = async (run: Run, state: ChainState) => {
+    // Jev finding triage (#106) — `null` (a total no-op) unless
+    // jev.decisions.finding_triage is on. It only reshapes the revise
+    // phase's `previous`; the verdict below always reads the ORIGINAL review.
+    const triage = resolveFindingTriage(run);
     let review: ReviewOutputT | null = null;
     // Jev loop control (#105) — same contract as in fixLoop above: `null`
     // unless the kind is live; may stop early or escalate the reviser one
@@ -868,7 +873,10 @@ export function reviseLoop(
             retries: opts.reviseRetries ?? 1,
             description: opts.reviseDescription ?? "Close every blocking finding the reviewer named",
           }),
-          (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: reviseGates })),
+          async (ph) => {
+            const previous = triage ? (await triageReviewFindings(run, review!, { settings: triage, round: i, prompt: state.prompt })).handoff : review!;
+            return ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous, gates: reviseGates }));
+          },
         );
       }
     } finally {

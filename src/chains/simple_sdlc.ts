@@ -63,6 +63,7 @@ import { paint } from "../core/console.ts";
 import { committerIdentity, type CommitterIdentity } from "../core/git_helper.ts";
 import type { ChainContext } from "./context.ts";
 import { commitEnvelope, logChangeset, startRun } from "./steps.ts";
+import { resolveFindingTriage, triageReviewFindings } from "./finding_triage.ts";
 import {
   BuildOutput,
   DocumentOutput,
@@ -207,6 +208,10 @@ export function trailerFor(outcome: SignoffOutcome, identity: CommitterIdentity 
 export async function main(ctx: ChainContext): Promise<number> {
   const { prompt } = ctx;
   const run = await startRun(ctx, REQUIRED_AGENTS, REQUIRED_SUITES);
+  // Jev finding triage (#106): null unless on — resolved before any phase so a bad
+  // `jev.decisions.finding_triage` setting fails here, not after the build. It
+  // shapes the revise handoff only, never the verdict.
+  const triage = resolveFindingTriage(run);
   const baseline = run.git.rev("HEAD"); // pinned before this run commits anything
 
   await run.phase(makePhaseParams({ name: "request", kind: "engineer", owner: run.engineer, description: "Capture the incoming ask" }), async (ph) => {
@@ -273,7 +278,10 @@ export async function main(ctx: ChainContext): Promise<number> {
 
     build = await run.phase(
       makePhaseParams({ name: `revise_${i}`, kind: "agent", owner: "builder", retries: 1, description: "Close the reviewer's blocking findings" }),
-      (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt, previous: review!, gates: [gates.diffMatchesClaims] })),
+      async (ph) => {
+        const previous = triage ? (await triageReviewFindings(run, review!, { settings: triage, round: i, prompt })).handoff : review!;
+        return ph.call(makeAgentCall({ output_type: BuildOutput, prompt, previous, gates: [gates.diffMatchesClaims] }));
+      },
     );
     revised = true;
   }
