@@ -34,8 +34,12 @@
  *     `DecisionRecorder`, which for a run is `traceDecisionRecorder`: ONE
  *     `type: "log"`, `name: "jev_decision"` event whose payload is the
  *     whole `Decision`. `findRecordedDecision` reads it back so a replay or
- *     an estimate reuses the recorded answer instead of calling Jev again
- *     (pass it as `DecisionRequest.replay`).
+ *     an estimate reuses the recorded ANSWER instead of calling Jev again
+ *     (pass it as `DecisionRequest.replay`). A replay re-applies TODAY's
+ *     policy to that answer — `permitted`, threshold, shadow/act — so a
+ *     recorded `escalate_tier` cannot act once the caller no longer permits
+ *     it, and `enabled: false` / a kind set to `off` beats any replay (the
+ *     no-op in §1 has no exceptions).
  *  6. MONOTONE AUTHORITY is the CALLER's job, but `permitted` exists to make
  *     it cheap: a feature whose option set includes something Jev may only
  *     choose under conditions (e.g. `escalate_tier` only below the spend
@@ -237,7 +241,11 @@ export function normalizeJevConfig(config: Partial<JevConfig> | null | undefined
 }
 
 export function resolveDecisionPolicy(config: Partial<JevConfig> | null | undefined, kind: string): DecisionPolicy {
-  const cfg = normalizeJevConfig(config);
+  return policyFor(normalizeJevConfig(config), kind);
+}
+
+/** `resolveDecisionPolicy` over an ALREADY-normalized config — no schema parse. `Jev` holds a normalized config, so a 200-item batch costs 200 cheap lookups, not 200 parses. */
+function policyFor(cfg: JevConfig, kind: string): DecisionPolicy {
   const override = cfg.decisions[kind] ?? {};
   const extras: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(override)) {
@@ -305,7 +313,13 @@ export type DecisionQuestionType = "choice" | "score";
 export interface DecisionRequest<T extends string = string> {
   /** The decision kind — register it in `core/jev_kinds.ts`. Selects `jev.decisions.<kind>` policy. */
   kind: string;
-  /** Disambiguates repeated decisions of one kind in one run (e.g. `"fix_2"`), so a replay finds the right one. Default `""`. */
+  /**
+   * Disambiguates repeated decisions of one kind in one run (e.g. `"fix_2"`),
+   * so a replay finds the right one. Default `""`. MUST be stable across
+   * runs for the same logical question — a finding fingerprint, a round
+   * number — NEVER an array index: replay looks up the latest (kind, key)
+   * match, so an index key replays the wrong item once the list reorders.
+   */
   key?: string;
   /** Default `"choice"`. For `"score"`, `options` is the rubric in ORDER (lowest level first), 2-10 levels. */
   question?: DecisionQuestionType;
@@ -321,9 +335,15 @@ export interface DecisionRequest<T extends string = string> {
   permitted?: readonly T[];
   /**
    * `undefined` (the default): live — call Jev per policy.
-   * A recorded `Decision` (from `findRecordedDecision`): reuse it verbatim,
-   *   no call — provided its kind/key/options/fallback still match this request.
+   * A recorded `Decision` (from `findRecordedDecision`): reuse its ANSWER,
+   *   no call — provided its kind/key/question/options/fallback still match
+   *   this request (else `replay_missing`). The answer is re-judged under
+   *   the CURRENT policy and `permitted` (a recorded failure — timeout,
+   *   error, ... — replays as that same failure). `input_sha256` is NOT
+   *   part of the match (see `Decision.input_sha256`).
    * `null`: replay requested but nothing recorded — fallback, no call.
+   * Either way `enabled: false` / kind `off` wins first: `disabled` /
+   * `kind_off`, nothing recorded.
    */
   replay?: Decision | null;
   /** Phase this decision belongs to, for the trace event. Default `""` (run-scoped). */
@@ -363,7 +383,14 @@ export interface Decision<T extends string = string> {
   threshold: number;
   model: string | null;
   usage: JevUsage | null;
-  /** sha256 of `{state, instructions, options}` — lets a replay notice the input drifted since recording. */
+  /**
+   * sha256 of `{state, instructions, options}`, for OFFLINE analysis only
+   * (e.g. "did the input change between these two runs?"). Replay does NOT
+   * compare it — replay identity is (kind, key, question, options,
+   * fallback) — because any state formatting change would otherwise break
+   * every replay. `""` on a `disabled` / `kind_off` decision (never
+   * recorded, so never hashed).
+   */
   input_sha256: string;
   /** True when this Decision was reused from the trace rather than decided now. */
   replayed: boolean;
@@ -372,25 +399,54 @@ export interface Decision<T extends string = string> {
 /** Receives every decision made while Jev is enabled for its kind. Errors are swallowed (see `Jev.record`). */
 export type DecisionRecorder = (decision: Decision, meta: { phase_id: string }) => void | Promise<void>;
 
+/**
+ * What is wrong with an option set + fallback (+ `permitted`), or `null` if
+ * nothing is. This is exactly the check `decide()` throws on — exported so
+ * a feature whose options come from RUN-TIME or OPERATOR data (a chain menu
+ * from `watch.chains`, one option per finding, ...) can test the set FIRST
+ * and, when it is degenerate (empty, duplicated, missing the fallback),
+ * skip `decide()` and use its heuristic directly. `decide()` throwing is
+ * meant for statically-built sets, where it fails the call site's own unit
+ * test; a thrown error from operator data would turn a run that worked
+ * with no `jev:` block into a crash (invariant 1).
+ */
+export function optionSetProblem<T extends string>(
+  options: readonly JevOption<T>[],
+  fallback: T,
+  extra: { question?: DecisionQuestionType; permitted?: readonly T[] } = {},
+): string | null {
+  const question = extra.question ?? "choice";
+  const values = options.map((o) => o.value);
+  if (values.length === 0) return "options is empty";
+  if (new Set(values).size !== values.length) return "duplicate option values";
+  if (values.some((value) => typeof value !== "string" || value.length === 0)) return "every option value must be a non-empty string";
+  if (question === "choice" && values.length > JEV_MAX_CHOICE_OPTIONS) return `at most ${JEV_MAX_CHOICE_OPTIONS} choice options`;
+  if (question === "score" && (values.length < JEV_MIN_SCORE_LEVELS || values.length > JEV_MAX_SCORE_LEVELS)) {
+    return `a score rubric needs ${JEV_MIN_SCORE_LEVELS}-${JEV_MAX_SCORE_LEVELS} levels`;
+  }
+  if (!values.includes(fallback)) return `fallback ${JSON.stringify(fallback)} is not one of the options`;
+  if (extra.permitted) {
+    const stray = extra.permitted.filter((p) => !values.includes(p));
+    if (stray.length > 0) return `permitted names non-options ${JSON.stringify(stray)}`;
+    if (!extra.permitted.includes(fallback)) return "permitted must include the fallback";
+  }
+  return null;
+}
+
+/** `optionSetProblem(...) === null` — the guard a run-time-built option set goes through before `decide()`. */
+export function isValidOptionSet<T extends string>(
+  options: readonly JevOption<T>[],
+  fallback: T,
+  extra: { question?: DecisionQuestionType; permitted?: readonly T[] } = {},
+): boolean {
+  return optionSetProblem(options, fallback, extra) === null;
+}
+
 /** Programmer-error checks — see header §3. Runs even when Jev is disabled, so a bad call site fails its own unit test. */
 function validateRequest<T extends string>(item: DecisionBatchItem<T>): void {
-  const where = `jev decide(${JSON.stringify(item.kind)})`;
   if (!item.kind) throw new Error("jev decide(): kind is required");
-  const question = item.question ?? "choice";
-  const values = item.options.map((o) => o.value);
-  if (values.length === 0) throw new Error(`${where}: options is empty`);
-  if (new Set(values).size !== values.length) throw new Error(`${where}: duplicate option values`);
-  if (values.some((value) => typeof value !== "string" || value.length === 0)) throw new Error(`${where}: every option value must be a non-empty string`);
-  if (question === "choice" && values.length > JEV_MAX_CHOICE_OPTIONS) throw new Error(`${where}: at most ${JEV_MAX_CHOICE_OPTIONS} choice options`);
-  if (question === "score" && (values.length < JEV_MIN_SCORE_LEVELS || values.length > JEV_MAX_SCORE_LEVELS)) {
-    throw new Error(`${where}: a score rubric needs ${JEV_MIN_SCORE_LEVELS}-${JEV_MAX_SCORE_LEVELS} levels`);
-  }
-  if (!values.includes(item.fallback)) throw new Error(`${where}: fallback ${JSON.stringify(item.fallback)} is not one of the options`);
-  if (item.permitted) {
-    const stray = item.permitted.filter((p) => !values.includes(p));
-    if (stray.length > 0) throw new Error(`${where}: permitted names non-options ${JSON.stringify(stray)}`);
-    if (!item.permitted.includes(item.fallback)) throw new Error(`${where}: permitted must include the fallback`);
-  }
+  const problem = optionSetProblem(item.options, item.fallback, { question: item.question, permitted: item.permitted });
+  if (problem !== null) throw new Error(`jev decide(${JSON.stringify(item.kind)}): ${problem}`);
 }
 
 function inputDigest(state: JevState, item: DecisionBatchItem): string {
@@ -456,7 +512,14 @@ function parseScoreAnswer(answer: unknown, options: readonly JevOption[]): Parse
   if (probabilities && Object.keys(probabilities).length > 0) {
     const [bestKey] = Object.entries(probabilities).reduce((best, entry) => (entry[1] > best[1] ? entry : best));
     const byDescription = options.findIndex((o) => o.description === bestKey);
-    index = byDescription >= 0 ? byDescription : Number(bestKey) - base;
+    const asIndex = bestKey.trim() === "" ? Number.NaN : Number(bestKey);
+    if (byDescription < 0 && !Number.isInteger(asIndex)) {
+      // A wire-shape problem, not "Jev answered outside the set" — file it
+      // under invalid_response so shadow analysis groups it correctly.
+      const derived = confidence ?? confidenceFromProbabilities(probabilities, options.length);
+      return { value: null, confidence: derived, score: score ?? null, probabilities, problem: "score probabilities keyed by neither level index nor description" };
+    }
+    index = byDescription >= 0 ? byDescription : asIndex - base;
   } else if (typeof score === "number") {
     index = Math.round(score) - base;
   }
@@ -534,6 +597,53 @@ function judge<T extends string>(decision: Decision<T>, item: DecisionBatchItem<
   return { ...out, choice: jevChoice, used_fallback: false, reason: null, detail: "" };
 }
 
+/**
+ * Replay: reuse a recorded ANSWER without calling Jev, then re-judge it
+ * under TODAY's policy and `permitted` — the same `judge()` a live answer
+ * goes through. That is what keeps invariant 6 intact on replay: an
+ * `escalate_tier` recorded under the spend ceiling is `not_permitted` when
+ * replayed above it, and a kind moved back to `shadow` does not act on an
+ * old answer. Under an unchanged policy the effective choice is identical
+ * to the recorded one. A recorded failure (no `jev_choice`: timeout,
+ * error, invalid answer, no key) replays as that same failure, fallback
+ * acting. Latency/model/usage are the recorded call's; `input_sha256` is
+ * today's input (compare it with the recorded one offline to see drift).
+ */
+function replayed<T extends string>(base: Decision<T>, item: DecisionBatchItem<T>, policy: DecisionPolicy): Decision<T> {
+  const recorded = item.replay!;
+  const values: readonly string[] = base.options;
+  const matches =
+    recorded.kind === item.kind &&
+    recorded.key === (item.key ?? "") &&
+    recorded.question === base.question &&
+    recorded.fallback === item.fallback &&
+    sameOptions(recorded.options, base.options) &&
+    values.includes(recorded.choice) &&
+    (recorded.jev_choice === null || values.includes(recorded.jev_choice));
+  if (!matches) {
+    // A recorded decision for a DIFFERENT question is not a replay of this
+    // one — fall back rather than act on a stale answer, and say why.
+    return withFallback({ ...base, replayed: true }, "replay_missing", "recorded decision does not match this request (kind/key/question/options/fallback changed)");
+  }
+  const carried: Decision<T> = { ...base, replayed: true, latency_ms: recorded.latency_ms, model: recorded.model, usage: recorded.usage };
+  if (recorded.jev_choice === null) {
+    const reason: FallbackReason =
+      recorded.reason === null || recorded.reason === "disabled" || recorded.reason === "kind_off" ? "replay_missing" : recorded.reason;
+    return withFallback(
+      { ...carried, confidence: recorded.confidence, score: recorded.score, probabilities: recorded.probabilities },
+      reason,
+      recorded.detail || "recorded decision had no usable Jev answer",
+    );
+  }
+  return judge(carried, item, policy, {
+    value: recorded.jev_choice,
+    confidence: recorded.confidence,
+    score: recorded.score,
+    probabilities: recorded.probabilities,
+    problem: "",
+  });
+}
+
 function describeError(error: unknown): { reason: "timeout" | "error"; detail: string } {
   if (error instanceof JevTimeoutError) return { reason: "timeout", detail: error.message };
   if (error instanceof Error && error.name === "AbortError") return { reason: "timeout", detail: "jev: aborted at timeout" };
@@ -587,7 +697,7 @@ export class Jev {
   }
 
   policy(kind: string): DecisionPolicy {
-    return resolveDecisionPolicy(this.config, kind);
+    return policyFor(this.config, kind);
   }
 
   /** One decision, one call. See the module header for the full contract. */
@@ -605,23 +715,32 @@ export class Jev {
    * items whose kind is off/disabled or which carry a `replay` never reach
    * the wire. The call's timeout is the LARGEST `timeout_ms` among the live
    * items (one request can only have one deadline). Results are in item order.
+   * Items may mix kinds; each is judged under its own kind's policy.
+   *
+   * Order of precedence per item (matches `FALLBACK_REASONS`): disabled ->
+   * kind_off -> replay (a recorded Decision, or `null` = replay_missing) ->
+   * live. So `enabled: false` is a total no-op even for a caller that
+   * passes a recorded decision: nothing acts but the fallback, nothing is
+   * recorded, and `state` is never even hashed (no O(state) work while off).
    */
   async decideBatch<T extends string>(state: JevState, items: readonly DecisionBatchItem<T>[]): Promise<Decision<T>[]> {
     for (const item of items) validateRequest(item);
     const results: Decision<T>[] = new Array(items.length);
+    const policies = items.map((item) => policyFor(this.config, item.kind));
+    const digests: Array<string | undefined> = new Array(items.length);
+    const digest = (i: number): string => (digests[i] ??= inputDigest(state, items[i]!));
     const live: number[] = [];
 
     items.forEach((item, i) => {
-      const policy = this.policy(item.kind);
-      const base = baseDecision(item, policy, inputDigest(state, item));
-      if (item.replay) {
-        results[i] = this.replayed(base, item);
-      } else if (!this.config.enabled) {
-        results[i] = withFallback(base, "disabled", "");
+      const policy = policies[i]!;
+      if (!this.config.enabled) {
+        results[i] = withFallback(baseDecision(item, policy, ""), "disabled", "");
       } else if (policy.mode === "off") {
-        results[i] = withFallback(base, "kind_off", `jev.decisions.${item.kind}.mode is off`);
+        results[i] = withFallback(baseDecision(item, policy, ""), "kind_off", `jev.decisions.${item.kind}.mode is off`);
+      } else if (item.replay) {
+        results[i] = replayed(baseDecision(item, policy, digest(i)), item, policy);
       } else if (item.replay === null) {
-        results[i] = withFallback(base, "replay_missing", "replay requested, no recorded decision");
+        results[i] = withFallback(baseDecision(item, policy, digest(i)), "replay_missing", "replay requested, no recorded decision");
       } else {
         live.push(i);
       }
@@ -632,11 +751,10 @@ export class Jev {
       const client = this.client;
       if (!client) {
         for (const i of live) {
-          const item = items[i]!;
-          results[i] = withFallback(baseDecision(item, this.policy(item.kind), inputDigest(state, item)), "no_api_key", `${this.config.api_key_env} is not set`);
+          results[i] = withFallback(baseDecision(items[i]!, policies[i]!, digest(i)), "no_api_key", `${this.config.api_key_env} is not set`);
         }
       } else {
-        await this.callLive(client, state, items, live, results);
+        await this.callLive(client, state, items, live, policies, digest, results);
       }
     }
 
@@ -651,32 +769,18 @@ export class Jev {
     return results;
   }
 
-  private replayed<T extends string>(base: Decision<T>, item: DecisionBatchItem<T>): Decision<T> {
-    const recorded = item.replay!;
-    const matches =
-      recorded.kind === item.kind &&
-      recorded.key === (item.key ?? "") &&
-      recorded.fallback === item.fallback &&
-      sameOptions(recorded.options, base.options) &&
-      (base.options as readonly string[]).includes(recorded.choice);
-    if (!matches) {
-      // A recorded decision for a DIFFERENT question is not a replay of this
-      // one — fall back rather than act on a stale answer, and say why.
-      return withFallback({ ...base, replayed: true }, "replay_missing", "recorded decision does not match this request (kind/key/options/fallback changed)");
-    }
-    return { ...(recorded as Decision<T>), replayed: true };
-  }
-
   private async callLive<T extends string>(
     client: JevClient,
     state: JevState,
     items: readonly DecisionBatchItem<T>[],
     live: number[],
+    policies: readonly DecisionPolicy[],
+    digest: (i: number) => string,
     results: Decision<T>[],
   ): Promise<void> {
     const questions: Record<string, JevQuestion> = {};
     for (const i of live) questions[`q${i}`] = toQuestion(items[i]!);
-    const timeoutMs = Math.max(...live.map((i) => this.policy(items[i]!.kind).timeout_ms));
+    const timeoutMs = Math.max(...live.map((i) => policies[i]!.timeout_ms));
     const request: SystemOneRequest = { model: this.config.model, state, questions };
 
     const controller = new AbortController();
@@ -710,8 +814,8 @@ export class Jev {
 
     for (const i of live) {
       const item = items[i]!;
-      const policy = this.policy(item.kind);
-      const base: Decision<T> = { ...baseDecision(item, policy, inputDigest(state, item)), latency_ms: latency, model: response?.model ?? this.config.model, usage };
+      const policy = policies[i]!;
+      const base: Decision<T> = { ...baseDecision(item, policy, digest(i)), latency_ms: latency, model: response?.model ?? this.config.model, usage };
       if (failure !== null || !response) {
         const { reason, detail } = describeError(failure);
         results[i] = withFallback(base, reason, detail);
@@ -754,7 +858,8 @@ export function decide<T extends string>(jev: Jev, request: DecisionRequest<T>):
  * decision is a note about the run, not a new lifecycle stage — the same
  * reasoning `startRun`'s `chain_source` and `tiering` events follow. The UI
  * already renders log payloads generically. otel never exports `log`
- * events, so decision payloads (which quote option descriptions) stay local.
+ * events, so decision payloads (which name every option value and the
+ * fallback) stay local.
  */
 export function decisionEventRecord(decision: Decision, adwId: string, phaseId = ""): EventRecord {
   return makeEventRecord({

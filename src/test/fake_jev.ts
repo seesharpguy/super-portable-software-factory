@@ -11,11 +11,13 @@
  *   FakeJevClient.choosing("high", 0.92)        // every question answers "high" @ 0.92
  *   FakeJevClient.answering({ q0: {...} })      // exact answers per question name
  *   FakeJevClient.failing(new JevApiError(529, "overloaded"))
- *   FakeJevClient.hanging()                     // never answers; honors the abort signal
+ *   FakeJevClient.hanging()                     // never answers; rejects with AbortError when the caller's timeout aborts
  *   FakeJevClient.scoring(2, 0.8)               // score answer at level index 2 (0-based)
  *
  * `calls` records every request, so a test can assert "disabled => zero
- * calls" or inspect the exact closed option set sent as `criteria`.
+ * calls" or inspect the exact closed option set sent as `criteria`;
+ * `signals` records each call's `AbortSignal` (same index), so a test can
+ * assert the client actually observed the timeout's abort.
  *
  * Two injection routes (see `core/jev.ts`):
  *   - direct:        `createJev({ config, client: fake })`
@@ -25,10 +27,15 @@
  */
 import type { JevClient, SystemOneRequest, SystemOneResponse } from "../core/jev.js";
 
-export type JevResponder = (request: SystemOneRequest) => SystemOneResponse | Promise<SystemOneResponse>;
+export type JevResponder = (request: SystemOneRequest, options: { signal: AbortSignal }) => SystemOneResponse | Promise<SystemOneResponse>;
+
+function abortError(): Error {
+  return Object.assign(new Error("aborted"), { name: "AbortError" });
+}
 
 export class FakeJevClient implements JevClient {
   readonly calls: SystemOneRequest[] = [];
+  readonly signals: AbortSignal[] = [];
   private readonly responder: JevResponder;
 
   constructor(responder: JevResponder) {
@@ -37,8 +44,9 @@ export class FakeJevClient implements JevClient {
 
   async systemOne(request: SystemOneRequest, options: { signal: AbortSignal }): Promise<SystemOneResponse> {
     this.calls.push(request);
-    if (options.signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
-    return this.responder(request);
+    this.signals.push(options.signal);
+    if (options.signal.aborted) throw abortError();
+    return this.responder(request, options);
   }
 
   /** Every question in the request answers `choice` with `confidence` (a choice-shaped answer). */
@@ -76,8 +84,33 @@ export class FakeJevClient implements JevClient {
     });
   }
 
-  /** Never resolves on its own — only the caller's timeout (abort) ends it. */
+  /** Never answers on its own; when the caller's timeout aborts the signal, rejects with an `AbortError` (so the promise settles and `signals[i].aborted` is true). */
   static hanging(): FakeJevClient {
-    return new FakeJevClient(() => new Promise<SystemOneResponse>(() => {}));
+    return new FakeJevClient(
+      (_request, { signal }) =>
+        new Promise<SystemOneResponse>((_, reject) => {
+          if (signal.aborted) return reject(abortError());
+          signal.addEventListener("abort", () => reject(abortError()), { once: true });
+        }),
+    );
+  }
+
+  /** Answers like `choosing(choice, confidence)`, but only after `ms` — for proving a batch's deadline is its LARGEST live `timeout_ms`. */
+  static delayed(ms: number, choice: string, confidence: number): FakeJevClient {
+    const inner = FakeJevClient.choosing(choice, confidence);
+    return new FakeJevClient(
+      (request, options) =>
+        new Promise<SystemOneResponse>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(inner.systemOne(request, options)), ms);
+          options.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(abortError());
+            },
+            { once: true },
+          );
+        }),
+    );
   }
 }

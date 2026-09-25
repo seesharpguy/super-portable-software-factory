@@ -23,10 +23,17 @@
  *          options: ["low", "standard", "high"],
  *          extras: v.object({ include_diffstat: v.optional(v.boolean(), false) }),
  *        });
- *        const REGISTERED = [RISK_TIER_KIND];
+ *        const REGISTERED = [
+ *          RISK_TIER_KIND,
+ *        ];
  *
- *      (`import * as v from "valibot"` — value import — once a kind with
- *      `extras` lands; the core commit only needs the types.)
+ *      Parallel feature branches all touch this file, so it is laid out to
+ *      keep merges mechanical: `valibot` is already a VALUE import (use
+ *      `v.object(...)` freely — do not touch the import line), spec blocks
+ *      go in the "kind specs" section ALPHABETICALLY by `kind`, and
+ *      `REGISTERED` holds ONE entry per line, alphabetical, trailing comma.
+ *      A textual conflict here is expected; resolve it by keeping both
+ *      sides in alphabetical order.
  *
  *   2. In the feature, pass `RISK_TIER_KIND.kind` as `DecisionRequest.kind`,
  *      and read its own settings with
@@ -37,7 +44,9 @@
  *          decisions:
  *            risk_tier: { mode: act, threshold: 0.8, include_diffstat: true }
  *
- *   3. Append a subsection for the kind under "Decisions" in docs/jev.md.
+ *   3. Append a subsection for the kind under "Decisions" in docs/jev.md
+ *      (alphabetical by kind) and one bullet under the CHANGELOG's
+ *      "Added — Jev decision kinds" heading (alphabetical by kind).
  *
  * `options` is documentation + doctor display for a kind whose option set
  * is static. A kind whose options are built at run time from operator
@@ -50,7 +59,7 @@
  * Every field in it should be `v.optional(...)` with a default: an operator
  * who never writes `jev.decisions.<kind>` must still get a valid parse.
  */
-import type * as v from "valibot";
+import * as v from "valibot";
 
 export interface JevDecisionKindSpec<Extras = unknown> {
   /** The exact string passed as `DecisionRequest.kind` and written into every `jev_decision` trace event. snake_case. */
@@ -70,13 +79,21 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
   return Object.freeze({ ...spec });
 }
 
-/**
- * EMPTY in the core commit on purpose — the rails ship before any feature
- * depends on them. Each feature PR appends exactly its own spec.
- */
-const REGISTERED: readonly JevDecisionKindSpec<any>[] = [];
+// ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
+//
+// (none yet: the rails ship before any feature depends on them)
 
-function indexKinds(specs: readonly JevDecisionKindSpec<any>[]): Readonly<Record<string, JevDecisionKindSpec<unknown>>> {
+/**
+ * EMPTY in the core commit on purpose. Each feature PR inserts exactly ONE
+ * line — its spec constant plus a trailing comma — keeping the list
+ * alphabetical by kind.
+ */
+const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
+  // keep alphabetical by kind, one per line: MY_KIND,
+];
+
+/** Index specs by kind; a kind registered twice throws (at module load, for `REGISTERED`). Exported for its test. */
+export function indexKinds(specs: readonly JevDecisionKindSpec<any>[]): Readonly<Record<string, JevDecisionKindSpec<unknown>>> {
   const out: Record<string, JevDecisionKindSpec<unknown>> = {};
   for (const spec of specs) {
     if (spec.kind in out) throw new Error(`jev kind ${JSON.stringify(spec.kind)} is registered twice`);

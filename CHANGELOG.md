@@ -30,6 +30,16 @@ record independent of the commit log.
   run's trace.
 - With no `jev:` block, runs behave exactly as before: no call and no trace
   event. See `docs/jev.md`.
+- **Replay and edges**: a replayed decision reuses the recorded answer and
+  judges it again under today's policy and `permitted`, so a replay cannot
+  act on a choice the caller no longer permits. `enabled: false` or a kind
+  set to `off` wins over any replay. `isValidOptionSet()`/`optionSetProblem()`
+  let a feature check a run-time option set before calling `decide()`. An
+  empty `jev.decisions:` in YAML now means `{}`.
+
+### Added — Jev decision kinds
+
+<!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
 ### Changed — OpenTelemetry: real SDK encoder, process-scoped metrics, outbound propagation
 

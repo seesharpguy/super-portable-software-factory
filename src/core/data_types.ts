@@ -1638,7 +1638,18 @@ export const JevConfigSchema = v.object({
   timeout_ms: v.optional(JevTimeoutSchema, 2_000),
   api_key_env: v.optional(v.pipe(v.string(), v.minLength(1)), "TYPESAFE_API_KEY"),
   base_url: v.optional(v.string(), ""),
-  decisions: v.optional(v.record(v.string(), JevDecisionOverrideSchema), () => ({})),
+  // `decisions:` left empty in YAML is `null` — operators write that as a
+  // placeholder, so null means `{}` (at both levels: `risk_tier:` with no
+  // body is an empty override) instead of an opaque valibot error. In a
+  // layered config an override's empty `decisions:` therefore clears the
+  // base's, exactly as `decisions: {}` would (whole-object replace).
+  decisions: v.optional(
+    v.pipe(
+      v.nullable(v.record(v.string(), v.pipe(v.nullable(JevDecisionOverrideSchema), v.transform((entry) => entry ?? {})))),
+      v.transform((decisions) => decisions ?? {}),
+    ),
+    () => ({}),
+  ),
 });
 export type JevConfig = v.InferOutput<typeof JevConfigSchema>;
 

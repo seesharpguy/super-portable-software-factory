@@ -28,9 +28,11 @@ import {
   createJev,
   decisionsFromEvents,
   findRecordedDecision,
+  isValidOptionSet,
   jevDoctorChecks,
   jevEndpoint,
   listRecordedDecisions,
+  optionSetProblem,
   parseDecisionExtras,
   parseRecordedDecision,
   resolveDecisionPolicy,
@@ -40,8 +42,9 @@ import {
   type DecisionRequest,
   type JevOption,
 } from "../core/jev.js";
-import { defineJevKind } from "../core/jev_kinds.js";
+import { defineJevKind, indexKinds } from "../core/jev_kinds.js";
 import { doctorCommand } from "../cli/commands/doctor.js";
+import { startRun } from "../chains/steps.js";
 import { FakeJevClient } from "./fake_jev.js";
 
 type Risk = "low" | "standard" | "high";
@@ -558,5 +561,297 @@ test("jev doctor: spf doctor --json surfaces the api-key warning when jev is ena
   } finally {
     if (saved !== undefined) process.env["SPF_JEV_DOCTOR_TEST_KEY"] = saved;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── review follow-ups (#103): replay re-judged, off beats replay, edges ─────
+
+/** A recorded act-mode `high @ 0.93` risk_tier decision, via the real recorder shape (payload round-trip). */
+async function recordedHigh(extra: Partial<DecisionRequest<Risk>> = {}): Promise<Decision> {
+  const mem = memoryRecorder();
+  const jev = createJev({ config: enabled({ mode: "act" }), client: FakeJevClient.choosing("high", 0.93), recorder: mem.recorder });
+  await jev.decide(riskRequest({ key: "run", ...extra }));
+  const [recorded] = decisionsFromEvents([{ type: "log", name: JEV_DECISION_EVENT, payload: JSON.parse(JSON.stringify(mem.decisions[0])) }]);
+  assert.ok(recorded);
+  return recorded!;
+}
+
+test("jev replay: a recorded choice now outside `permitted` does NOT act — replay re-checks today's permitted (invariant 6)", async () => {
+  const recorded = await recordedHigh({ permitted: ["low", "standard", "high"] });
+  assert.equal(recorded.choice, "high");
+  const fake = FakeJevClient.choosing("high", 0.99);
+  const mem = memoryRecorder();
+  const jev = createJev({ config: enabled({ mode: "act" }), client: fake, recorder: mem.recorder });
+  const d = await jev.decide(riskRequest({ key: "run", permitted: ["low", "standard"], replay: recorded }));
+  assert.equal(d.choice, "standard");
+  assert.equal(d.reason, "not_permitted");
+  assert.equal(d.jev_choice, "high");
+  assert.equal(d.replayed, true);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(mem.decisions.length, 1, "a replay is still recorded (with replayed: true)");
+});
+
+test("jev replay: enabled:false and kind off beat a supplied replay — reason disabled/kind_off, fallback acts, nothing recorded", async () => {
+  const recorded = await recordedHigh();
+  const mem = memoryRecorder();
+  const disabled = await createJev({ recorder: mem.recorder }).decide(riskRequest({ key: "run", replay: recorded }));
+  assert.equal(disabled.choice, "standard");
+  assert.equal(disabled.reason, "disabled");
+  assert.equal(disabled.replayed, false);
+  const off = await createJev({ config: enabled({ mode: "act", decisions: { risk_tier: { mode: "off" } } }), recorder: mem.recorder }).decide(
+    riskRequest({ key: "run", replay: recorded }),
+  );
+  assert.equal(off.reason, "kind_off");
+  assert.equal(off.choice, "standard");
+  assert.equal(mem.decisions.length, 0, "off is a total no-op even for a replay");
+  const nothing = await createJev({ recorder: mem.recorder }).decide(riskRequest({ key: "run", replay: null }));
+  assert.equal(nothing.reason, "disabled", "disabled also beats replay:null");
+});
+
+test("jev replay: the recorded answer is re-judged under TODAY's mode/threshold; a recorded failure replays as that failure", async () => {
+  const recorded = await recordedHigh();
+  const shadow = await createJev({ config: enabled({ mode: "shadow" }) }).decide(riskRequest({ key: "run", replay: recorded }));
+  assert.equal(shadow.choice, "standard");
+  assert.equal(shadow.reason, "shadow");
+  assert.equal(shadow.mode, "shadow", "the replayed event carries the CURRENT policy");
+  const strict = await createJev({ config: enabled({ mode: "act", threshold: 0.95 }) }).decide(riskRequest({ key: "run", replay: recorded }));
+  assert.equal(strict.reason, "low_confidence");
+  assert.equal(strict.threshold, 0.95);
+  const same = await createJev({ config: enabled({ mode: "act" }) }).decide(riskRequest({ key: "run", replay: recorded }));
+  assert.equal(same.choice, "high", "an unchanged policy reproduces the recorded effective choice");
+  assert.equal(same.latency_ms, recorded.latency_ms);
+  assert.deepEqual(same.usage, recorded.usage);
+
+  const mem = memoryRecorder();
+  await createJev({ config: enabled({ mode: "act", timeout_ms: 20 }), client: FakeJevClient.hanging(), recorder: mem.recorder }).decide(riskRequest({ key: "run" }));
+  const timedOut = mem.decisions[0]!;
+  const replayedTimeout = await createJev({ config: enabled({ mode: "act" }) }).decide(riskRequest({ key: "run", replay: timedOut }));
+  assert.equal(replayedTimeout.reason, "timeout");
+  assert.equal(replayedTimeout.choice, "standard");
+  assert.equal(replayedTimeout.replayed, true);
+});
+
+test("jev replay: input_sha256 is NOT part of replay identity — a changed state still replays; the digest records today's input", async () => {
+  const recorded = await recordedHigh();
+  const d = await createJev({ config: enabled({ mode: "act" }) }).decide(riskRequest({ key: "run", state: "a totally different diff", replay: recorded }));
+  assert.equal(d.choice, "high");
+  assert.equal(d.replayed, true);
+  assert.notEqual(d.input_sha256, recorded.input_sha256, "drift is visible offline by comparing digests");
+  const mismatchedQuestion = await createJev({ config: enabled({ mode: "act" }) }).decide(riskRequest({ key: "run", question: "score", replay: recorded }));
+  assert.equal(mismatchedQuestion.reason, "replay_missing", "a choice recording is not a replay of a score question");
+});
+
+test("jev: disabled/kind_off never hash `state`; a live decision hashes it exactly once", async () => {
+  let hashed = 0;
+  const state = { toJSON: () => (hashed++, "big state") } as unknown as Record<string, unknown>;
+  const off = await createJev().decide(riskRequest({ state }));
+  assert.equal(off.input_sha256, "");
+  await createJev({ config: enabled({ decisions: { risk_tier: { mode: "off" } } }) }).decide(riskRequest({ state }));
+  assert.equal(hashed, 0, "no O(state) work while Jev is off");
+  const fake = FakeJevClient.choosing("low", 0.9);
+  const liveHashes = hashed;
+  await createJev({ config: enabled({ mode: "act" }), client: fake }).decide(riskRequest({ state }));
+  // JSON.stringify(state) happens once for the digest (the fake does not serialize the request).
+  assert.equal(hashed - liveHashes, 1);
+});
+
+test("jev: confidence EQUAL to the threshold acts (the check is strictly `<`)", async () => {
+  const d = await createJev({ config: enabled({ mode: "act", threshold: 0.8 }), client: FakeJevClient.choosing("high", 0.8) }).decide(riskRequest());
+  assert.equal(d.choice, "high");
+  assert.equal(d.reason, null);
+});
+
+test("jev: optionSetProblem / isValidOptionSet let a run-time-built set be checked BEFORE decide()", () => {
+  assert.equal(optionSetProblem(RISK_OPTIONS, "standard"), null);
+  assert.equal(isValidOptionSet(RISK_OPTIONS, "standard"), true);
+  assert.equal(isValidOptionSet([], "standard" as Risk), false);
+  assert.match(optionSetProblem([...RISK_OPTIONS, RISK_OPTIONS[0]!], "standard")!, /duplicate/);
+  assert.match(optionSetProblem(RISK_OPTIONS, "nope" as Risk)!, /not one of the options/);
+  assert.match(optionSetProblem(RISK_OPTIONS, "standard", { permitted: ["low"] })!, /permitted must include the fallback/);
+  assert.match(optionSetProblem(RISK_OPTIONS.slice(0, 1), "low", { question: "score" })!, /2-10 levels/);
+});
+
+test("jev: withRecorder keeps config + client and swaps only the recorder", async () => {
+  const fake = FakeJevClient.choosing("low", 0.9);
+  const first = memoryRecorder();
+  const second = memoryRecorder();
+  const jev = createJev({ config: enabled({ mode: "act" }), client: fake, recorder: first.recorder });
+  const rewired = jev.withRecorder(second.recorder);
+  assert.deepEqual(rewired.config, jev.config);
+  assert.equal((await rewired.decide(riskRequest())).choice, "low");
+  assert.equal(fake.calls.length, 1, "the same injected client is reused");
+  assert.equal(first.decisions.length, 0);
+  assert.equal(second.decisions.length, 1);
+  await jev.withRecorder(null).decide(riskRequest());
+  assert.equal(first.decisions.length + second.decisions.length, 1, "withRecorder(null) records nowhere");
+});
+
+test("jev decideBatch: replay and live items mix — replayed items never reach the wire, live ones share one call", async () => {
+  const recorded = await recordedHigh();
+  const fake = FakeJevClient.choosing("low", 0.9);
+  const mem = memoryRecorder();
+  const jev = createJev({ config: enabled({ mode: "act" }), client: fake, recorder: mem.recorder });
+  const { state: _state, ...item } = riskRequest();
+  const results = await jev.decideBatch("the diff", [
+    { ...item, key: "run", replay: recorded },
+    { ...item, key: "live_a" },
+    { ...item, key: "missing", replay: null },
+    { ...item, key: "live_b" },
+  ]);
+  assert.equal(fake.calls.length, 1);
+  assert.deepEqual(Object.keys(fake.calls[0]!.questions), ["q1", "q3"], "question names are the ITEM index, not the live index");
+  assert.deepEqual(results.map((r) => [r.key, r.choice, r.reason, r.replayed]), [
+    ["run", "high", null, true],
+    ["live_a", "low", null, false],
+    ["missing", "standard", "replay_missing", false],
+    ["live_b", "low", null, false],
+  ]);
+  assert.deepEqual(mem.decisions.map((d) => d.key), ["run", "live_a", "missing", "live_b"]);
+});
+
+test("jev decideBatch: the one call's deadline is the LARGEST live timeout_ms", async () => {
+  const fake = FakeJevClient.delayed(80, "low", 0.9);
+  const jev = createJev({ config: enabled({ mode: "act", timeout_ms: 10, decisions: { slow_kind: { timeout_ms: 2_000 } } }), client: fake });
+  const { state: _state, ...item } = riskRequest();
+  const results = await jev.decideBatch("s", [item, { ...item, kind: "slow_kind" }]);
+  assert.deepEqual(results.map((r) => r.reason), [null, null], "the 10ms item rides the 2000ms deadline: one request, one deadline");
+  const tight = createJev({ config: enabled({ mode: "act", timeout_ms: 10 }), client: FakeJevClient.delayed(80, "low", 0.9) });
+  assert.equal((await tight.decide(riskRequest())).reason, "timeout");
+});
+
+test("jev: FakeJevClient.hanging() observes the abort — its promise settles and the signal is aborted at the timeout", async () => {
+  const fake = FakeJevClient.hanging();
+  const d = await createJev({ config: enabled({ mode: "act", timeout_ms: 15 }), client: fake }).decide(riskRequest());
+  assert.equal(d.reason, "timeout");
+  assert.equal(fake.signals.length, 1);
+  assert.equal(fake.signals[0]!.aborted, true);
+});
+
+test("jev: score probabilities keyed by neither index nor description => invalid_response (a wire-shape problem, not invalid_choice)", async () => {
+  const jev = createJev({
+    config: enabled({ mode: "act" }),
+    client: FakeJevClient.answering({ q0: { type: "score", score: 1, probabilities: { alpha: 0.1, beta: 0.9 }, confidence: 0.9 } }),
+  });
+  const d = await jev.decide(riskRequest({ question: "score" }));
+  assert.equal(d.reason, "invalid_response");
+  assert.match(d.detail, /neither level index nor description/);
+  const byDescription = createJev({
+    config: enabled({ mode: "act" }),
+    client: FakeJevClient.answering({ q0: { type: "score", probabilities: { "an ordinary change": 0.9, "a risky or broad change": 0.1 }, confidence: 0.9 } }),
+  });
+  assert.equal((await byDescription.decide(riskRequest({ question: "score" }))).choice, "standard");
+});
+
+test("jev: HttpJevClient — a non-JSON body, a body without `answers`, and a fetch AbortError all fall back (error/error/timeout)", async () => {
+  const respond = (body: string) => new HttpJevClient({ apiKey: "k", fetchImpl: (async () => new Response(body, { status: 200 })) as unknown as typeof fetch });
+  const notJson = await createJev({ config: enabled({ mode: "act" }), client: respond("<html>gateway</html>") }).decide(riskRequest());
+  assert.equal(notJson.reason, "error");
+  assert.match(notJson.detail, /not JSON/);
+  const noAnswers = await createJev({ config: enabled({ mode: "act" }), client: respond(JSON.stringify({ model: "m" })) }).decide(riskRequest());
+  assert.equal(noAnswers.reason, "error");
+  assert.match(noAnswers.detail, /no `answers` object/);
+  const aborting = new HttpJevClient({
+    apiKey: "k",
+    fetchImpl: (async () => {
+      throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+    }) as unknown as typeof fetch,
+  });
+  const aborted = await createJev({ config: enabled({ mode: "act" }), client: aborting }).decide(riskRequest());
+  assert.equal(aborted.reason, "timeout");
+});
+
+test("jev kinds: indexKinds throws on a kind registered twice", () => {
+  const a = defineJevKind({ kind: "dup_kind", summary: "a", question: "choice" });
+  const b = defineJevKind({ kind: "dup_kind", summary: "b", question: "choice" });
+  assert.throws(() => indexKinds([a, b]), /registered twice/);
+  assert.deepEqual(Object.keys(indexKinds([a])), ["dup_kind"]);
+});
+
+test("jev config: an override layer that omits `decisions` keeps the base's; an empty YAML `decisions:` (null) parses as {}", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spf-jev-merge2-"));
+  try {
+    const base = join(dir, "base.yaml");
+    const override = join(dir, "override.yaml");
+    writeFileSync(base, "jev:\n  decisions:\n    a: {mode: act}\n");
+    writeFileSync(override, "jev:\n  enabled: true\n");
+    assert.deepEqual(loadConfig([base, override]).jev.decisions, { a: { mode: "act" } });
+
+    const placeholder = join(dir, "placeholder.yaml");
+    writeFileSync(placeholder, "jev:\n  enabled: true\n  decisions:\n");
+    assert.deepEqual(loadConfig([placeholder]).jev.decisions, {});
+    const emptyEntry = join(dir, "empty_entry.yaml");
+    writeFileSync(emptyEntry, "jev:\n  decisions:\n    risk_tier:\n");
+    assert.deepEqual(loadConfig([emptyEntry]).jev.decisions, { risk_tier: {} });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── the injection route features use: startRun -> run.jev ───────────────────
+
+async function withStartedRun(yaml: string, adwId: string, body: (run: Awaited<ReturnType<typeof startRun>>) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "spf-jev-startrun-"));
+  try {
+    const configPath = join(dir, "spf.config.yaml");
+    writeFileSync(configPath, yaml);
+    const run = await startRun(
+      { prompt: "a short prompt", config_paths: [configPath], adw_id: adwId, cwd: dir, chain_name: "plan-build", unattended: true },
+      [],
+      [],
+    );
+    try {
+      await body(run);
+    } finally {
+      await run.tracer.db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function jevRows(run: Awaited<ReturnType<typeof startRun>>, adwId: string): Promise<Array<{ phase_id: string; payload_json: string }>> {
+  return (await run.tracer.db.query("SELECT phase_id, payload_json FROM events WHERE adw_id=? AND type='log' AND name=?").all(adwId, JEV_DECISION_EVENT)) as Array<{
+    phase_id: string;
+    payload_json: string;
+  }>;
+}
+
+test("jev startRun: setJevClientFactory reaches run.jev, and a decision lands in the run's trace as one jev_decision row", async () => {
+  const fake = FakeJevClient.choosing("low", 0.9);
+  setJevClientFactory(() => fake);
+  try {
+    const adwId = "adw_jev_startrun_on";
+    await withStartedRun("jev:\n  enabled: true\n  mode: act\n", adwId, async (run) => {
+      assert.equal(run.jev.enabled, true);
+      assert.equal((await jevRows(run, adwId)).length, 0, "startRun itself makes no decision");
+      const d = await run.jev.decide(riskRequest({ phase_id: "ph_1" }));
+      assert.equal(d.choice, "low");
+      assert.equal(fake.calls.length, 1);
+      const rows = await jevRows(run, adwId);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.phase_id, "ph_1");
+      assert.equal(parseRecordedDecision(JSON.parse(rows[0]!.payload_json))?.choice, "low");
+      assert.equal((await findRecordedDecision(run.tracer.db, adwId, "risk_tier"))?.choice, "low");
+    });
+  } finally {
+    setJevClientFactory(null);
+  }
+});
+
+test("jev startRun: with NO jev: block, run.jev is off — fallback acts, zero calls, zero jev_decision rows (invariant 1)", async () => {
+  const fake = FakeJevClient.choosing("low", 0.9);
+  setJevClientFactory(() => fake);
+  try {
+    const adwId = "adw_jev_startrun_off";
+    await withStartedRun("watch:\n  repo: acme/widgets\n", adwId, async (run) => {
+      assert.equal(run.jev.enabled, false);
+      const d = await run.jev.decide(riskRequest());
+      assert.equal(d.choice, "standard");
+      assert.equal(d.reason, "disabled");
+      assert.equal(fake.calls.length, 0);
+      assert.equal((await jevRows(run, adwId)).length, 0);
+    });
+  } finally {
+    setJevClientFactory(null);
   }
 });

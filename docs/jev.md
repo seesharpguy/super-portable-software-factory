@@ -126,8 +126,8 @@ closed and mirrored by the UI. The payload is the whole `Decision`:
 | `agrees` | `jev_choice === fallback` |
 | `latency_ms`, `model`, `usage` | call cost and speed |
 | `mode`, `threshold` | the policy in force |
-| `input_sha256` | hash of state + instructions + options (the state itself is not stored) |
-| `replayed` | this decision was reused from an earlier trace |
+| `input_sha256` | hash of state + instructions + options (the state itself is not stored). For offline analysis only: replay does not compare it. `""` when nothing was hashed |
+| `replayed` | this decision reused an answer recorded in an earlier trace |
 
 `reason` is the **first** check that disqualified Jev's answer, in this
 order: `disabled`, `kind_off`, `replay_missing`, `no_api_key`, `timeout`,
@@ -163,14 +163,62 @@ act(decision.choice);          // ALWAYS act on .choice, never .jev_choice
 - `decideBatch(state, items)` asks several questions over one shared state
   in **one** HTTP call, for example "triage each of these N findings".
 - To replay, pass `replay: await findRecordedDecision(run.tracer.db, adwId, kind, key)`.
-  A recorded `Decision` is reused without calling Jev. `null` means replay
-  mode with nothing recorded, so the fallback acts and Jev is not called.
+  The recorded **answer** is reused without calling Jev, then judged again
+  under today's policy and `permitted`. With an unchanged policy the
+  effective choice is the recorded one. If the caller no longer permits the
+  recorded choice, it is `not_permitted`. If the kind is now in shadow mode,
+  the fallback acts. A recorded failure (timeout, error, and so on) replays
+  as that same failure. `null` means replay mode with nothing recorded, so
+  the fallback acts and Jev is not called. A recording made for a different
+  question (kind, key, question, options, or fallback changed) is
+  `replay_missing`. `enabled: false` or a kind set to `off` beats any
+  replay: the result is `disabled`/`kind_off` and nothing is recorded.
 - Tests use `src/test/fake_jev.ts`'s `FakeJevClient`, passed as
   `createJev({ client })` or process-wide with `setJevClientFactory(() => fake)`.
   Always reset it with `setJevClientFactory(null)`.
 - `decide()` throws only on programmer errors, such as an empty option set
   or a fallback that is not one of the options. It throws these even when
   Jev is disabled, so the call site's own unit test catches them.
+
+### Rules for implementers
+
+1. **`key` must be stable across runs.** Replay looks up the latest
+   `(kind, key)` match. Use something that names the same logical question
+   in every run, such as a finding fingerprint or `fix_<round>`. Never use
+   an array index: once the list order changes, an index key replays the
+   wrong item. (`decideBatch` question names `q0`, `q1`, ... are wire names
+   only and are never used for replay.)
+2. **Always compute the heuristic.** The fallback is computed on every
+   call, in act mode too. It is the answer whenever Jev's cannot act, and
+   shadow analysis compares against it.
+3. **Check run-time option sets before calling `decide()`.** When options
+   come from run-time or operator data (a chain menu from `watch.chains`,
+   one option per finding), call `isValidOptionSet(options, fallback, {permitted})`
+   (or `optionSetProblem(...)` for the message) first. If the set is
+   degenerate (empty, duplicated, or missing the fallback), skip `decide()`
+   and use the heuristic directly. Letting `decide()` throw is only for
+   statically built sets, where it fails the call site's unit test. A throw
+   from operator data would crash a run that works with no `jev:` block.
+4. **`JevDecisionKindSpec.options` is display only.** Doctor shows it, and
+   nothing checks it against the options a call site sends. Build the call
+   site's options from the same constant as the spec so they cannot drift.
+5. **`extras` and `parseDecisionExtras` are optional.** A kind with no
+   feature settings omits `extras` and never calls `parseDecisionExtras`.
+6. **Where to decide.** Inside a phase, pass that phase's
+   `ph.phase.phase_id` as `phase_id`. For run-scoped decisions (such as
+   `startRun`), leave it `""`. The watch lane has no `Run`: build a `Jev`
+   with `createJev({ config: cfg.jev, recorder: traceDecisionRecorder(tracer, adwId) })`
+   once the lane has a tracer and an `adwId`. Before then, use
+   `recorder: null`. That decision still acts, but it is not in any trace,
+   so say so in your kind's docs.
+7. **Mixing kinds in one `decideBatch` is allowed.** Each item is judged
+   under its own kind's policy, and the call's deadline is the largest live
+   `timeout_ms`. Keep a batch to one kind unless the items genuinely share
+   one `state`.
+8. **Each feature proves invariant 1 through its real call site.** Add a
+   test showing that with no `jev:` block the feature's result equals the
+   heuristic and the trace has zero `jev_decision` rows. Keeping existing
+   tests unmodified is not enough, because it cannot cover new code paths.
 
 ## Decisions
 
@@ -179,7 +227,7 @@ option set, the fallback (the existing heuristic), where it is resolved,
 what acting on it can and cannot do, and any `jev.decisions.<kind>`
 settings it adds.
 
-*(none yet)*
+<!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
 ## Wire format and caveats
 
