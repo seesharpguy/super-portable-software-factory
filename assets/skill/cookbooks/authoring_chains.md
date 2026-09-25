@@ -34,6 +34,17 @@ steps:
     onlyIfAccepted: true
 ```
 
+**Running an external CLI in a chain** (a third-party reviewer, a linter):
+a step can't run an arbitrary command inline. Declare the command under
+`quality.checks`, group it into a suite, and name that suite from
+`fixLoop` — it runs the suite, hands failing output verbatim to the fix
+agent, and re-runs, bounded. A check passes or fails on its exit code only,
+so wrap a tool that exits 0 on findings. Put every command in ONE suite
+rather than chaining two `fixLoop`s: each step overwrites `state.accepted`.
+`spf init` scaffolds `.spf/chains/review-fix.yaml` (commented out) with the
+full worked example; `ocr_reviewer.md` covers the alternative of having the
+reviewer agent consult the tool as evidence instead.
+
 **Shape.** One file, one chain — the filename is a handle a problem can point
 at. `steps` is a flat list; each entry names a `step:` and its params sit as
 FLAT SIBLINGS of `step:` — never nested under a `params:` key. Param names are

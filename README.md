@@ -356,7 +356,9 @@ spf build-test "implement the plan" --adw-id a1b2c3d4
 Every chain above is built in. A target repo can also compose its own out of
 the same step factories, with zero forking and zero build step, by dropping a
 file in `.spf/chains/*.yaml` — `spf init` scaffolds `.spf/chains/example.yaml`
-(fully commented out) showing the shape:
+(fully commented out) showing the shape, plus `.spf/chains/review-fix.yaml`
+showing how to put an external CLI (e.g. a code reviewer like
+`open-code-review`, or a linter) into the sequence as a gated fix loop:
 
 ```yaml
 # .spf/chains/ship-it.yaml — spf ship-it "<prompt>" / spf run ship-it "<prompt>"
