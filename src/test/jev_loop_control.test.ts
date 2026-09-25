@@ -73,8 +73,15 @@ const TIERING =
   "    - {name: t2, coding_agent: flue, model: openai/m2}\n" +
   "  roles: {builder: t0}\n";
 
+/**
+ * Sibling kinds that fire in the same run (e.g. `risk_tier` in `startRun`
+ * when tiering is on) are pinned `off`, so every Jev call and every
+ * `jev_decision` row these tests count belongs to `loop_control`.
+ */
+const OTHER_KINDS_OFF = "    risk_tier: {mode: off}\n";
+
 function jevBlock(mode: "shadow" | "act", loopControl = "", extra = ""): string {
-  return `jev:\n  enabled: true\n  mode: ${mode}\n${extra}${loopControl ? `  decisions:\n    loop_control: ${loopControl}\n` : ""}`;
+  return `jev:\n  enabled: true\n  mode: ${mode}\n${extra}  decisions:\n${OTHER_KINDS_OFF}${loopControl ? `    loop_control: ${loopControl}\n` : ""}`;
 }
 
 // ── harness ────────────────────────────────────────────────────────────────
