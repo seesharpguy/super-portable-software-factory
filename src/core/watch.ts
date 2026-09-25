@@ -272,7 +272,8 @@ export interface WatchDeps {
    * means no routing: `chain` runs, byte-identical to before.
    *
    * Called once per claim, at claim time, by `runIssueSingle` (plain claims
-   * only — a `feedback` revision keeps `chain`) and `runIssueFanout`, which
+   * only — a `feedback` revision never asks; it reuses the chain recorded
+   * on the marker, `WatchMarker.chain`) and `runIssueFanout`, which
    * passes `requireCommit: true` so the menu is filtered to commit chains
    * BEFORE Jev is asked (best-of-N discards losing worktrees; see
    * `spf watch`'s startup refusal). Injected as a callback for the same
@@ -281,6 +282,16 @@ export interface WatchDeps {
    * string, degrades to `chain` and never blocks the issue.
    */
   routeChain?: (issue: Issue, opts: { adwId: string; requireCommit: boolean }) => Promise<WatchChainRoute>;
+  /**
+   * `watch.chains` — the operator's allowlist, which `resolveRoute` checks
+   * `routeChain`'s answer against HERE, in the layer that actually starts
+   * the run, rather than trusting the router to have stayed on its menu. An
+   * answer that is neither `chain` nor a member runs `chain` instead, like a
+   * throwing router. Also what a `feedback` revision's recorded
+   * `WatchMarker.chain` must still be a member of to be reused. Absent =
+   * empty: only `chain` may ever run.
+   */
+  chains?: readonly string[];
   /**
    * `IssueAuthoringProvider.listChildren`'s read-back, injected as a bound
    * function rather than a whole provider object — same reasoning as
@@ -1157,6 +1168,8 @@ async function openPrForWinner(
     revisionRound?: number;
     /** The chain router's one-line note (`WatchChainRoute.note`) — appended to a NEW PR's body. Absent (the default) leaves the body byte-identical. */
     routeNote?: string | null;
+    /** Set when a routed chain (not `watch.chain`) built this PR — kept on the marker (`WatchMarker.chain`) so a `feedback` revision rebuilds with it. */
+    routedChain?: string;
   },
 ): Promise<void> {
   const wtGit = deps.worktreeGit(won.worktreePath);
@@ -1222,6 +1235,7 @@ async function openPrForWinner(
     pr: pr.number,
     attempt: 0,
     revision: { rounds: won.revisionRound ?? 0, since: new Date().toISOString() },
+    ...(won.routedChain ? { chain: won.routedChain } : {}),
   });
   await deps.provider.transition(issue, "review");
   deps.log(`watch: ${issue.id}: ${won.existingPr ? `pushed a revision to PR #${pr.number}` : `opened PR #${pr.number}`} — review`);
@@ -1438,7 +1452,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
 
     const winner = result.winner;
     won = { worktree: winner.worktree, branch: winner.branch }; // still spf/fanout/*
-    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
+    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0, ...(routed ? { chain: routed } : {}) });
 
     // RENAME (§8.3): `spf/fanout/*` branches are never pushed by SPF
     // (`core/fanout.ts`'s own stated contract) — pushing one from watch
@@ -1457,7 +1471,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
     wtGit.createBranch(branch);
     deps.git.deleteLocalBranch(winner.branch);
     won = { worktree: winner.worktree, branch };
-    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0 });
+    await deps.provider.writeMarker(issue, { worktree: won.worktree, branch: won.branch, attempt: 0, ...(routed ? { chain: routed } : {}) });
 
     const review = await fanout.reviewFor(
       routed
@@ -1478,6 +1492,7 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
       reviewSummary: review.reviewSummary,
       extraNotifyFields: [["fanout", `${n} attempts, won by ${winner.adw_id}`]],
       ...(route.note ? { routeNote: route.note } : {}),
+      ...(routed ? { routedChain: routed } : {}),
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -1494,6 +1509,16 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
   }
 }
 
+/** True when `chain` may run for a claim: the configured `deps.chain`, or a member of the operator's `watch.chains` allowlist. */
+function isAllowlistedChain(deps: WatchDeps, chain: string): boolean {
+  return chain === deps.chain || (deps.chains ?? []).includes(chain);
+}
+
+/** `deps` running `chain` instead of the configured one, plus the `routed` value `runChain`/`runAttempt` take — or `deps` untouched when `chain` IS the configured one. */
+function withChain(deps: WatchDeps, chain: string): { deps: WatchDeps; routed?: string } {
+  return chain === deps.chain ? { deps } : { deps: { ...deps, chain }, routed: chain };
+}
+
 /**
  * Ask `deps.routeChain` (the Jev chain router) which chain builds this
  * claim, and return `deps` with `chain` swapped for the answer — every
@@ -1503,11 +1528,25 @@ async function runIssueFanout(deps: WatchDeps, issue: Issue, fanout: WatchFanout
  * configured chain; callers pass it to `runChain`/`runAttempt`, so an
  * unrouted claim hands them exactly the arguments it always did.
  *
+ * CODE DISPOSES HERE TOO: the answer must be `deps.chain` or a member of
+ * `deps.chains` (the operator's `watch.chains`). Anything else — a buggy or
+ * future router that strays off its menu — is refused exactly like a
+ * throwing router: logged, and the configured chain runs. The router's own
+ * menu check (`core/chain_router.ts`) is the first line; this is the one
+ * that guards the dispatch.
+ *
  * NEVER THROWS and never blocks an issue: no router, a router that throws,
- * or a non-string answer all mean the configured chain. When the router has
- * something to say (`note`), it is logged and posted once on the issue —
- * best-effort, a failed comment is only logged — so the human watching the
- * tracker sees which chain was chosen and why before the PR exists.
+ * a non-string answer, or an off-allowlist answer all mean the configured
+ * chain. When the router has something to say (`note`), it is logged and
+ * posted once on the issue — best-effort, a failed comment is only logged —
+ * so the human watching the tracker sees which chain was chosen and why
+ * before the PR exists.
+ *
+ * With a router configured, this is also where the claim's `issue_claimed`
+ * notification is sent (`claimNewWork` defers it), so its `chain` field
+ * names the chain that will actually run rather than the configured
+ * default. No router: no notify here — `claimNewWork` already sent it,
+ * byte-identical to before.
  */
 async function resolveRoute(
   deps: WatchDeps,
@@ -1515,23 +1554,36 @@ async function resolveRoute(
   opts: { adwId: string; requireCommit: boolean },
 ): Promise<{ deps: WatchDeps; routed?: string; note: string | null }> {
   if (!deps.routeChain) return { deps, note: null };
+  const claimed = (chain: string): void =>
+    deps.notify({
+      kind: "issue_claimed",
+      level: "info",
+      title: `issue ${issue.id} claimed`,
+      fields: [["issue", issue.id], ["title", issue.title], ["chain", chain]],
+    });
   let route: WatchChainRoute;
   try {
     route = await deps.routeChain(issue, opts);
   } catch (error) {
     deps.log(`watch: ${issue.id}: chain router failed (${(error as Error).message}) — running the default chain "${deps.chain}"`);
+    claimed(deps.chain);
     return { deps, note: null };
   }
-  const chain = typeof route?.chain === "string" && route.chain.length > 0 ? route.chain : deps.chain;
+  const answered = typeof route?.chain === "string" && route.chain.length > 0 ? route.chain : deps.chain;
+  if (!isAllowlistedChain(deps, answered)) {
+    deps.log(`watch: ${issue.id}: chain router answered ${JSON.stringify(answered)}, not in watch.chains — running the default chain "${deps.chain}"`);
+    claimed(deps.chain);
+    return { deps, note: null };
+  }
   const note = route?.note ?? null;
   if (note) {
-    deps.log(`watch: ${issue.id}: chain router -> "${chain}" (default "${deps.chain}")`);
-    await deps.provider.comment(issue, `spf watch: this issue will be built by chain \`${chain}\`.\n\n${note}`).catch((error: Error) => {
+    deps.log(`watch: ${issue.id}: chain router -> "${answered}" (default "${deps.chain}")`);
+    await deps.provider.comment(issue, `spf watch: this issue will be built by chain \`${answered}\`.\n\n${note}`).catch((error: Error) => {
       deps.log(`watch: ${issue.id}: could not post the chain-router comment: ${error.message}`);
     });
   }
-  if (chain === deps.chain) return { deps, note };
-  return { deps: { ...deps, chain }, routed: chain, note };
+  claimed(answered);
+  return { ...withChain(deps, answered), note };
 }
 
 /**
@@ -1615,6 +1667,18 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
         prCarry = undefined;
         openPrOpts = { supersedesPr: priorMarker.pr, revisionRound };
       }
+      // A PR built by a ROUTED chain is revised by that same chain —
+      // recorded on the marker at claim time, reused deterministically (no
+      // Jev call), and only while it is still on the operator's allowlist.
+      // No recorded chain (every unrouted PR) keeps `watch.chain`, as before.
+      if (priorMarker.chain && priorMarker.chain !== deps.chain) {
+        if (isAllowlistedChain(deps, priorMarker.chain)) {
+          ({ deps, routed } = withChain(deps, priorMarker.chain));
+          deps.log(`watch: ${issue.id}: revising with chain "${priorMarker.chain}", the chain that built PR #${priorMarker.pr}`);
+        } else {
+          deps.log(`watch: ${issue.id}: PR #${priorMarker.pr} was built by chain "${priorMarker.chain}", no longer in watch.chains — revising with "${deps.chain}"`);
+        }
+      }
     } else {
       // Plain `ready` claim. `priorRound` is 0 on a fresh issue's first-ever
       // claim, so this is byte-identical to before either feature existed.
@@ -1660,7 +1724,7 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
     // stale `pr` surviving into a fresh attempt's marker would let a daemon
     // restart resume straight to `review` off a PR this NEW attempt hasn't
     // touched yet.
-    await deps.provider.writeMarker(issue, { pr: prCarry, revision: revisionCarry, worktree: worktreePath, branch, attempt: 0 });
+    await deps.provider.writeMarker(issue, { pr: prCarry, revision: revisionCarry, worktree: worktreePath, branch, attempt: 0, ...(routed ? { chain: routed } : {}) });
 
     const result = await deps.runChain(
       routed ? { prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions, chain: routed } : { prompt, cwd: worktreePath, adwId, chainOptions: deps.chainOptions },
@@ -1689,6 +1753,7 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
       reviewRequired: result.reviewRequired,
       reviewSummary: result.reviewSummary,
       ...openPrOpts,
+      ...(routed ? { routedChain: routed } : {}),
     });
   } catch (error) {
     const message = (error as Error).message;
@@ -1956,7 +2021,10 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
       }
     }
     if (deps.dryRun) {
-      deps.log(`watch: [dry-run] would claim ${issue.id} (${issue.title}) and run chain "${deps.chain}"`);
+      deps.log(
+        `watch: [dry-run] would claim ${issue.id} (${issue.title}) and run chain "${deps.chain}"` +
+          (deps.routeChain ? ` (watch.chains routing enabled: the chain router may pick one of [${(deps.chains ?? []).join(", ")}] instead)` : ""),
+      );
       continue;
     }
     // Gate the tracker-side claim itself behind local exclusivity — see
@@ -1977,12 +2045,16 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
       continue;
     }
     deps.log(`watch: claimed ${issue.id}: ${issue.title}`);
-    deps.notify({
-      kind: "issue_claimed",
-      level: "info",
-      title: `issue ${issue.id} claimed`,
-      fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
-    });
+    // With the Jev chain router configured, `resolveRoute` sends this once
+    // the chain is known, so the notification names the chain that runs.
+    if (!deps.routeChain) {
+      deps.notify({
+        kind: "issue_claimed",
+        level: "info",
+        title: `issue ${issue.id} claimed`,
+        fields: [["issue", issue.id], ["title", issue.title], ["chain", deps.chain]],
+      });
+    }
     state.inflight.add(issue.id);
     if (marker.parent) state.inflightParents.set(issue.id, marker.parent);
     runIssue(deps, issue).finally(() => {

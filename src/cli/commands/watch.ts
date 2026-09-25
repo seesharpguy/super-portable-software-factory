@@ -20,8 +20,8 @@ import { isAuthoringProvider } from "../../core/issues/provider.ts";
 import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider.ts";
 import * as refineLib from "../../core/refine.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps, type WatchFanoutDeps } from "../../core/watch.ts";
-import { routeChain, type RoutableChain } from "../../core/chain_router.ts";
-import { createJev, traceDecisionRecorder, type JevClient } from "../../core/jev.ts";
+import { chainRouteReplay, routeChain, type RoutableChain } from "../../core/chain_router.ts";
+import { createJev, findRecordedDecision, parseDecisionExtras, traceDecisionRecorder, type Decision, type JevClient } from "../../core/jev.ts";
 import { CHAIN_ROUTER_KIND } from "../../core/jev_kinds.ts";
 import { Tracer } from "../../core/tracer.ts";
 import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
@@ -433,13 +433,29 @@ export function unknownWatchChains(cfg: SFConfig): string[] {
  * on the main repo's trace db for this claim's adw_id, so the decision
  * lands as a `jev_decision` event beside the run it chose (`spf phases
  * issue-<id>`; for best-of-N, the base id `issue-<id>` the attempts derive
- * from). A Tracer that fails to open degrades to an UNTRACED decision (it
- * still acts) with one log line, never a blocked issue. With Jev off the
- * tracer is never opened and `decide()` answers `watch.chain` with no call
- * and no row — invariant 1.
+ * from). With Jev off the tracer is never opened and `decide()` answers
+ * `watch.chain` with no call and no row — invariant 1.
+ *
+ * REPLAY (`jev.decisions.chain_router.replay`, default true): with the
+ * tracer open, the latest recorded `chain_router` decision for this adw_id
+ * and issue id is looked up first; when `chainRouteReplay` says it answers
+ * THIS menu, it is handed to `decide()` as `replay` — no Jev call, the
+ * recorded answer re-judged under today's policy. So a `blocked -> ready`
+ * re-claim or a daemon restart routes the issue the way it was routed
+ * before instead of re-asking (and possibly answering differently).
+ *
+ * NO TRACE, NO ACT: a Tracer that fails to open never blocks the issue,
+ * but it also never lets an unrecorded decision act (invariant 5). In
+ * `act` mode the claim is decided by a copy of the Jev forced to `shadow`
+ * for this kind — Jev is still asked and the log line says what it
+ * suggested, but `watch.chain` runs. In `shadow` mode nothing would have
+ * acted anyway, so the untraced decision is just a log line.
  *
  * `jevOptions` is the test seam (`client`/`env`); production passes
  * nothing, and `createJev` resolves the HTTP client from `cfg.jev`.
+ * Throws `jev.decisions.chain_router: ...` on invalid extras — `spf watch`
+ * checks them at startup first, so the daemon never gets here with a bad
+ * config.
  */
 export function makeWatchChainRouter(
   cfg: SFConfig,
@@ -448,33 +464,58 @@ export function makeWatchChainRouter(
   jevOptions: { client?: JevClient | null; env?: NodeJS.ProcessEnv } = {},
 ): WatchDeps["routeChain"] {
   if (cfg.watch.chains.length === 0) return undefined;
+  const kind = CHAIN_ROUTER_KIND.kind;
+  const extras = parseDecisionExtras(cfg.jev, CHAIN_ROUTER_KIND);
   const base = createJev({ config: cfg.jev, client: jevOptions.client, env: jevOptions.env });
+  // The untraced-act guard's Jev: same config, client and env, with only
+  // this kind's mode pinned to shadow. Built once, on first need.
+  let shadowOnly: ReturnType<typeof createJev> | null = null;
+  const untracedJev = (): ReturnType<typeof createJev> => {
+    shadowOnly ??= createJev({
+      config: { ...cfg.jev, decisions: { ...cfg.jev.decisions, [kind]: { ...(cfg.jev.decisions[kind] ?? {}), mode: "shadow" } } },
+      client: jevOptions.client,
+      env: jevOptions.env,
+    });
+    return shadowOnly;
+  };
   return async (issue, opts) => {
     const fallbackDef = findChain(cfg.watch.chain);
     if (!fallbackDef) return { chain: cfg.watch.chain }; // startup already checked; never route off a vanished default
     const allowlist = cfg.watch.chains.map((name) => findChain(name)).filter((def): def is ChainDefinition => Boolean(def)).map(routableChain);
-    const live = base.enabled && base.policy(CHAIN_ROUTER_KIND.kind).mode !== "off";
+    const input = {
+      fallback: routableChain(fallbackDef),
+      allowlist,
+      requireCommit: opts.requireCommit,
+      issue: { id: issue.id, title: issue.title, body: issue.body },
+    };
+    const mode = base.enabled ? base.policy(kind).mode : "off";
     let tracer: Tracer | null = null;
-    if (live) {
+    if (mode !== "off") {
       try {
         tracer = await Tracer.open(dataPaths.db, path.join(dataPaths.sessions_dir, opts.adwId, "events.jsonl"));
       } catch (error) {
-        log(`watch: ${issue.id}: chain router could not open the trace db (${(error as Error).message}) — deciding untraced`);
+        log(
+          `watch: ${issue.id}: chain router could not open the trace db (${(error as Error).message}) — ` +
+            (mode === "act" ? "deciding in shadow: an unrecorded decision never acts, so watch.chain runs" : "deciding untraced (shadow)"),
+        );
       }
     }
     try {
-      const jev = base.withRecorder(tracer ? traceDecisionRecorder(tracer, opts.adwId) : null);
-      const route = await routeChain(jev, {
-        fallback: routableChain(fallbackDef),
-        allowlist,
-        requireCommit: opts.requireCommit,
-        issue: { id: issue.id, title: issue.title, body: issue.body },
-      });
+      let replay: Decision | undefined;
+      if (tracer && extras.replay) {
+        try {
+          replay = chainRouteReplay(await findRecordedDecision(tracer.db, opts.adwId, kind, issue.id), input);
+        } catch (error) {
+          log(`watch: ${issue.id}: chain router could not read its recorded decision (${(error as Error).message}) — asking Jev`);
+        }
+      }
+      const jev = tracer ? base.withRecorder(traceDecisionRecorder(tracer, opts.adwId)) : mode === "act" ? untracedJev() : base.withRecorder(null);
+      const route = await routeChain(jev, replay ? { ...input, replay } : input);
       if (route.decision) {
         const d = route.decision;
         log(
           `watch: ${issue.id}: jev chain_router mode=${d.mode} choice="${d.choice}" jev_choice=${d.jev_choice === null ? "none" : `"${d.jev_choice}"`} ` +
-            `confidence=${d.confidence ?? "n/a"} fallback="${d.fallback}"${d.reason ? ` reason=${d.reason}` : ""} (${d.latency_ms}ms)`,
+            `confidence=${d.confidence ?? "n/a"} fallback="${d.fallback}"${d.reason ? ` reason=${d.reason}` : ""}${d.replayed ? " (replayed)" : ` (${d.latency_ms}ms)`}`,
         );
       }
       return { chain: route.chain, note: route.note };
@@ -509,6 +550,17 @@ export async function watchCommand(argv: string[]): Promise<number> {
   if (unknownChains.length > 0) {
     console.error(`watch.chains names chain(s) that are not registered: ${unknownChains.map((n) => JSON.stringify(n)).join(", ")} — run \`spf list\` to see every chain`);
     return 1;
+  }
+  if (cfg.watch.chains.length > 0) {
+    // `jev.decisions.chain_router`'s own settings (`replay`) — a typo'd
+    // value refuses here, once, rather than throwing out of the router's
+    // factory below.
+    try {
+      parseDecisionExtras(cfg.jev, CHAIN_ROUTER_KIND);
+    } catch (error) {
+      console.error((error as Error).message);
+      return 1;
+    }
   }
   if (cfg.watch.refine.enabled) {
     if (cfg.watch.issue_provider !== "github" && cfg.watch.issue_provider !== "jira") {
@@ -878,6 +930,9 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // set — see `makeWatchChainRouter`. Logs through `deps.log` (read at
     // call time, so the dashboard swap above applies).
     routeChain: makeWatchChainRouter(cfg, dataPaths, (message) => deps.log(message)),
+    // The allowlist `core/watch.ts` checks the router's answer against —
+    // code disposes there too, not only inside the router.
+    chains: cfg.watch.chains,
     listChildren: authoringProvider ? (parent) => authoringProvider.listChildren(parent) : undefined,
     // See `WatchDeps.publishSpecs`'s own doc comment: `authoringProvider` is
     // guaranteed non-null whenever `refine.enabled` is true (the startup

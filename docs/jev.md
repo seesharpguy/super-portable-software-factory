@@ -241,7 +241,7 @@ watch:
 jev:
   enabled: true
   decisions:
-    chain_router: { mode: shadow }    # or act / off; threshold, timeout_ms as usual
+    chain_router: { mode: shadow }    # or act / off; threshold, timeout_ms as usual; replay: true (default)
 ```
 
 - **Kind:** `chain_router`, a `choice` question.
@@ -263,9 +263,24 @@ jev:
   repo's trace db under the claim's adw_id: `issue-<id>` for single
   dispatch, or the best-of-N base id (for example `issue-<id>`) that the
   attempt ids derive from. `spf phases issue-<id>` shows it. If the trace db
-  cannot be opened, the decision still acts but is not traced, and one log
-  line says so. Plain `ready` claims are routed. A `feedback` revision is
-  not, and always runs `watch.chain`.
+  cannot be opened, the claim never blocks, but an unrecorded decision never
+  acts either: in `act` mode Jev is asked in shadow for that claim (the log
+  line shows its suggestion) and `watch.chain` runs; in `shadow` mode the
+  decision is simply untraced. One log line says which. Plain `ready`
+  claims are routed. A `feedback` revision never asks Jev: it rebuilds with
+  the chain recorded on the issue's marker (`WatchMarker.chain`, written
+  only when a claim was routed away from `watch.chain`) while that chain is
+  still in `watch.chains`, and otherwise runs `watch.chain`.
+- **Replay:** a re-claim of the same issue (`blocked` back to `ready`, a
+  daemon restart) looks up the latest recorded `chain_router` decision for
+  that adw_id and issue id and passes it to `decide()` as `replay`: no Jev
+  call, the recorded answer re-judged under today's mode, threshold and
+  menu. A row is reused only when Jev actually answered (a recorded
+  timeout or error is asked again, not pinned forever) and the menu and
+  fallback are unchanged (edit `watch.chain`/`watch.chains` and the next
+  claim asks live). A best-of-N base id bumped past a crashed attempt is a
+  new adw_id, so it asks live too. Set `replay: false` to ask on every
+  claim.
 - **Best-of-N:** when `watch.fanout.n > 1`, chains with no commit step are
   removed from the menu in code before Jev is asked, so Jev never sees
   them. This uses the same `hasCommitStep` check as the startup refusal. A
@@ -275,21 +290,31 @@ jev:
   under best-of-N), `decide()` is not called. The fallback runs and no
   trace row is written.
 - **What acting can do:** swap which operator-allowlisted chain runs for
-  this one issue. When a decision was made (Jev enabled and the kind not
-  `off`), spf posts one issue comment naming the chosen chain and why, and
-  the PR body gets the same line. With Jev off, nothing appears on the
-  tracker.
+  this one issue. `core/watch.ts` re-checks the answer against `watch.chain`
+  plus `watch.chains` before dispatching, so even a router that strayed off
+  its menu cannot start any other registered chain. Only `act` mode is
+  announced: spf posts one issue comment naming the chosen chain and why
+  (routed, kept, or which fallback), and the PR body gets the same line. In
+  `shadow` mode, and with Jev off, nothing appears on the tracker; Jev's
+  suggestion is in the trace and the daemon log only. With routing
+  configured, the `issue_claimed` notification is sent after routing, so
+  its `chain` field names the chain that runs, and `--dry-run` says routing
+  is enabled.
 - **What acting cannot do:** name a chain outside the menu (that answer is
   `invalid_choice` and the fallback runs), pick a non-commit chain under
   best-of-N, or change anything inside a chain. Every chain's own gates,
   retry limits and budget ceilings run unchanged. Routing never changes
   `watch.chain_options`, the adw_id, the branch, or the worktree.
 - **Validation:** every `watch.chains` name must resolve through
-  `findChain`. `spf watch` refuses to start otherwise, and `spf doctor`
-  fails a `watch.chains` check. Doctor also runs the same suites and owners
+  `findChain`. This is checked at `spf watch` startup, not when the config
+  is loaded (the chain registry is per repo and is built after config load,
+  the same as for `watch.chain`): `spf watch` refuses to start, and
+  `spf doctor` fails a `watch.chains` check. Doctor also runs the same suites and owners
   checks on each allowlisted chain as on `watch.chain`, and under best-of-N
   it warns which allowlisted chains will never be offered.
-- **Extras:** none.
+- **Extras:** `replay` (boolean, default `true`), described under
+  **Replay** above. An invalid value stops `spf watch` at startup and fails
+  `spf doctor`.
 
 ### `finding_triage`
 

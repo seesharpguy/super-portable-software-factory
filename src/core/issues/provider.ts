@@ -238,6 +238,14 @@ export interface PrComment {
  * lanes' claims never touch the same field name on the same code path, and
  * `reconcileOrphans`/`reconcileRefining` would otherwise have to disambiguate
  * which lane a shared field belonged to.
+ *
+ * `chain` is set only when the Jev chain router (`watch.chains`, #107)
+ * routed this issue to a chain OTHER than `watch.chain`: the chain that
+ * built the PR. A `feedback` revision rebuilds with it (when it is still
+ * allowlisted) instead of `watch.chain`, deterministically and without
+ * asking Jev again, so a revision never switches workflows under a PR.
+ * Absent — every marker written by a daemon with no routing — means
+ * `watch.chain`, exactly as before the field existed.
  */
 export interface WatchMarker {
   worktree?: string;
@@ -248,6 +256,7 @@ export interface WatchMarker {
   feedback?: { rounds: number; asked_at: string };
   split?: { specs: SpecSplit[]; proposed_at: string; rounds: number };
   revision?: { rounds: number; since: string };
+  chain?: string;
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */

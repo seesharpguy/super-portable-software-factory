@@ -86,13 +86,16 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
  * (`watch.chains`, plus the default `watch.chain`) builds a claimed issue.
  * No static `options`: the menu is built by CODE from `watch.chains` at
  * claim time (core/chain_router.ts), filtered to commit chains when
- * best-of-N needs one. No `extras`: the common mode/threshold/timeout_ms
- * knobs are the only settings.
+ * best-of-N needs one. One extra, `replay` (default true): a re-claim of
+ * the same issue reuses the answer recorded for it under the same adw_id
+ * and menu instead of calling Jev again (`chainRouteReplay`); `false` asks
+ * Jev afresh on every claim.
  */
 export const CHAIN_ROUTER_KIND = defineJevKind({
   kind: "chain_router",
   summary: "route a claimed spf watch issue to one chain from watch.chains (fallback: watch.chain)",
   question: "choice",
+  extras: v.object({ replay: v.optional(v.boolean(), true) }),
 });
 
 /**
