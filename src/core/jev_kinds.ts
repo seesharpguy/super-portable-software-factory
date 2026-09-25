@@ -84,12 +84,38 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 // (none yet: the rails ship before any feature depends on them)
 
 /**
+ * `risk_tier` (#104) — the run's tiering risk (`core/tiering.ts`'s `Risk`),
+ * decided once in `startRun` (`core/risk_tier.ts`) over this closed set, in
+ * `tiering.ts`'s own ladder order (weakest first). Fallback: the
+ * `classifyRisk` heuristic (chain weight + prompt word count).
+ *
+ * `extras`:
+ *  - `max_risk` — the highest risk Jev's answer may ACT on (the
+ *    `permitted` ceiling). The heuristic's own answer is always permitted,
+ *    so this caps Jev-driven escalation only, never the heuristic's.
+ *  - `max_prompt_chars` — how much of the prompt goes into Jev's `state`
+ *    (the head of it; the rest is dropped and flagged). `0` sends none.
+ */
+export const RISK_TIER_OPTIONS = ["low", "standard", "high"] as const;
+export const RISK_TIER_KIND = defineJevKind({
+  kind: "risk_tier",
+  summary: "classify a run's risk (low|standard|high) for tiering; fallback = chain-weight + prompt-length heuristic",
+  question: "choice",
+  options: RISK_TIER_OPTIONS,
+  extras: v.object({
+    max_risk: v.optional(v.picklist(RISK_TIER_OPTIONS), "high"),
+    max_prompt_chars: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(200_000)), 4_000),
+  }),
+});
+
+/**
  * EMPTY in the core commit on purpose. Each feature PR inserts exactly ONE
  * line — its spec constant plus a trailing comma — keeping the list
  * alphabetical by kind.
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  RISK_TIER_KIND,
 ];
 
 /** Index specs by kind; a kind registered twice throws (at module load, for `REGISTERED`). Exported for its test. */

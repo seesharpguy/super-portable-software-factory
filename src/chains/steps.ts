@@ -50,6 +50,7 @@ import * as agentsCfg from "../core/agents.ts";
 import * as session from "../core/session.ts";
 import * as refineLib from "../core/refine.ts";
 import * as tiering from "../core/tiering.ts";
+import { checkRiskTierConfig, decideRiskTier } from "../core/risk_tier.ts";
 import { DOCUMENT_NOTES } from "../core/prompts.ts";
 import {
   BuildOutput,
@@ -146,6 +147,7 @@ function makeStep(
 export async function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Promise<Run> {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
+  checkRiskTierConfig(cfg); // invalid jev.decisions.risk_tier extras fail here, before any session row exists
   const run = await session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name, ctx.render_hooks);
   // Provenance, once per run, before any phase opens: a repo-local chain
   // (.spf/chains/*.yaml) records the file it came from. `chain_name` alone
@@ -171,13 +173,23 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
   // always computed (a pure function of chain name + prompt); `routing`/
   // `notes` are only ever non-empty when `cfg.tiering.enabled` — see
   // `resolveTiering`'s own no-op guarantee.
+  //
+  // The Jev `risk_tier` decision (#104) is resolved HERE, once, and handed
+  // to the pure `resolveTiering` as data (invariant 7). `null` — Jev off,
+  // the kind off, or tiering off (see `core/risk_tier.ts`) — means no call,
+  // no `jev_decision` row, and a resolution + `tiering` payload identical
+  // to the pre-Jev ones. Otherwise `run.jev` has already recorded the full
+  // decision as its own `jev_decision` row (phase_id "", run-scoped) by the
+  // time the `tiering` event below attaches its summary.
   const servedOllamaTags = await tiering.probeServedOllamaTags(cfg);
+  const riskDecision = await decideRiskTier(run.jev, cfg, { chainName: ctx.chain_name, prompt: ctx.prompt });
   run.tiering = tiering.resolveTiering({
     cfg,
     chainName: ctx.chain_name,
     prompt: ctx.prompt,
     servedOllamaTags,
     required: requiredAgents,
+    riskDecision,
   });
   await run.tracer.event(
     makeEventRecord({
@@ -189,9 +201,17 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
         signals: run.tiering.signals,
         routing: run.tiering.routing,
         notes: run.tiering.notes,
+        ...(run.tiering.jev ? { jev: run.tiering.jev } : {}),
       },
     }),
   );
+  // One console line when Jev's answer actually MOVED the risk off the
+  // heuristic's — shadow mode, a fallback, or an agreeing answer is not
+  // news (the trace has all of them).
+  if (run.tiering.jev && !run.tiering.jev.used_fallback && run.tiering.jev.choice !== run.tiering.jev.fallback) {
+    const conf = run.tiering.jev.confidence === null ? "?" : run.tiering.jev.confidence.toFixed(2);
+    await run.console.note(`[spf] jev risk_tier ${run.tiering.jev.choice} (heuristic ${run.tiering.jev.fallback}, confidence ${conf})`);
+  }
   // One console line per RETIERED agent (changedModels — not per routing
   // entry: a role whose tier resolves to the model it was already
   // configured with is not news). Routed through the existing

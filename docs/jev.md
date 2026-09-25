@@ -229,6 +229,71 @@ settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
+### `risk_tier`
+
+Classifies a run's risk for tiering (#104). Code: `src/core/risk_tier.ts`.
+
+- **Kind:** `risk_tier`, a `choice` question.
+- **Options:** `low | standard | high`, in ladder order, weakest first. The
+  set is closed and built from `RISK_TIER_KIND.options`.
+- **Fallback:** the existing `classifyRisk` heuristic in
+  `src/core/tiering.ts`, which adds chain weight and prompt word count. It is
+  computed on every call, act mode included.
+- **Where it is resolved:** once per `startRun` call in
+  `src/chains/steps.ts`, before any phase opens.
+  - `phase_id` is `""` (run-scoped).
+  - `key` is the chain name, so a joined session's second `startRun` under
+    a different chain has its own key.
+  - The `Decision` goes into the pure `resolveTiering` as data
+    (`TierInput.riskDecision`). `resolveTiering` never calls Jev.
+- **When it is asked at all:** only when `jev.enabled` is true, the kind's
+  mode is not `off`, and `tiering.enabled` is true. Risk changes nothing but
+  tiering's routing, so with tiering off no call is spent. If any of the
+  three is false, no call is made, no `jev_decision` row is written, the
+  extras are not parsed, and the `tiering` event is unchanged.
+- **Trace:** the full decision is its own `jev_decision` row. The existing
+  `tiering` log event also carries a compact `jev` summary: `choice`,
+  `jev_choice`, `confidence`, `fallback`, `used_fallback`, `reason`,
+  `mode`, `would_act`, `replayed`, `kind` and `key`. `risk` in that event is
+  the effective risk, and `signals` are still the heuristic's. A console
+  note is printed only when Jev's answer moved the risk off the heuristic's.
+- **`spf estimate`** never calls Jev. By default it uses the heuristic. With
+  `--replay-risk <adw_id>`, it replays the decision that run recorded for
+  this chain, judged again under today's policy, with no call and no row
+  written. When `risk_tier` is live for the config, or a replay is asked
+  for, the report says which source it used: `risk_source` in `--json`, and
+  a `risk from` line in text. A replay only matches when today's heuristic
+  gives the same fallback (same chain, and a prompt in the same word-count
+  bucket). Otherwise the reason is `replay_missing` and the heuristic acts.
+- **What acting on it can do:** pick which rung of the operator's own
+  `tiering.tiers` ladder each routed role starts from. This is the same
+  one-step shift the heuristic makes.
+- **What it cannot do:**
+  - name a model, add a rung, or route a role that `tiering.roles` does not
+    name
+  - walk up past an unusable rung (the walk only goes down)
+  - raise `max_run_tokens` or `max_run_cost`, which are enforced as before
+  - act above `max_risk` (see below)
+- **Shadow mode:** Jev is asked and the answer is recorded, but the
+  heuristic's risk routes the run.
+
+Extras, under `jev.decisions.risk_tier`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_risk` | `high` | The highest risk Jev's answer may act on (the `permitted` ceiling). The heuristic's own answer is always permitted, so this caps escalation driven by Jev and never lowers what the run would get without Jev. |
+| `max_prompt_chars` | `4000` | How much of the prompt, from the start, goes into Jev's `state`. The rest is dropped and flagged `prompt_truncated`. `0` sends no prompt text. Integer, 0 to 200000. |
+
+```yaml
+jev:
+  enabled: true
+  decisions:
+    risk_tier: { mode: act, threshold: 0.8, max_risk: standard }
+tiering:
+  enabled: true
+  # tiers / roles as usual
+```
+
 ## Wire format and caveats
 
 - The endpoint is `POST {base_url}/systemone`, authenticated with
