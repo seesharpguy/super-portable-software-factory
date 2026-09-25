@@ -1657,24 +1657,48 @@ function describeDecision(d: Decision): string {
  * `key` is `pr<n>:r<round>:<last comment id>` — stable across daemon
  * restarts and distinct per labeled batch of comments (a `question` answer
  * leaves `revision.rounds` unchanged, so the round alone would repeat).
+ *
+ * The human override — this decision's counterpart to the readiness
+ * router's "speaks once" rule: when the marker's `intake_feedback.key` (the
+ * batch a previous claim already classified as something other than
+ * `revise`, see `runIssueSingle`) equals this claim's key, the human
+ * re-added the label WITHOUT a new comment, which can only mean "revise
+ * anyway". That is `revise` with no Jev call — never a second question to
+ * which Jev would very likely give the same answer, bouncing the issue
+ * `feedback -> working -> review` on every relabel.
+ *
+ * Never replayed (`DecisionRequest.replay` stays unset): a key is asked at
+ * most once in act mode — the non-`revise` answer is recorded on the marker
+ * before anything else is acted on, and the next claim of that key is the
+ * override above; a `revise` answer bumps the round, so the key moves on.
+ * The traced decision is for offline analysis (`listRecordedDecisions`).
  */
 export async function classifyFeedback(
   deps: WatchDeps,
   issue: Issue,
+  marker: WatchMarker,
   pr: number,
   prComments: PrComment[],
-  revision: WatchMarker["revision"],
-): Promise<{ intent: FeedbackIntent; decision: Decision<FeedbackIntent> | null }> {
+): Promise<{ intent: FeedbackIntent; key: string | null; decision: Decision<FeedbackIntent> | null }> {
   const fallback: FeedbackIntent = "revise";
   const jev = deps.intakeJev?.(`issue-${issue.id}`);
-  if (!jev) return { intent: fallback, decision: null };
+  if (!jev) return { intent: fallback, key: null, decision: null };
+  const revision = marker.revision;
   const sinceAt = revision?.since ? Date.parse(revision.since) : null;
   const corrections = sinceAt !== null ? prComments.filter((c) => Date.parse(c.created_at) >= sinceAt) : prComments;
-  if (corrections.length === 0) return { intent: fallback, decision: null };
+  if (corrections.length === 0) return { intent: fallback, key: null, decision: null };
   const round = (revision?.rounds ?? 0) + 1;
+  const key = `pr${pr}:r${round}:${corrections.at(-1)!.id}`;
+  if (marker.intake_feedback?.key === key) {
+    deps.log(
+      `watch: ${issue.id}: feedback intake — \`${deps.labelPrefix}:feedback\` re-added with no new PR comment since spf read this batch as ` +
+        `${marker.intake_feedback.intent}: a human override, revising with no Jev call`,
+    );
+    return { intent: fallback, key, decision: null };
+  }
   const decision = await jev.decide<FeedbackIntent>({
     kind: INTAKE_FEEDBACK_KIND.kind,
-    key: `pr${pr}:r${round}:${corrections.at(-1)!.id}`,
+    key,
     options: FEEDBACK_INTENT_OPTIONS,
     instructions:
       "A developer added a feedback label to an issue whose pull request an automated coding agent opened, asking the agent to act on the PR comments below. " +
@@ -1694,7 +1718,7 @@ export async function classifyFeedback(
     fallback,
   });
   deps.log(`watch: ${issue.id}: feedback intake — ${describeDecision(decision)}`);
-  return { intent: decision.choice, decision };
+  return { intent: decision.choice, key, decision };
 }
 
 /**
@@ -1715,6 +1739,30 @@ export async function classifyFeedback(
  * marker — a prior routing (see `WatchMarker.intake`), a previous build, a
  * PR — is always `build`, with no Jev call. That is what makes a human's
  * relabel an override: the router speaks once per issue, then stands down.
+ *
+ * Order of the writes: transition, then notification, then marker. The
+ * marker records a routing that HAPPENED, so it is written only after the
+ * tracker shows it: a `transition` that throws (a tracker error) leaves the
+ * issue `ready` with no marker and no notification, and the next tick
+ * routes it afresh rather than building it as if the router had stood down.
+ * A marker write that throws after a successful transition leaves the issue
+ * routed (`spec-ready` / `blocked`, with its comment) but unmarked — the
+ * honest failure: a human's relabel to `ready` then routes it once more.
+ *
+ * Never replayed (`DecisionRequest.replay` stays unset): the router asks
+ * only for an unmarked issue, and the only way back to an unmarked `ready`
+ * issue after an answer is one of the tracker failures above, where the
+ * answer never reached the tracker (or its marker didn't), so a fresh
+ * answer against the issue as it stands now is the right one. The traced
+ * decision is for offline analysis (`listRecordedDecisions`).
+ *
+ * Cross-daemon exclusivity: none beyond the local pid lock, since this runs
+ * before `claim()`'s compare-and-set. Two daemons on DIFFERENT machines
+ * polling one repo could both route the same issue in the same tick
+ * (duplicate comment, duplicate Jev call). Accepted: the watch lane does
+ * not support that topology in the first place — `reconcileOrphans` treats
+ * every `working` issue outside its own process's `inflight` set as an
+ * orphan, so a second daemon already re-queues the first one's live work.
  */
 export async function routeReadiness(deps: WatchDeps, issue: Issue): Promise<IssueReadiness> {
   const fallback: IssueReadiness = "build";
@@ -1748,30 +1796,27 @@ export async function routeReadiness(deps: WatchDeps, issue: Issue): Promise<Iss
   if (route === "build") return route;
 
   const conf = decision.confidence === null ? "" : ` (confidence ${decision.confidence.toFixed(2)})`;
-  // Marker first: a crash between the two writes leaves the issue `ready`
-  // WITH a marker, which the next tick builds as-is — today's behavior —
-  // rather than routing it a second time.
-  await deps.provider.writeMarker(issue, { intake: { routed: route, at: new Date().toISOString() } });
   if (route === "refine") {
     const detail =
       `spf's intake check${conf} judged this issue too broad to build as one change, so it has been handed to the refine lane ` +
       `(\`${deps.labelPrefix}:spec-ready\`) to be decomposed into smaller issues. ` +
       `To build it as-is instead, relabel it \`${deps.labelPrefix}:ready\` — the intake check runs only once per issue.`;
     await deps.provider.transition(issue, "spec-ready", detail);
-    return route;
+  } else {
+    const detail =
+      `spf's intake check${conf} judged this issue not ready to build as written: it needs more information from a human ` +
+      `(for example the goal, acceptance criteria, or an open decision). Add the missing detail, then relabel it ` +
+      `\`${deps.labelPrefix}:ready\` — spf will build it as-is from then on (the intake check runs only once per issue).`;
+    await deps.provider.transition(issue, "blocked", detail);
+    deps.notify({
+      kind: "issue_blocked",
+      level: "notice",
+      title: `issue ${issue.id} needs info`,
+      detail,
+      fields: [["issue", issue.id], ["title", issue.title], ["decision", INTAKE_READINESS_KIND.kind]],
+    });
   }
-  const detail =
-    `spf's intake check${conf} judged this issue not ready to build as written: it needs more information from a human ` +
-    `(for example the goal, acceptance criteria, or an open decision). Add the missing detail, then relabel it ` +
-    `\`${deps.labelPrefix}:ready\` — spf will build it as-is from then on (the intake check runs only once per issue).`;
-  deps.notify({
-    kind: "issue_blocked",
-    level: "notice",
-    title: `issue ${issue.id} needs info`,
-    detail,
-    fields: [["issue", issue.id], ["title", issue.title], ["decision", INTAKE_READINESS_KIND.kind]],
-  });
-  await deps.provider.transition(issue, "blocked", detail);
+  await deps.provider.writeMarker(issue, { intake: { routed: route, at: new Date().toISOString() } });
   return route;
 }
 
@@ -1835,19 +1880,35 @@ async function runIssueSingle(deps: WatchDeps, issue: Issue, opts: { revision?: 
       // Jev intake (#108): only `revise` — the fallback, and the only answer
       // while `deps.intakeJev` is unset — reruns the chain. Anything else
       // puts the issue back where the PR says it belongs (`review` while the
-      // PR is open, `blocked` once it's closed), before any worktree or
-      // marker write: the PR and its marker stay exactly as they were.
-      const { intent } = await classifyFeedback(deps, issue, priorMarker.pr, prComments, priorMarker.revision);
-      if (intent !== "revise") {
+      // PR is open, `blocked` once it's closed), before any worktree write:
+      // the PR, its branch and every existing marker field stay exactly as
+      // they were — the marker only gains `intake_feedback`.
+      const { intent, key } = await classifyFeedback(deps, issue, priorMarker, priorMarker.pr, prComments);
+      if (intent !== "revise" && key !== null) {
         const back: WatchState = status.state === "open" ? "review" : "blocked";
+        // Record the answered batch FIRST, every other marker field kept:
+        // it is what turns the human's next `feedback` relabel with no new
+        // comment into a `revise` with no Jev call (see `classifyFeedback`),
+        // so a failure after it still leaves that override working.
+        await deps.provider.writeMarker(issue, { ...priorMarker, intake_feedback: { key, intent, at: new Date().toISOString() } });
+        const override =
+          `To have spf revise the PR anyway, add \`${deps.labelPrefix}:feedback\` again — with no new PR comment, spf takes that as your ` +
+          `override and revises without re-classifying; with a new comment, it reads the new comments.`;
+        // A comment on `question` (someone must answer it) and on every
+        // landing on `blocked` (a closed PR: without one, the issue would
+        // silently return to the very state whose last comment told the
+        // human to add `feedback`). `approve` / `out_of_scope` on an OPEN PR
+        // go back to `review` comment-free — the PR is still under review.
+        let detail: string | undefined;
         if (intent === "question") {
-          const detail =
+          detail =
             `spf read the new comments on PR #${priorMarker.pr} as a question rather than a requested change, so it did not rebuild. ` +
-            `A human will need to answer it. To have spf revise the PR, leave the correction as a PR comment and add \`${deps.labelPrefix}:feedback\` again.`;
-          await deps.provider.transition(issue, back, detail);
-        } else {
-          await deps.provider.transition(issue, back);
+            `A human will need to answer it. ${override}`;
+        } else if (back === "blocked") {
+          const read = intent === "approve" ? "an approval" : "a request for work outside this issue";
+          detail = `spf read the new comments on closed PR #${priorMarker.pr} as ${read} rather than a requested change, so it did not rebuild. ${override}`;
         }
+        await deps.provider.transition(issue, back, detail);
         deps.log(`watch: ${issue.id}: \`${deps.labelPrefix}:feedback\` classified ${intent} — no revision run, back to ${back}`);
         return;
       }
@@ -2217,8 +2278,21 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
   const eligible = await deps.provider.listEligible();
   const ordered = orderEligible(eligible, state.inflightParents, deps.labelPrefix);
   const blockerCache = new Map<string, boolean>(); // per-tick — see frontierBlockedOn's doc comment
+  // Jev intake (#108): issues routed AWAY (or skipped on a routing error)
+  // this tick. They spend no concurrency budget, so without their own bound
+  // a tick facing many `ready` issues would make one sequential Jev call
+  // (up to `timeout_ms` each) plus tracker writes for every one of them.
+  // Capped at `concurrency`, the same bound builds have — a routing that
+  // answers `build` (every fallback included) already counts against that
+  // budget — so a tick makes at most 2 x `concurrency` readiness calls; the
+  // rest stay `ready` for the next tick.
+  let routedAway = 0;
   for (const issue of ordered) {
     if (state.inflight.size >= deps.concurrency) break;
+    if (deps.intakeJev && routedAway >= deps.concurrency) {
+      deps.log(`watch: routed ${routedAway} issue(s) away this tick (the per-tick cap) — the rest wait for the next tick`);
+      break;
+    }
     if (state.inflight.has(issue.id)) continue;
     const marker = parseRefineMarker(issue.body);
     if (marker.blocked_by.length > 0) {
@@ -2248,9 +2322,11 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
     }
     // Jev intake (#108): route BEFORE the tracker-side claim, so an issue
     // sent to refine or back to a human never touches `working` or the
-    // concurrency budget. A no-op returning `build` while `deps.intakeJev`
-    // is unset. An error here (a tracker read/write) skips the issue for
-    // this tick, like a lost claim race — it is still `ready` next tick.
+    // concurrency budget (but does count against `routedAway`'s cap above).
+    // A no-op returning `build` while `deps.intakeJev` is unset. An error
+    // here (a tracker read/write) skips the issue for this tick, like a lost
+    // claim race — it is still `ready` next tick unless the transition
+    // itself landed (see `routeReadiness`'s write order).
     if (deps.intakeJev) {
       let build: boolean;
       try {
@@ -2260,6 +2336,7 @@ export async function claimNewWork(deps: WatchDeps, state: WatchRunState): Promi
         build = false;
       }
       if (!build) {
+        routedAway++;
         releasePidLock(lockPath);
         continue;
       }

@@ -440,8 +440,8 @@ label in the build lane's revision loop.
   reruns the chain.
 - **Resolved in** `core/watch.ts` `classifyFeedback`, called from
   `runIssueSingle`'s revision branch after `claimFeedback` claims the issue
-  and the PR's comments are read. This happens before any worktree or
-  marker write. The adw_id is `issue-<id>`, which the revision run reuses,
+  and the PR's comments are read. This happens before any worktree write.
+  The adw_id is `issue-<id>`, which the revision run reuses,
   and `phase_id` is `""`. The key is `pr<n>:r<round>:<last comment id>`.
   Jev reads the same comments `buildIssuePrompt` shows as "Corrections to
   address": the comments since the last push, or all comments when there is
@@ -451,16 +451,34 @@ label in the build lane's revision loop.
   - `revise` runs the revision exactly as before.
   - `question` posts an acknowledgement comment on the issue and does not
     run the chain.
-  - `approve` and `out_of_scope` are logged only.
+  - `approve` and `out_of_scope` are logged only while the PR is open. On
+    a closed PR they also post a one-line comment, because the issue lands
+    on `blocked`, and a silent `blocked` would be a dead end.
   - Every choice except `revise` moves the issue back to `review` if the PR
-    is open, or `blocked` if it is closed. The PR, its branch, and the
-    watch marker are not changed.
+    is open, or `blocked` if it is closed. It first records the answered
+    key and choice on the marker (`WatchMarker.intake_feedback`). The PR,
+    its branch, and every other marker field are not changed.
+- **Human override**: when the human adds `feedback` again with no new PR
+  comment, the key is the same as the recorded one. spf reads that as
+  "revise anyway": it revises and does not call Jev. With a new comment,
+  the key changes, and Jev classifies the new batch. So a wrong answer
+  costs one relabel, and the issue never bounces between `feedback` and
+  `review`.
 - **What it cannot do**: skip a revision's gates, merge or approve a PR, or
   move anything to `done`. `approve` only means "no rerun". The PR still
   needs a human to merge it, and `finishReviews` still decides `done`. The
-  worst a wrong answer can do is skip a revision a human asked for. The
-  human then adds the label again, and turning the kind to `off` restores
-  today's behavior.
+  worst a wrong answer can do is skip a revision a human asked for until
+  the human adds the label again (see the override above). Turning the kind
+  to `off` restores today's behavior.
+- **Replay**: never replayed. In act mode each key is asked at most once:
+  a non-`revise` answer is on the marker before anything else acts, and the
+  next claim with that key is the override. A `revise` answer bumps the
+  round, which changes the key. The recorded decision is for offline
+  analysis only (`listRecordedDecisions`).
+- **Default on**: none of the intake decisions needs its own opt-in.
+  `jev.enabled: true` turns this kind on at the global `jev.mode`. If that
+  mode is `act`, the kind acts on your tracker. To opt out, set
+  `jev.decisions.intake_feedback.mode: off`.
 - **Extras**: none. Use `jev.decisions.intake_feedback.mode` to turn it on
   or off independently of `intake_readiness`.
 
@@ -486,21 +504,47 @@ issue, whether to build it as written.
   always `build`, and Jev is not called. This covers an earlier routing, an
   earlier build, or a PR. Relabeling a routed issue `ready` therefore
   overrules the router.
-- **Acting on it**: the router writes the marker
-  (`WatchMarker.intake = {routed, at}`), then:
+- **Acting on it**:
   - `refine` moves the issue to `<prefix>:spec-ready` with an explanatory
     comment.
   - `needs_human` moves the issue to `<prefix>:blocked` with a needs-info
-    comment and an `issue_blocked` notification. This reuses the existing
-    blocked state, so there is no new label.
+    comment, then sends an `issue_blocked` notification. This reuses the
+    existing blocked state, so there is no new label.
 
-  A routed issue is never claimed and never uses the concurrency budget.
-  A tracker error while routing skips the issue for that tick, so it stays
-  `ready`.
+  Only after that transition succeeds does the router write the marker
+  (`WatchMarker.intake = {routed, at}`), so the marker only records routings
+  that happened. A routed issue is never claimed and never uses the
+  concurrency budget. A tracker error while routing skips the issue for
+  that tick:
+  - If the transition fails, the issue stays `ready` with no marker and no
+    notification, and the next tick routes it again.
+  - If the marker write fails after the transition, the issue stays routed
+    but has no marker. A human's relabel to `ready` then routes it once
+    more.
+- **Per-tick cap**: routings that send an issue away (and routing errors)
+  do not spend the concurrency budget. Instead, they are capped at
+  `watch.concurrency` per tick, and the other issues wait for the next
+  tick. A tick therefore makes at most 2 x `concurrency` readiness calls,
+  each bounded by `timeout_ms`.
+- **Replay**: never replayed. The router only asks about an issue with no
+  marker. After an answer, an issue has no marker only if a tracker write
+  failed. In that case a fresh answer about the issue as it is now is the
+  right one. The recorded decision is for offline analysis only
+  (`listRecordedDecisions`).
+- **Several daemons**: the router runs before `claim()`'s compare-and-set,
+  and the pid lock only protects one machine. So two daemons on different
+  machines watching the same repo could both route one issue in the same
+  tick. That means a duplicate comment and a duplicate Jev call. This is
+  accepted, because the watch lane does not support that setup anyway:
+  `reconcileOrphans` treats every `working` issue that its own process is
+  not running as an orphan.
 - **What it cannot do**: skip a gate or push work forward. It can only send
   unclaimed work away from the build lane, to a human or to decomposition.
   `refine` is impossible while the refine lane is off. A mode of `off`
   skips the marker read too, so it adds no tracker call.
+- **Default on**: `jev.enabled: true` turns this kind on at the global
+  `jev.mode`, just like `intake_feedback`. There is no separate intake
+  opt-in. To opt out, set `jev.decisions.intake_readiness.mode: off`.
 - **Extras**: none. Use `jev.decisions.intake_readiness.mode` to toggle it.
 
 **Tracing for both kinds**: `spf watch` has no `Run` before a claim. When

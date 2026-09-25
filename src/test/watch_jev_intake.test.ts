@@ -294,7 +294,7 @@ test("openWatchIntakeJev: off when disabled or when both intake kinds are off; o
 
 // ── intake_feedback ─────────────────────────────────────────────────────────
 
-test("intake_feedback act: question -> acknowledgement comment, no revision run, back to review; PR and marker untouched", async () => {
+test("intake_feedback act: question -> acknowledgement comment, no revision run, back to review; PR untouched, marker only gains the answered key", async () => {
   const fake = FakeJevClient.choosing("question", 0.95);
   const { intakeJev, recorded } = fakeIntake(ON_ACT, fake);
   const h = harness({ intakeJev });
@@ -306,7 +306,10 @@ test("intake_feedback act: question -> acknowledgement comment, no revision run,
   assert.equal(entry.state, "review");
   assert.match(entry.comments.at(-1)!.body, /as a question rather than a requested change/);
   assert.match(entry.comments.at(-1)!.body, /`spf:feedback` again/);
-  assert.deepEqual(entry.marker, { pr: 900, branch: "spf-watch/70-issue-70", attempt: 0 }, "marker unchanged");
+  const { intake_feedback, ...rest } = entry.marker!;
+  assert.deepEqual(rest, { pr: 900, branch: "spf-watch/70-issue-70", attempt: 0 }, "every prior marker field unchanged");
+  assert.equal(intake_feedback?.key, "pr900:r1:c1");
+  assert.equal(intake_feedback?.intent, "question");
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]!.adwId, "issue-70");
   assert.equal(recorded[0]!.d.kind, "intake_feedback");
@@ -317,24 +320,114 @@ test("intake_feedback act: question -> acknowledgement comment, no revision run,
   assert.deepEqual(Object.keys((q as { criteria: Record<string, string> }).criteria), ["revise", "question", "approve", "out_of_scope"]);
 });
 
-test("intake_feedback act: approve / out_of_scope are logged only — no comment, no run; a closed PR goes back to blocked", async () => {
-  for (const [choice, prState, back] of [
-    ["approve", "open", "review"],
-    ["out_of_scope", "open", "review"],
-    ["approve", "closed", "blocked"],
-  ] as const) {
+test("intake_feedback act: approve / out_of_scope on an open PR are logged only — no comment, no run, back to review", async () => {
+  for (const choice of ["approve", "out_of_scope"] as const) {
     const { intakeJev } = fakeIntake(ON_ACT, FakeJevClient.choosing(choice, 0.95));
     const h = harness({ intakeJev });
-    feedbackIssue(h, prState);
+    feedbackIssue(h, "open");
     await runFeedback(h);
     assert.deepEqual(h.chainRuns, [], choice);
     assert.equal(h.codeHost.openedPrs.length, 0);
     const entry = h.provider.entries.get("70")!;
-    assert.equal(entry.state, back);
+    assert.equal(entry.state, "review");
     assert.equal(entry.comments.length, 0, "logged, not commented");
     assert.equal(h.provider.transitions.at(-1)!.detail, undefined);
     assert.ok(h.logs.some((l) => l.includes(`classified ${choice}`)), h.logs.join("\n"));
   }
+});
+
+test("intake_feedback act: approve / out_of_scope on a CLOSED PR land on blocked WITH an explanation — never a silent dead end", async () => {
+  for (const [choice, read] of [
+    ["approve", "an approval"],
+    ["out_of_scope", "a request for work outside this issue"],
+  ] as const) {
+    const { intakeJev } = fakeIntake(ON_ACT, FakeJevClient.choosing(choice, 0.95));
+    const h = harness({ intakeJev });
+    feedbackIssue(h, "closed");
+    await runFeedback(h);
+    assert.deepEqual(h.chainRuns, [], choice);
+    const entry = h.provider.entries.get("70")!;
+    assert.equal(entry.state, "blocked");
+    assert.equal(entry.comments.length, 1, choice);
+    assert.match(entry.comments[0]!.body, new RegExp(`closed PR #900 as ${read} rather than a requested change`));
+    assert.match(entry.comments[0]!.body, /add `spf:feedback` again — with no new PR comment/);
+  }
+});
+
+test("intake_feedback act: the human override — re-adding feedback with the SAME comments revises with no second Jev call", async () => {
+  const fake = FakeJevClient.choosing("question", 0.99);
+  const { intakeJev, recorded } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev });
+  feedbackIssue(h);
+  await runFeedback(h);
+  assert.deepEqual(h.chainRuns, [], "first claim: question, no run");
+  assert.equal(h.provider.entries.get("70")!.state, "review");
+  const acks = () => h.provider.entries.get("70")!.comments.filter((c) => /as a question rather than a requested change/.test(c.body)).length;
+  assert.equal(acks(), 1);
+
+  // The human disagrees: relabel `feedback`, no new PR comment.
+  h.provider.entries.get("70")!.state = "feedback";
+  await runFeedback(h);
+  assert.equal(fake.calls.length, 1, "Jev is not asked again about the same batch");
+  assert.equal(recorded.length, 1);
+  assert.deepEqual(h.chainRuns, ["issue-70"], "the relabel revised");
+  const entry = h.provider.entries.get("70")!;
+  assert.equal(entry.state, "review");
+  assert.equal(entry.marker?.revision?.rounds, 1);
+  assert.equal(entry.marker?.intake_feedback, undefined, "the revision's own marker write drops the answered key");
+  assert.equal(acks(), 1, "no duplicate acknowledgement");
+  assert.ok(h.logs.some((l) => l.includes("a human override, revising with no Jev call")), h.logs.join("\n"));
+
+  // A NEW comment after the revision is a new batch: Jev reads it.
+  h.codeHost.prComments.set(900, [prComment("c1", "Why did you pick sqlite here?"), prComment("c2", "Thanks, looks good", "2099-01-01T00:00:00.000Z")]);
+  h.provider.entries.get("70")!.state = "feedback";
+  await runFeedback(h);
+  assert.equal(fake.calls.length, 2);
+  assert.equal(recorded[1]!.d.key, "pr900:r2:c2");
+});
+
+test("intake_feedback act: a NEW comment after a non-revise answer is a new batch — Jev is asked again", async () => {
+  const fake = FakeJevClient.choosing("approve", 0.99);
+  const { intakeJev, recorded } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev });
+  feedbackIssue(h);
+  await runFeedback(h);
+  h.codeHost.prComments.set(900, [prComment("c1", "Why did you pick sqlite here?"), prComment("c2", "LGTM")]);
+  h.provider.entries.get("70")!.state = "feedback";
+  await runFeedback(h);
+  assert.equal(fake.calls.length, 2);
+  assert.deepEqual(recorded.map((r) => r.d.key), ["pr900:r1:c1", "pr900:r1:c2"]);
+  assert.deepEqual(h.chainRuns, []);
+  assert.equal(h.provider.entries.get("70")!.marker?.intake_feedback?.key, "pr900:r1:c2");
+});
+
+test("intake_feedback act: an answer outside the closed set (\"merge\") is invalid_choice and revises", async () => {
+  for (const bogus of ["merge", "done"]) {
+    const { intakeJev, recorded } = fakeIntake(ON_ACT, FakeJevClient.choosing(bogus, 0.99));
+    const h = harness({ intakeJev });
+    feedbackIssue(h);
+    await runFeedback(h);
+    assert.deepEqual(h.chainRuns, ["issue-70"], bogus);
+    assert.equal(recorded[0]!.d.reason, "invalid_choice", bogus);
+    assert.equal(recorded[0]!.d.choice, "revise", bogus);
+    assert.equal(recorded[0]!.d.jev_choice, null, bogus);
+  }
+});
+
+test("intake_feedback: what Jev reads is capped — the last 20 comments, each body at 2000 chars", async () => {
+  const fake = FakeJevClient.choosing("revise", 0.95);
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev });
+  feedbackIssue(h);
+  h.codeHost.prComments.set(
+    900,
+    Array.from({ length: 25 }, (_, i) => prComment(`c${i}`, i === 24 ? "x".repeat(5_000) : `comment ${i}`)),
+  );
+  await runFeedback(h);
+  const state = fake.calls[0]!.state as { comments: Array<{ body: string }> };
+  assert.equal(state.comments.length, 20);
+  assert.equal(state.comments[0]!.body, "comment 5", "the OLDEST are dropped");
+  assert.equal(state.comments.at(-1)!.body.length, 2_000);
 });
 
 test("intake_feedback act: revise runs the revision exactly as today", async () => {
@@ -413,10 +506,11 @@ test("intake_feedback: only comments since the watermark reach Jev, and the key 
 
 // ── intake_readiness ────────────────────────────────────────────────────────
 
-test("intake_readiness act: needs_human -> blocked with a needs-info comment + marker, never claimed, no chain, no budget spent", async () => {
+test("intake_readiness act: needs_human -> blocked with a needs-info comment + marker, never claimed, no chain", async () => {
   const fake = FakeJevClient.choosing("needs_human", 0.95);
   const { intakeJev, recorded } = fakeIntake(ON_ACT, fake);
-  const h = harness({ intakeJev, concurrency: 1 });
+  const notified: string[] = [];
+  const h = harness({ intakeJev, concurrency: 2, notify: (e) => void notified.push(`${e.kind}:${e.title}`) });
   h.provider.add("80", "ready");
   h.provider.add("81", "ready");
   await runReady(h);
@@ -426,8 +520,9 @@ test("intake_readiness act: needs_human -> blocked with a needs-info comment + m
     assert.match(entry.comments.at(-1)!.body, /needs more information from a human/);
     assert.equal(entry.marker?.intake?.routed, "needs_human");
   }
-  assert.deepEqual(h.provider.claimCalls, [], "routed before the tracker-side claim — and concurrency 1 didn't stop the second route");
+  assert.deepEqual(h.provider.claimCalls, [], "routed before the tracker-side claim");
   assert.deepEqual(h.chainRuns, []);
+  assert.deepEqual(notified, ["issue_blocked:issue 80 needs info", "issue_blocked:issue 81 needs info"]);
   assert.deepEqual(recorded.map((r) => [r.adwId, r.d.kind, r.d.choice]), [
     ["issue-80", "intake_readiness", "needs_human"],
     ["issue-81", "intake_readiness", "needs_human"],
@@ -516,7 +611,112 @@ test("intake_readiness fallbacks: timeout and low confidence build; kind off ski
   assert.equal(h.provider.markerReads, 1);
 });
 
-test("intake_readiness: a tracker error while routing skips the issue this tick (still ready), never claims it", async () => {
+test("intake_readiness: a routed-away issue spends no concurrency budget — a buildable one behind it is still claimed", async () => {
+  const fake = new FakeJevClient((req) => {
+    const id = (req.state as { id: string }).id;
+    return { model: req.model, answers: { q0: { type: "choice", choice: id === "90" ? "needs_human" : "build", confidence: 0.95 } } };
+  });
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev, concurrency: 2 });
+  for (const id of ["90", "91", "92"]) h.provider.add(id, "ready");
+  await runReady(h);
+  assert.equal(h.provider.entries.get("90")!.state, "blocked");
+  assert.deepEqual(h.provider.claimCalls, ["91", "92"], "both builds fit in a budget of 2 — the routing took none of it");
+  assert.deepEqual(h.chainRuns.sort(), ["issue-91", "issue-92"]);
+});
+
+test("intake_readiness: routings away are capped at `concurrency` per tick; the rest stay ready for the next tick", async () => {
+  const fake = FakeJevClient.choosing("needs_human", 0.95);
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev, concurrency: 1 });
+  for (const id of ["92", "93", "94"]) h.provider.add(id, "ready");
+  await runReady(h);
+  assert.equal(fake.calls.length, 1, "one Jev call this tick, not three");
+  assert.deepEqual(["92", "93", "94"].map((id) => h.provider.entries.get(id)!.state), ["blocked", "ready", "ready"]);
+  assert.ok(h.logs.some((l) => l.includes("the per-tick cap")), h.logs.join("\n"));
+  await runReady(h);
+  assert.equal(fake.calls.length, 2);
+  assert.deepEqual(["92", "93", "94"].map((id) => h.provider.entries.get(id)!.state), ["blocked", "blocked", "ready"]);
+});
+
+test("intake_readiness act: an answer outside the closed set (\"done\") is invalid_choice and builds", async () => {
+  for (const bogus of ["done", "merge"]) {
+    const { intakeJev, recorded } = fakeIntake(ON_ACT, FakeJevClient.choosing(bogus, 0.99));
+    const h = harness({ intakeJev });
+    h.provider.add("95", "ready");
+    await runReady(h);
+    assert.deepEqual(h.chainRuns, ["issue-95"], bogus);
+    assert.equal(recorded[0]!.d.reason, "invalid_choice", bogus);
+    assert.equal(recorded[0]!.d.choice, "build", bogus);
+  }
+});
+
+test("intake_readiness: the issue body Jev reads is capped at 8000 chars", async () => {
+  const fake = FakeJevClient.choosing("build", 0.95);
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev });
+  h.provider.add("96", "ready", null, "y".repeat(20_000));
+  await runReady(h);
+  const state = fake.calls[0]!.state as { id: string; body: string };
+  assert.equal(state.id, "96");
+  assert.equal(state.body.length, 8_000);
+});
+
+test("intake_readiness shadow: a disagreement is visible in the daemon's own log line, not only in the trace", async () => {
+  const { intakeJev } = fakeIntake(ON_SHADOW, FakeJevClient.choosing("needs_human", 0.99));
+  const h = harness({ intakeJev });
+  h.provider.add("97", "ready");
+  await runReady(h);
+  assert.ok(
+    h.logs.includes("watch: 97: readiness intake — jev intake_readiness shadow: build (fallback: shadow, jev said needs_human @ 0.99)"),
+    h.logs.join("\n"),
+  );
+});
+
+test("intake_readiness: a readMarker error skips the issue this tick with no Jev call (still ready), never claims it", async () => {
+  const fake = FakeJevClient.choosing("needs_human", 0.95);
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const h = harness({ intakeJev });
+  h.provider.add("98", "ready");
+  h.provider.readMarker = async () => {
+    throw new Error("tracker read failed");
+  };
+  await runReady(h);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(h.provider.entries.get("98")!.state, "ready");
+  assert.deepEqual(h.provider.claimCalls, []);
+  assert.ok(h.logs.some((l) => l.includes("readiness intake error: tracker read failed")));
+});
+
+test("intake_readiness: a transition error after the decision leaves the issue ready, unmarked and un-notified — the next tick routes it again", async () => {
+  const fake = FakeJevClient.choosing("needs_human", 0.95);
+  const { intakeJev } = fakeIntake(ON_ACT, fake);
+  const notified: string[] = [];
+  const h = harness({ intakeJev, notify: (e) => void notified.push(e.kind) });
+  h.provider.add("99", "ready");
+  const realTransition = h.provider.transition.bind(h.provider);
+  h.provider.transition = async () => {
+    throw new Error("tracker down");
+  };
+  await runReady(h);
+  const entry = h.provider.entries.get("99")!;
+  assert.equal(entry.state, "ready");
+  assert.equal(entry.marker, null, "no marker for a routing that never happened");
+  assert.deepEqual(notified, [], "the channel was not told 'needs info'");
+  assert.deepEqual(h.provider.claimCalls, []);
+  assert.deepEqual(h.chainRuns, [], "never silently built");
+
+  h.provider.transition = realTransition;
+  await runReady(h);
+  assert.equal(fake.calls.length, 2, "routed afresh");
+  const after = h.provider.entries.get("99")!;
+  assert.equal(after.state, "blocked");
+  assert.equal(after.marker?.intake?.routed, "needs_human");
+  assert.deepEqual(notified, ["issue_blocked"]);
+  assert.deepEqual(h.chainRuns, []);
+});
+
+test("intake_readiness: a marker-write error after the transition leaves the issue routed (blocked, commented) — never built", async () => {
   const { intakeJev } = fakeIntake(ON_ACT, FakeJevClient.choosing("needs_human", 0.95));
   const h = harness({ intakeJev });
   h.provider.add("89", "ready");
@@ -524,7 +724,9 @@ test("intake_readiness: a tracker error while routing skips the issue this tick 
     throw new Error("tracker down");
   };
   await runReady(h);
-  assert.equal(h.provider.entries.get("89")!.state, "ready");
+  assert.equal(h.provider.entries.get("89")!.state, "blocked");
+  assert.match(h.provider.entries.get("89")!.comments.at(-1)!.body, /needs more information from a human/);
   assert.deepEqual(h.provider.claimCalls, []);
+  assert.deepEqual(h.chainRuns, []);
   assert.ok(h.logs.some((l) => l.includes("readiness intake error: tracker down")));
 });

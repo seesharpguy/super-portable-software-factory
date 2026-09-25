@@ -206,9 +206,9 @@ export const RISK_TIER_KIND = defineJevKind({
 });
 
 /**
- * EMPTY in the core commit on purpose. Each feature PR inserts exactly ONE
- * line — its spec constant plus a trailing comma — keeping the list
- * alphabetical by kind.
+ * EMPTY in the core commit on purpose. Each feature PR inserts ONE line per
+ * kind it adds — its spec constant plus a trailing comma — keeping the list
+ * alphabetical by kind (#108 registers two kinds, so two lines).
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
