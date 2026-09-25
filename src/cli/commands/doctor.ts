@@ -16,6 +16,7 @@ import * as permissions from "../../core/permissions.ts";
 import * as agentCc from "../../core/agent_cc.ts";
 import * as agentOpencode from "../../core/agent_opencode.ts";
 import { DEFAULT_NOTIFY_ENV_KEY } from "../../core/notify/notifier.ts";
+import { herdrEnvFrom } from "../../core/notify/herdr_channel.ts";
 import { endpointLabel, redact, resolveTracesUrl } from "../../core/otel.ts";
 import { isKnownToolName as isKnownFlueToolName, resolveModel } from "../../core/agent_flue.ts";
 import { ollamaApiKey, ollamaBaseUrl } from "../../core/ollama_provider.ts";
@@ -1556,14 +1557,32 @@ export async function doctorCommand(argv: string[]): Promise<number> {
       check(report, "notifications.channels", false, `notifications.events is ${JSON.stringify(cfg.notifications.events)} but no channels are configured`);
     }
     for (const ch of cfg.notifications.channels) {
-      const envKey = ch.webhook_url_env || DEFAULT_NOTIFY_ENV_KEY[ch.kind];
       const label = ch.name ? `${ch.kind} (${ch.name})` : ch.kind;
+      if (ch.kind === "herdr") {
+        // Warn, never fail: doctor is often run from a plain terminal, and the
+        // channel only needs herdr at `spf watch` / run time.
+        const herdr = herdrEnvFrom();
+        check(
+          report,
+          `notifications: ${label}`,
+          true,
+          herdr
+            ? existsSync(herdr.socketPath)
+              ? `inside herdr pane ${herdr.paneId} (socket ${herdr.socketPath})`
+              : `inside herdr pane ${herdr.paneId}, but its socket ${herdr.socketPath} doesn't exist — is the herdr server running?`
+            : "not running inside a herdr pane — this channel is skipped unless spf runs inside herdr",
+          herdr && existsSync(herdr.socketPath) ? "info" : "warn",
+        );
+        continue;
+      }
+      const envKey = ch.webhook_url_env || DEFAULT_NOTIFY_ENV_KEY[ch.kind];
       check(report, `notifications: ${label}`, Boolean(process.env[envKey]), process.env[envKey] ? `${envKey} set` : `${envKey} is not set`);
     }
     // See `NotificationsConfigSchema.project`'s doc comment / `resolveNotifier`'s
     // same fallback — informational only (never fails doctor), since an
     // unset project tag is harmless unless this webhook ends up shared.
-    if (cfg.notifications.channels.length > 0) {
+    // A herdr channel is local to this process — nothing it sends is shared.
+    if (cfg.notifications.channels.some((ch) => ch.kind !== "herdr")) {
       const project = cfg.notifications.project.trim() || cfg.watch.repo.trim();
       check(
         report,
