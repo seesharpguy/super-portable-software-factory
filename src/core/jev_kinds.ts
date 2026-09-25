@@ -82,6 +82,31 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 // ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
 
 /**
+ * `loop_control` (ticket #105): after a FAILED round of `fixLoop`/
+ * `reviseLoop` (`chains/steps.ts`), and only when another repair round would
+ * otherwise run, what should the loop do next? The fallback is `continue`
+ * — exactly today's behavior. The configured `max` stays a HARD ceiling:
+ * no option adds a round. `escalate_tier` moves the repairing role up at
+ * most ONE rung of `tiering.tiers` per loop and never above `max_tier`
+ * (unset => escalation is never permitted, so it degrades to `continue`).
+ * Call site and the escalation rules: `chains/loop_control.ts`.
+ *
+ * `LOOP_CONTROL_CHOICES` is the ONE constant both this spec's (display-only)
+ * `options` and the call site's option list are built from.
+ */
+export const LOOP_CONTROL_CHOICES = ["continue", "escalate_tier", "stop_blocked"] as const;
+export const LOOP_CONTROL_KIND = defineJevKind({
+  kind: "loop_control",
+  summary: "after a failed fix/revise round: continue, escalate the repairing role one tier (<= max_tier), or stop blocked",
+  question: "choice",
+  options: LOOP_CONTROL_CHOICES,
+  extras: v.object({
+    /** The highest `tiering.tiers` rung `escalate_tier` may reach. Unset (the default) disables escalation. */
+    max_tier: v.optional(v.pipe(v.string(), v.minLength(1))),
+  }),
+});
+
+/**
  * `risk_tier` (#104) — the run's tiering risk (`core/tiering.ts`'s `Risk`),
  * decided once in `startRun` (`core/risk_tier.ts`) over this closed set, in
  * `tiering.ts`'s own ladder order (weakest first). Fallback: the
@@ -119,6 +144,7 @@ export const RISK_TIER_KIND = defineJevKind({
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  LOOP_CONTROL_KIND,
   RISK_TIER_KIND,
 ];
 

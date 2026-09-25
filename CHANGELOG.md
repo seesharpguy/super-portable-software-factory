@@ -41,6 +41,16 @@ record independent of the commit log.
 
 <!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
+- **`loop_control`** (#105): after each failed, non-final round of
+  `fixLoop`/`reviseLoop`, Jev chooses `continue | escalate_tier |
+  stop_blocked` (fallback `continue`, today's loop). The configured `max`
+  stays a hard ceiling. `stop_blocked` ends the loop not accepted.
+  `escalate_tier` moves only the repairing role up one `tiering.tiers` rung,
+  once per loop, never above `jev.decisions.loop_control.max_tier` (unset
+  disables escalation), and is undone when the loop exits. New
+  `src/chains/loop_control.ts`; `tiering.usable` is now exported so the
+  escalation check applies the same rung rule.
+
 - **`risk_tier`** (#104): Jev can classify a run's tiering risk
   (`low | standard | high`) once in `startRun`. The fallback is the existing
   chain-weight + prompt-length heuristic. It is only asked when tiering is

@@ -78,6 +78,9 @@ import type { ChangeSet } from "../core/data_types.ts";
 import { Run, type PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
+import { parseDecisionExtras } from "../core/jev.ts";
+import { LOOP_CONTROL_KIND } from "../core/jev_kinds.ts";
+import { clipTail, createLoopControl } from "./loop_control.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -233,6 +236,12 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
     const route = run.tiering.routing[agentName]!;
     await run.console.note(`[spf] tiering ${agentName} ${route.tier} (${route.configured} -> ${effective}) risk=${run.tiering.risk}`);
   }
+
+  // Jev loop control (#105): a malformed `jev.decisions.loop_control` is a
+  // config error, so surface it before any phase opens rather than at the
+  // first failed fix round. Only when the kind is live — `enabled: false`
+  // (the default) stays a total no-op, not even a parse.
+  if (run.jev.policy(LOOP_CONTROL_KIND.kind).mode !== "off") parseDecisionExtras(cfg.jev, LOOP_CONTROL_KIND);
 
   return run;
 }
@@ -668,50 +677,83 @@ export function fixLoop(
     const stepName = suiteName === "all" ? "verify" : suiteName;
     const what = suiteName === "all" ? "verification" : suiteName === "test" ? "tests" : suiteName;
     let result: QualityResult | null = null;
-    for (let i = 1; i <= max; i++) {
-      result = await run.phase(
-        makePhaseParams({
-          name: `${stepName}_${i}`,
-          kind: "code",
-          owner: "quality",
-          description:
-            opts.description ??
-            (suiteName === "all"
-              ? "Lint, typecheck, and build before testing"
-              : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
-        }),
-        async (ph) => {
-          const r = await quality.runSuite(run, suiteName);
-          await quality.record(ph, r);
-          return r;
-        },
-      );
+    // Jev loop control (#105) — `null` unless the `loop_control` kind is
+    // live, in which case the loop below is exactly the one it always was.
+    // It can only end the loop early or escalate the fixer one rung; `max`
+    // stays the hard ceiling (see ./loop_control.ts).
+    const control = createLoopControl(run, { loop: "fix", role: owner, subject: suiteName, max });
+    let stoppedAfter = 0;
+    try {
+      for (let i = 1; i <= max; i++) {
+        result = await run.phase(
+          makePhaseParams({
+            name: `${stepName}_${i}`,
+            kind: "code",
+            owner: "quality",
+            description:
+              opts.description ??
+              (suiteName === "all"
+                ? "Lint, typecheck, and build before testing"
+                : "Run the suite — a known command, so code runs it and no agent has to rediscover it"),
+          }),
+          async (ph) => {
+            const r = await quality.runSuite(run, suiteName);
+            await quality.record(ph, r);
+            return r;
+          },
+        );
 
-      if (result.passed) break;
-      if (i === max) break; // never leave an unverified fix on the table
+        if (result.passed) break;
+        if (i === max) break; // never leave an unverified fix on the table
 
-      state.previous = await run.phase(
-        makePhaseParams({
-          name: `fix_${i}`,
-          kind: "agent",
-          owner,
-          retries: opts.fixRetries ?? 1,
-          description: opts.fixDescription ?? "Repair what the suite reported, from its verbatim output",
-        }),
-        (ph) =>
-          ph.call(
-            makeAgentCall({
-              output_type: BuildOutput,
-              prompt: state.prompt,
-              previous: quality.asEnvelope(result!, what),
-              gates: fixGates,
-            }),
-          ),
-      );
+        if (control) {
+          const failed = result;
+          const choice = await control.afterFailedRound({
+            round: i,
+            phase: `${stepName}_${i}`,
+            brief: failed.failures.map((f) => clipTail(f, 300)),
+            detail: {
+              failures: failed.failures,
+              failed_checks: failed.checks
+                .filter((c) => !c.passed)
+                .map((c) => ({ name: c.name, command: c.command, returncode: c.returncode, output_tail: clipTail(c.output_tail) })),
+            },
+          });
+          if (choice === "stop_blocked") {
+            stoppedAfter = i;
+            break;
+          }
+        }
+
+        state.previous = await run.phase(
+          makePhaseParams({
+            name: `fix_${i}`,
+            kind: "agent",
+            owner,
+            retries: opts.fixRetries ?? 1,
+            description: opts.fixDescription ?? "Repair what the suite reported, from its verbatim output",
+          }),
+          (ph) =>
+            ph.call(
+              makeAgentCall({
+                output_type: BuildOutput,
+                prompt: state.prompt,
+                previous: quality.asEnvelope(result!, what),
+                gates: fixGates,
+              }),
+            ),
+        );
+      }
+    } finally {
+      control?.restore();
     }
     state.quality = result;
     state.accepted = result !== null && result.passed;
-    state.reason = state.accepted ? "" : `the suite still failed after ${max} fix attempt(s)`;
+    state.reason = state.accepted
+      ? ""
+      : stoppedAfter > 0
+        ? `stopped after round ${stoppedAfter} of ${max}: Jev judged the ${what} blocked (loop_control)`
+        : `the suite still failed after ${max} fix attempt(s)`;
   };
   return makeStep(fn, {
     requiredAgents: [owner],
@@ -759,34 +801,66 @@ export function reviseLoop(
   preflightDescription("revise", opts.reviseDescription);
   const fn = async (run: Run, state: ChainState) => {
     let review: ReviewOutputT | null = null;
-    for (let i = 1; i <= max; i++) {
-      review = await run.phase(
-        makePhaseParams({
-          name: `review_${i}`,
-          kind: "agent",
-          owner: reviewer,
-          retries: opts.retries ?? 0,
-          description: opts.description ?? "Rule on every requirement in the spec, against the code on disk",
-        }),
-        (ph) => ph.call(makeAgentCall({ output_type: ReviewOutput, prompt: state.prompt, previous: state.previous, gates: reviewGates })),
-      );
+    // Jev loop control (#105) — same contract as in fixLoop above: `null`
+    // unless the kind is live; may stop early or escalate the reviser one
+    // rung, never approve and never add a round. The REVIEWER is never
+    // retiered — only the role doing the repair.
+    const control = createLoopControl(run, { loop: "revise", role: builder, subject: reviewer, max });
+    let stoppedAfter = 0;
+    try {
+      for (let i = 1; i <= max; i++) {
+        review = await run.phase(
+          makePhaseParams({
+            name: `review_${i}`,
+            kind: "agent",
+            owner: reviewer,
+            retries: opts.retries ?? 0,
+            description: opts.description ?? "Rule on every requirement in the spec, against the code on disk",
+          }),
+          (ph) => ph.call(makeAgentCall({ output_type: ReviewOutput, prompt: state.prompt, previous: state.previous, gates: reviewGates })),
+        );
 
-      if (review.approved || i === max) break;
+        if (review.approved || i === max) break;
 
-      state.previous = await run.phase(
-        makePhaseParams({
-          name: `revise_${i}`,
-          kind: "agent",
-          owner: builder,
-          retries: opts.reviseRetries ?? 1,
-          description: opts.reviseDescription ?? "Close every blocking finding the reviewer named",
-        }),
-        (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: reviseGates })),
-      );
+        if (control) {
+          const rejected = review;
+          const choice = await control.afterFailedRound({
+            round: i,
+            phase: `review_${i}`,
+            brief: rejected.blocking.map((b) => clipTail(b, 300)),
+            detail: {
+              summary: rejected.summary,
+              blocking: rejected.blocking,
+              unmet: rejected.findings.filter((f) => !f.met).map((f) => ({ requirement: f.requirement, evidence: clipTail(f.evidence, 1_000) })),
+            },
+          });
+          if (choice === "stop_blocked") {
+            stoppedAfter = i;
+            break;
+          }
+        }
+
+        state.previous = await run.phase(
+          makePhaseParams({
+            name: `revise_${i}`,
+            kind: "agent",
+            owner: builder,
+            retries: opts.reviseRetries ?? 1,
+            description: opts.reviseDescription ?? "Close every blocking finding the reviewer named",
+          }),
+          (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: reviseGates })),
+        );
+      }
+    } finally {
+      control?.restore();
     }
     state.review = review;
     state.accepted = review !== null && review.approved;
-    state.reason = state.accepted ? "" : `the reviewer never approved after ${max} revision(s)`;
+    state.reason = state.accepted
+      ? ""
+      : stoppedAfter > 0
+        ? `stopped after review ${stoppedAfter} of ${max}: Jev judged the revision loop blocked (loop_control)`
+        : `the reviewer never approved after ${max} revision(s)`;
   };
   // requiredAgents deduplicates via deriveRequiredAgents' Set, so pointing
   // both roles at one agent yields a one-name list, not a duplicate.
