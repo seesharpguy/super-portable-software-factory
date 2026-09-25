@@ -291,6 +291,13 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     // still merge key-by-key around them. Pinned by a merge-survival test
     // in src/test/data_types.test.ts.
     sandbox: { ...(base.sandbox || {}), ...(override.sandbox || {}) },
+    // jev.enabled / .mode / .threshold / ... — key-by-key at this level, so
+    // a repo that only flips `enabled` (or `mode: act`) keeps the base's
+    // model/threshold/timeout. `decisions` is a whole-OBJECT replace, like
+    // `tiering.roles`: a repo declaring its own per-kind policy replaces the
+    // base's map wholesale rather than half-merging two operators' intent.
+    // See data_types.ts's JevConfigSchema and core/jev.ts.
+    jev: { ...(base.jev || {}), ...(override.jev || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),
   };
 }

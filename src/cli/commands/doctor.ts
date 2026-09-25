@@ -24,6 +24,7 @@ import { cloudflareAiBaseUrl } from "../../core/cloudflare_provider.ts";
 import { binaryOnPath, parseCli } from "../../core/utils.ts";
 import { PROVIDER_ENV_KEYS } from "../../core/providers.ts";
 import { probeServedOllamaTags, resolveTiering } from "../../core/tiering.ts";
+import { jevDoctorChecks } from "../../core/jev.ts";
 import { isRepoAt } from "../../core/git_helper.ts";
 import { allChains, findChain, hasCommitStep, repoChainProblems, resolveRequiredAgents, resolveRequiredSuites, type ChainDefinition } from "../../chains/index.ts";
 import { refineBudget } from "../../core/gates.ts";
@@ -848,6 +849,18 @@ export async function doctorCommand(argv: string[]): Promise<number> {
         }
       }
     }
+  }
+
+  // Jev (#103) — gated on jev.enabled inside jevDoctorChecks itself (an
+  // unused block is invisible, same rule as tiering above). Never probes
+  // the network: a live call would spend the operator's tokens on every
+  // `spf doctor`, and every Jev failure already degrades to the
+  // deterministic fallback at run time — the key being SET is what doctor
+  // can usefully say. A missing key is a warn, not a failure, for the same
+  // reason; only a malformed base_url or a known decision kind's invalid
+  // feature settings fail. See core/jev.ts's jevDoctorChecks.
+  for (const jevCheck of jevDoctorChecks(cfg.jev)) {
+    check(report, jevCheck.name, jevCheck.ok, jevCheck.detail, jevCheck.severity);
   }
 
   for (const spec of cfg.quality.checks) {

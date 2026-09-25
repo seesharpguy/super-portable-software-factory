@@ -17,6 +17,7 @@ import { Console, type RunObserver } from "./console.ts";
 import { Tracer } from "./tracer.ts";
 import { makeEventRecord, resolveObservabilityDb, type AgentCall, type AgentConfig, type EnvelopeBase, type Phase, type PhaseParams, type SFConfig } from "./data_types.ts";
 import type { TierResolution } from "./tiering.ts";
+import { createJev, traceDecisionRecorder, type Jev } from "./jev.ts";
 import { ensureDir, nowIso } from "./utils.ts";
 import type { Notifier } from "./notify/notifier.ts";
 
@@ -150,6 +151,16 @@ export class Run {
    * finding), not passed into its construction. See `core/tiering.ts`.
    */
   tiering: TierResolution | null = null;
+  /**
+   * This run's Jev advisor (`core/jev.ts`), built from `cfg.jev` and wired to
+   * record every decision into THIS run's trace as a `jev_decision` log
+   * event. Always present, and a total no-op while `jev.enabled` is false
+   * (the default): `run.jev.decide(...)` then returns the caller's fallback
+   * without a client, a network call, or a trace write. Features call it
+   * from impure seams (`startRun`, a loop body, a watch hook) and pass the
+   * resulting `Decision` into pure code as data — never the reverse.
+   */
+  jev: Jev;
   private seq: number; // a joined run continues the sequence
   private agentMapPath: string;
 
@@ -160,6 +171,7 @@ export class Run {
     this.notify = init.notifier ?? null;
     this.console = new Console(init.tracer, init.adwId, this.notify, init.chainName || "adw", init.sink, init.observer);
     this.engineer = init.engineer;
+    this.jev = createJev({ config: init.cfg.jev, recorder: traceDecisionRecorder(init.tracer, init.adwId) });
     this.seq = init.startSeq;
     this.repo_root = init.repoRoot;
     this.spf_dir = init.sfDir;

@@ -1582,6 +1582,66 @@ export const TieringConfigSchema = v.object({
 });
 export type TieringConfig = v.InferOutput<typeof TieringConfigSchema>;
 
+/**
+ * Jev (TypeSafe's "System One" typed-decision model) — see `core/jev.ts`
+ * for the client and the `decide()` policy, and `docs/jev.md` for the
+ * operator-facing contract.
+ *
+ * OFF by default, and `enabled: false`/absent is a TOTAL no-op: no network
+ * call, no trace event, every decision is the deterministic fallback the
+ * calling code already computed — byte-identical to before this key
+ * existed, the same discipline `tiering` holds itself to above. Top-level
+ * for the same back-fill-trap reason `tiering` is (see its doc comment).
+ *
+ * `mode` is the global default for every decision kind:
+ *   - `shadow`: Jev is called and its answer RECORDED, but the
+ *     deterministic fallback ACTS — how the vendor's accuracy claims get
+ *     checked against spf's own traffic before anything depends on them.
+ *   - `act`: Jev's answer acts, but only when it is a member of the closed
+ *     option set code built AND its confidence clears `threshold`.
+ *
+ * `api_key_env` names the env var holding the key — never the key itself,
+ * matching every other secret in this file. Default `TYPESAFE_API_KEY`,
+ * which is what TypeSafe's own SDKs read. `base_url` empty = the official
+ * `https://api.typesafe.ai/v1`; override only for a proxy/gateway.
+ *
+ * `decisions` is the per-feature subsection, keyed by decision KIND (the
+ * `kind` a feature passes to `decide()`, e.g. `risk_tier`). Each entry may
+ * override `mode` (adding `off`, to silence one kind while others run),
+ * `threshold`, and `timeout_ms`; any OTHER key in an entry is that
+ * feature's own settings, preserved as-is here (a `looseObject`) and
+ * validated by the feature's own schema registered in `core/jev_kinds.ts`
+ * — so a new feature adds its knobs without editing this schema at all.
+ * Whole-object replace on config-file-layer merge, like `tiering.roles`.
+ */
+export const JevModeSchema = v.picklist(["shadow", "act"]);
+export type JevMode = v.InferOutput<typeof JevModeSchema>;
+
+export const JevDecisionModeSchema = v.picklist(["off", "shadow", "act"]);
+export type JevDecisionMode = v.InferOutput<typeof JevDecisionModeSchema>;
+
+const JevThresholdSchema = v.pipe(v.number(), v.minValue(0), v.maxValue(1));
+const JevTimeoutSchema = v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(60_000));
+
+export const JevDecisionOverrideSchema = v.looseObject({
+  mode: v.optional(JevDecisionModeSchema),
+  threshold: v.optional(JevThresholdSchema),
+  timeout_ms: v.optional(JevTimeoutSchema),
+});
+export type JevDecisionOverride = v.InferOutput<typeof JevDecisionOverrideSchema>;
+
+export const JevConfigSchema = v.object({
+  enabled: v.optional(v.boolean(), false),
+  mode: v.optional(JevModeSchema, "shadow"),
+  model: v.optional(v.pipe(v.string(), v.minLength(1)), "jev-latest"),
+  threshold: v.optional(JevThresholdSchema, 0.7),
+  timeout_ms: v.optional(JevTimeoutSchema, 2_000),
+  api_key_env: v.optional(v.pipe(v.string(), v.minLength(1)), "TYPESAFE_API_KEY"),
+  base_url: v.optional(v.string(), ""),
+  decisions: v.optional(v.record(v.string(), JevDecisionOverrideSchema), () => ({})),
+});
+export type JevConfig = v.InferOutput<typeof JevConfigSchema>;
+
 export const SFConfigSchema = v.object({
   // Declarative env vars, applied to process.env before anything else reads
   // it (see cli/index.ts's main()) — for non-secret settings that used to
@@ -1603,6 +1663,7 @@ export const SFConfigSchema = v.object({
   review: v.optional(ReviewConfigSchema, () => v.parse(ReviewConfigSchema, {})),
   tiering: v.optional(TieringConfigSchema, () => v.parse(TieringConfigSchema, {})),
   sandbox: v.optional(SandboxConfigSchema, () => v.parse(SandboxConfigSchema, {})),
+  jev: v.optional(JevConfigSchema, () => v.parse(JevConfigSchema, {})),
 });
 export type SFConfig = v.InferOutput<typeof SFConfigSchema>;
 
