@@ -8,6 +8,20 @@ record independent of the commit log.
 
 ## Unreleased
 
+### Added — Jev through Cloudflare Workers AI / AI Gateway
+
+- **`jev.provider: cloudflare`** routes Jev decisions through Workers AI
+  (`typesafe/jev`), or through an AI Gateway when `jev.cloudflare.gateway`
+  is set. By default it uses spf's existing `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID`. The request body and answers match TypeSafe's
+  API, so every decision kind works unchanged on either provider. The
+  default stays `provider: typesafe`.
+- `spf doctor` reports the provider and the resolved endpoint, and warns
+  about each missing credential env var by name.
+- The TypeSafe client's wire format is now checked against the live API
+  (model ids, 0-based score levels, a `noul` answer without confidence). See
+  `docs/jev.md`.
+
 ### Added — Jev rails (off by default) — #103
 
 - **`core/jev.ts`** (new): a typed client for TypeSafe's Jev

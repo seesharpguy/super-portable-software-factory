@@ -61,12 +61,18 @@ the following in one place, so individual features cannot weaken them:
 ```yaml
 jev:
   enabled: false            # default. false = total no-op
+  provider: typesafe        # typesafe | cloudflare (Workers AI / AI Gateway)
   mode: shadow              # shadow | act — the default for every kind
   model: jev-latest         # or a pinned version, e.g. jev-1.13
   threshold: 0.7            # min confidence for an answer to act (0–1)
   timeout_ms: 2000          # per call; a timeout falls back
   api_key_env: TYPESAFE_API_KEY   # names the env var; never the key itself
   base_url: ""              # "" = https://api.typesafe.ai/v1 (POST …/systemone)
+  cloudflare:               # used only with provider: cloudflare
+    account_id_env: CLOUDFLARE_ACCOUNT_ID
+    api_token_env: CLOUDFLARE_API_TOKEN   # needs the Workers AI > Read permission
+    gateway: ""             # AI Gateway id; "" = call Workers AI directly
+    model: typesafe/jev     # Cloudflare's catalog id (not jev-latest)
   decisions:                # per-kind overrides + feature settings
     risk_tier:              # (example — kinds are added by feature tickets)
       mode: act             # off | shadow | act
@@ -77,13 +83,14 @@ jev:
 
 - **Merge across config layers.** Top-level keys merge key by key, so an
   override that only sets `enabled: true` keeps the base's threshold and
-  model. `decisions` is replaced as a whole object, like `tiering.roles`.
+  model. `decisions` and `cloudflare` are each replaced as a whole object,
+  like `tiering.roles` and `sandbox.cloudflare`.
 - **`enabled: false` always wins.** It overrides every per-kind `mode`.
 - **`spf doctor`.** When Jev is disabled, doctor shows nothing about it.
   When it is enabled, doctor shows:
   - the resolved settings, as info;
-  - a **warning** if the API key env var is unset (every decision would fall
-    back with `no_api_key`), which does not fail doctor;
+  - a **warning** if the provider's credential env vars are unset (every
+    decision would fall back with `no_api_key`), which does not fail doctor;
   - a **failure** for a `base_url` that is not http(s);
   - a **warning** for a `decisions` key that is not a registered kind
     (usually a typo);
@@ -320,17 +327,41 @@ tiering:
   # tiers / roles as usual
 ```
 
+## Providers
+
+Both providers take the same question body and return the same answers, so
+nothing above the client can tell them apart. Only the credentials and URL
+differ.
+
+| | `provider: typesafe` (default) | `provider: cloudflare` |
+|---|---|---|
+| Endpoint | `POST {base_url}/systemone` | `POST https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/typesafe/jev`, or with `cloudflare.gateway` set, `POST https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/workers-ai/typesafe/jev` |
+| Auth | `Bearer $TYPESAFE_API_KEY` | `Bearer $CLOUDFLARE_API_TOKEN` (the same token spf's Cloudflare model provider and sandbox use) |
+| Body | `{model, state, questions}` | `{state, questions}` (the model is in the URL) |
+| Response | `{model, answers, usage}` | the same, wrapped in `{result, success, errors}`; spf unwraps it, and `success: false` is an `error` |
+
+Routing through AI Gateway gives you Cloudflare's caching, rate limiting and
+request logs in front of Jev. The Cloudflare pricing page lists Jev at
+$0.042 per 1M input tokens, $0 output, with zero data retention.
+
 ## Wire format and caveats
 
-- The endpoint is `POST {base_url}/systemone`, authenticated with
-  `Authorization: Bearer $TYPESAFE_API_KEY`. The request body is
-  `{model, state, questions}` and the response is `{model, answers, usage}`.
-  No SDK is used; the client is a small wrapper over `fetch`.
-- These shapes come from research done ten days after launch. Answers are
-  parsed defensively, so any answer spf does not recognize becomes
-  `invalid_response` and the fallback acts. **Verify against a live
-  response before moving any kind to `act`.** Treat score-level index base
-  (0 or 1) and confidence on `noul` answers as unverified.
+- The TypeSafe request body is `{model, state, questions}` and the response
+  is `{model, answers, usage}`. No SDK is used; each client is a small
+  wrapper over `fetch`.
+- **Checked against the live TypeSafe API on 2026-09-25.** `model` is
+  required. Valid ids are `jev-latest` and `jev-preview`
+  (`GET https://api.typesafe.ai/v1/models` lists them), and a response names
+  the concrete version it ran (e.g. `jev-1.13.0`). A `choice` answer carries
+  `choice`, `confidence` and `probabilities`. A `score` answer carries
+  `score` (continuous), `confidence`, a `legend` and `probabilities`, keyed
+  by **0-based** level index. A `noul` answer carries only `noul` (0–1) and
+  no confidence. Typical latency was 150–440 ms per call.
+- The Cloudflare path is built from Cloudflare's model page and covered by
+  tests with a fake `fetch`. It has not yet been checked against a live
+  Workers AI response.
+- Answers are still parsed defensively. Any answer spf does not recognize
+  becomes `invalid_response` and the fallback acts.
 - spf does not retry. Jev's value is fast answers, and every failure already
   has a correct answer (the fallback). A `429`/`529` is recorded as `error`
   with the status in `detail`.

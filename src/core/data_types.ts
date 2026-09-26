@@ -1630,8 +1630,32 @@ export const JevDecisionOverrideSchema = v.looseObject({
 });
 export type JevDecisionOverride = v.InferOutput<typeof JevDecisionOverrideSchema>;
 
+/**
+ * WHERE a Jev call goes. `typesafe` (default) is TypeSafe's own API,
+ * authenticated by `api_key_env`. `cloudflare` routes through Workers AI
+ * (`typesafe/jev` in Cloudflare's model catalog), optionally via an AI
+ * Gateway — same `{state, questions}` body and `{answers}` response, so the
+ * decision policy above it cannot tell the two apart. The `cloudflare`
+ * block's env-var names default to the ones spf's Cloudflare model provider
+ * and sandbox backend already read, so one token serves all three.
+ */
+export const JevProviderSchema = v.picklist(["typesafe", "cloudflare"]);
+export type JevProvider = v.InferOutput<typeof JevProviderSchema>;
+
+export const JevCloudflareSchema = v.object({
+  account_id_env: v.optional(v.pipe(v.string(), v.minLength(1)), "CLOUDFLARE_ACCOUNT_ID"),
+  api_token_env: v.optional(v.pipe(v.string(), v.minLength(1)), "CLOUDFLARE_API_TOKEN"),
+  /** AI Gateway id. Empty = call Workers AI directly (`/ai/run/<model>`); set = `gateway.ai.cloudflare.com/.../workers-ai/<model>`. */
+  gateway: v.optional(v.string(), ""),
+  /** Cloudflare's catalog id — NOT `jev.model` (TypeSafe's `jev-latest`/`jev-preview`), which Workers AI does not take. */
+  model: v.optional(v.pipe(v.string(), v.minLength(1)), "typesafe/jev"),
+});
+export type JevCloudflareConfig = v.InferOutput<typeof JevCloudflareSchema>;
+
 export const JevConfigSchema = v.object({
   enabled: v.optional(v.boolean(), false),
+  provider: v.optional(JevProviderSchema, "typesafe"),
+  cloudflare: v.optional(JevCloudflareSchema, () => v.parse(JevCloudflareSchema, {})),
   mode: v.optional(JevModeSchema, "shadow"),
   model: v.optional(v.pipe(v.string(), v.minLength(1)), "jev-latest"),
   threshold: v.optional(JevThresholdSchema, 0.7),
