@@ -185,8 +185,8 @@ function stripOllamaPrefix(model: string): string {
   return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
 }
 
-/** Usable == not dropped by the availability probe, AND backend-compatible (rule T). */
-function usable(tier: Tier, agent: AgentConfig, servedOllamaTags: Set<string> | null): boolean {
+/** Usable == not dropped by the availability probe, AND backend-compatible (rule T). Exported for `chains/loop_control.ts`'s one-rung escalation check, which must apply the SAME rule, never a copy of it. */
+export function usable(tier: Tier, agent: AgentConfig, servedOllamaTags: Set<string> | null): boolean {
   if (tier.coding_agent !== agent.coding_agent) return false; // rule T
   if (servedOllamaTags !== null && tier.model.startsWith("ollama/")) {
     // The comparison strips the "ollama/" prefix before lookup — getting

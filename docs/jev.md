@@ -230,6 +230,117 @@ settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
+### `loop_control`
+
+Ticket #105. After a failed round in `fixLoop` or `reviseLoop`
+(`src/chains/steps.ts`), spf asks Jev what the loop should do next.
+
+- **Kind:** `loop_control`, a `choice` question.
+- **Options:** `continue`, `escalate_tier`, `stop_blocked`. Both the
+  kind spec and the call site build these from the single constant
+  `LOOP_CONTROL_CHOICES`.
+- **Fallback:** `continue`. This is the existing behavior: spend the next
+  repair round on the same agent and the same model. Every fallback reason
+  (disabled, shadow, timeout, error, low confidence, a choice outside the
+  set or outside `permitted`) runs the loop you have today.
+- **When spf asks:** only after a round fails and another repair round would
+  otherwise run. It never asks after a passing round or on the final round,
+  because the loop ends there anyway. A loop with `max: 3` makes at most two
+  decisions.
+- **Where it is resolved:** `src/chains/loop_control.ts`
+  (`createLoopControl`), called from the loop body between the failed round
+  and the repair phase.
+  - The decision's `phase_id` is the failed round's phase (`test_2`,
+    `verify_1`, `review_1`, ...).
+  - Its `key` is `fix:<round phase>` or `revise:<round phase>`, for example
+    `fix:test_1` or `revise:review_2`. A chain that runs the same loop again
+    in one run (a repo chain listing `fixLoop` twice over one suite, or
+    `reviseLoop` twice) numbers the later loops: `fix#2:test_1`,
+    `revise#2:review_1`. Loops are counted in the order they start, so for a
+    fixed chain the key stays stable across runs and never collides within
+    one.
+  - Replay: a replay or estimate driver puts a run's loops in replay mode
+    with `setLoopControlReplay(run, resolver)`. The usual resolver is
+    `recordedDecisionReplay(db, sourceAdwId)`, which looks up the recorded
+    decision by that key. `decide()` re-judges the recorded answer under
+    today's policy and today's `permitted`, so a recorded `escalate_tier`
+    replays as `not_permitted` once `max_tier` is removed, and a loop with
+    nothing recorded falls back (`replay_missing`, `continue`). Nothing in
+    spf drives a replay yet; `spf estimate` does not run loops.
+  - The `state` Jev sees: the loop and round, `max_rounds` and the repair
+    rounds left, the repairing agent and its current tier, whether escalation
+    is available (and if not, why), the latest round's detail, and a short
+    history of earlier rounds with the action taken after each. For
+    `fixLoop`, the latest round's detail is the failures plus each failed
+    check's command, exit code, and clipped output tail. For `reviseLoop`, it
+    is the reviewer's summary, its `blocking` list, and its unmet findings.
+  - The state is bounded so it stays inside Jev's state budget: each list
+    keeps its first 20 entries plus a "… and N more" line (with the full
+    count alongside), every text field is clipped, the history keeps the
+    last 6 rounds, and a state still over about 48,000 characters is cut
+    down further (older history first, then the latest detail).
+- **What acting on it can do:**
+  - `stop_blocked` ends the loop immediately with no further repair round.
+    The run is **not accepted**, and its reason reads
+    `stopped after round N of M: ... (loop_control)`.
+  - `escalate_tier` moves the repairing role (the fix `owner`, or the
+    reviseLoop `builder`) up **one** rung of `tiering.tiers` for the rest of
+    **this** loop. It goes through the same `effectiveAgent()` dispatch seam
+    that tiering uses. Only the model changes. When the loop exits, the run's
+    original routing is restored, even if a phase throws.
+  - Escalating opens a fresh agent session for the repairing role. spf
+    rejoins a session only on the model it was opened with, so the escalated
+    rounds do not see the earlier rounds' conversation. They get the prompt
+    and the failing round's verbatim output, which is what every repair
+    round gets. When the loop exits, spf restores the role's
+    `agent_map.json` entry, so later phases on the original model rejoin
+    their original session.
+  - A `loop_control` log event and a console line record every
+    non-`continue` action. An escalation also records its `from_tier` and
+    `to_tier`.
+- **What acting on it cannot do:**
+  - add a round. The configured `max` is a hard ceiling;
+  - skip, weaken, or pass a gate. Every check and review phase runs as
+    before, and a stop never turns a failure into acceptance;
+  - retier the reviewer. When one agent is both the reviewer and the
+    builder of a `reviseLoop`, escalation is refused for that loop, because
+    tiering routes by agent name and moving the author would move the
+    critic too. Only `continue` and `stop_blocked` can act there;
+  - skip a rung;
+  - escalate more than once per loop;
+  - escalate above the operator's ceiling. `escalate_tier` is in
+    `permitted` only when every one of these holds:
+    - `max_tier` is set and names a declared rung;
+    - tiering is enabled and routed this role this run;
+    - the next rung up is at or below `max_tier`;
+    - that rung is usable under the same backend and served-tag rule as
+      `resolveTiering`;
+    - the reviewer and the builder are different agents (`reviseLoop` only);
+    - this loop has not already escalated.
+
+    In every other case, Jev's `escalate_tier` becomes `not_permitted`, and
+    the loop continues. The same holds on replay.
+- **Settings (`extras`):**
+
+  ```yaml
+  jev:
+    decisions:
+      loop_control:
+        mode: act           # common knobs as usual
+        max_tier: strong    # the highest tiering.tiers rung escalation may reach
+  ```
+
+  `max_tier` is the operator spend ceiling. Ticket #105 called it
+  `jev.loop.max_tier`, but it lives under the kind's own `jev.decisions`
+  entry, as the core contract requires for every feature setting. A
+  `jev.loop:` block is dropped when the config is parsed, so it would leave
+  escalation silently off; `spf doctor` warns (`jev.loop`) when any config
+  layer has one. When it is absent, which is the default,
+  escalation is disabled and only `continue` and `stop_blocked` can act. A
+  malformed value fails `spf doctor`. It also fails `startRun` whenever the
+  kind is live. A `max_tier` that names no declared rung disables
+  escalation, and the reason appears in the state Jev sees.
+
 ### `risk_tier`
 
 Classifies a run's risk for tiering (#104). Code: `src/core/risk_tier.ts`.
