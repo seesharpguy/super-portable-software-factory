@@ -77,9 +77,10 @@ import {
 import type { ChangeSet } from "../core/data_types.ts";
 import { Run, type PhaseHandle } from "../core/runner.ts";
 import type { ChainContext } from "./context.ts";
+import { resolveFindingTriage, triageReviewFindings } from "./finding_triage.ts";
+import { parseDecisionExtras, resolveDecisionPolicy } from "../core/jev.ts";
+import { JEV_DECISION_KINDS, RISK_TIER_KIND } from "../core/jev_kinds.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
-import { parseDecisionExtras } from "../core/jev.ts";
-import { LOOP_CONTROL_KIND } from "../core/jev_kinds.ts";
 import { capList, clipTail, createLoopControl } from "./loop_control.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
@@ -141,6 +142,23 @@ function makeStep(
 // ── layer 1: the shared prologue ────────────────────────────────────────
 
 /**
+ * Parse every registered Jev kind's feature settings (`jev.decisions.<kind>`
+ * extras, docs/jev.md) once, at `startRun`, before the run's first phase —
+ * so a bad value (e.g. `finding_triage: { drop: everything }`) fails the run
+ * with its config-shaped `jev.decisions.<kind>: ...` error before any agent
+ * is paid for, not at whichever later step first reads it (`build ->
+ * reviseLoop` would otherwise run the build first). A kind that is off —
+ * every kind while `jev.enabled: false`, the default — is not parsed at
+ * all, so Jev off stays a total no-op.
+ */
+export function validateJevDecisionExtras(config: Parameters<typeof resolveDecisionPolicy>[0], skip: readonly string[] = []): void {
+  for (const spec of Object.values(JEV_DECISION_KINDS)) {
+    if (skip.includes(spec.kind)) continue; // a kind with its own, narrower liveness rule validates itself (see startRun)
+    if (spec.extras && resolveDecisionPolicy(config, spec.kind).mode !== "off") parseDecisionExtras(config, spec);
+  }
+}
+
+/**
  * The identical loadConfig -> validate -> session.ensure prologue every
  * chain repeated. `async` since the tiering availability probe below is an
  * awaited `fetch` — firing it unawaited would let `agents.execute` read
@@ -150,7 +168,12 @@ function makeStep(
 export async function startRun(ctx: ChainContext, requiredAgents: string[], requiredSuites: string[]): Promise<Run> {
   const cfg = agentsCfg.loadConfig(ctx.config_paths);
   agentsCfg.validate(cfg, requiredAgents, requiredSuites, ctx.cwd);
-  checkRiskTierConfig(cfg); // invalid jev.decisions.risk_tier extras fail here, before any session row exists
+  // Invalid jev.decisions.<kind> extras fail here, before any session row
+  // exists. risk_tier is live only while tiering is on too, so it keeps its
+  // own check (an invalid `max_risk` with tiering off is a no-op, not an
+  // error — docs/jev.md); every other kind is validated generically.
+  checkRiskTierConfig(cfg);
+  validateJevDecisionExtras(cfg.jev, [RISK_TIER_KIND.kind]);
   const run = await session.ensure(cfg, ctx.adw_id, ctx.cwd, ctx.chain_name, ctx.render_hooks);
   // Provenance, once per run, before any phase opens: a repo-local chain
   // (.spf/chains/*.yaml) records the file it came from. `chain_name` alone
@@ -236,12 +259,6 @@ export async function startRun(ctx: ChainContext, requiredAgents: string[], requ
     const route = run.tiering.routing[agentName]!;
     await run.console.note(`[spf] tiering ${agentName} ${route.tier} (${route.configured} -> ${effective}) risk=${run.tiering.risk}`);
   }
-
-  // Jev loop control (#105): a malformed `jev.decisions.loop_control` is a
-  // config error, so surface it before any phase opens rather than at the
-  // first failed fix round. Only when the kind is live — `enabled: false`
-  // (the default) stays a total no-op, not even a parse.
-  if (run.jev.policy(LOOP_CONTROL_KIND.kind).mode !== "off") parseDecisionExtras(cfg.jev, LOOP_CONTROL_KIND);
 
   return run;
 }
@@ -805,6 +822,12 @@ export function reviseLoop(
   preflightDescription("review", opts.description);
   preflightDescription("revise", opts.reviseDescription);
   const fn = async (run: Run, state: ChainState) => {
+    // Jev finding triage (#106) — `null` (a total no-op) unless
+    // jev.decisions.finding_triage is on (its `drop` was already validated
+    // by startRun). It only reshapes the revise phase's `previous`; the
+    // verdict below always reads the ORIGINAL review, and the next review
+    // round is handed the builder's envelope, never the triaged one.
+    const triage = resolveFindingTriage(run);
     let review: ReviewOutputT | null = null;
     // Jev loop control (#105) — same contract as in fixLoop above: `null`
     // unless the kind is live; may stop early or escalate the reviser one
@@ -868,7 +891,12 @@ export function reviseLoop(
             retries: opts.reviseRetries ?? 1,
             description: opts.reviseDescription ?? "Close every blocking finding the reviewer named",
           }),
-          (ph) => ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous: review!, gates: reviseGates })),
+          async (ph) => {
+            const previous = triage
+              ? (await triageReviewFindings(run, review!, { settings: triage, round: i, prompt: state.prompt, phase_id: ph.phase_id })).handoff
+              : review!;
+            return ph.call(makeAgentCall({ output_type: BuildOutput, prompt: state.prompt, previous, gates: reviseGates }));
+          },
         );
       }
     } finally {

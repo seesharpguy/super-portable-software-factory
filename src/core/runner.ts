@@ -41,12 +41,22 @@ function describeObservabilityDb(db: SFConfig["observability"]["db"]): string {
 }
 
 export interface PhaseHandle {
+  /**
+   * The open phase's id — what a Jev decision made inside this phase passes
+   * as `phase_id` (docs/jev.md, "Where to decide"), so its `jev_decision`
+   * row lands on this phase in the trace.
+   */
+  readonly phase_id: string;
   log(payload: Record<string, unknown>): Promise<void>;
   call<T extends EnvelopeBase>(call: AgentCall<T>): Promise<T>;
 }
 
 class PhaseHandleImpl implements PhaseHandle {
   constructor(private run: Run, private phase: Phase) {}
+
+  get phase_id(): string {
+    return this.phase.phase_id;
+  }
 
   async log(payload: Record<string, unknown>): Promise<void> {
     await this.run.tracer.event(

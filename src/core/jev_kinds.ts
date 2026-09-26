@@ -82,6 +82,29 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 // ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
 
 /**
+ * `finding_triage` (#106): before an unmet `ReviewOutput` finding is handed
+ * to the fixing agent (`reviseLoop`'s review -> revise handoff), classify it
+ * as a genuine defect (`real`) or something the fixer should not spend its
+ * round on (`noise`, `style`). The classes are exported so the call site
+ * (`chains/finding_triage.ts`) builds its option set from this SAME tuple —
+ * the doctor-displayed `options` and the wire options cannot drift.
+ * Acting on it only reorders/filters what the fixer is ASKED to fix; it
+ * never touches the review's verdict (see docs/jev.md).
+ */
+export const FINDING_TRIAGE_CLASSES = ["real", "noise", "style"] as const;
+export const FINDING_TRIAGE_DROP = ["none", "noise", "noise_and_style"] as const;
+export const FINDING_TRIAGE_KIND = defineJevKind({
+  kind: "finding_triage",
+  summary: "classify each unmet review finding (real|noise|style) before the revise agent sees it",
+  question: "choice",
+  options: FINDING_TRIAGE_CLASSES,
+  extras: v.object({
+    /** Which demoted findings are withheld from the fixer entirely (still traced). `none` = every finding still reaches it. */
+    drop: v.optional(v.picklist(FINDING_TRIAGE_DROP), "none"),
+  }),
+});
+
+/**
  * `loop_control` (ticket #105): after a FAILED round of `fixLoop`/
  * `reviseLoop` (`chains/steps.ts`), and only when another repair round would
  * otherwise run, what should the loop do next? The fallback is `continue`
@@ -144,6 +167,7 @@ export const RISK_TIER_KIND = defineJevKind({
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  FINDING_TRIAGE_KIND,
   LOOP_CONTROL_KIND,
   RISK_TIER_KIND,
 ];

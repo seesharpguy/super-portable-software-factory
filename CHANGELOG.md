@@ -41,6 +41,22 @@ record independent of the commit log.
 
 <!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
+- **`finding_triage`** (#106): before a rejected review's unmet findings
+  reach the fixing agent (`reviseLoop` and `simple_sdlc`'s revise phase),
+  Jev classifies each one `real | noise | style` in one batched call. In
+  act mode, `noise`/`style` findings move out of the handoff's `findings`
+  (and out of `blocking` when the text matches exactly) into a
+  "Deprioritized by jev" section. With
+  `jev.decisions.finding_triage.drop: noise | noise_and_style` they are
+  withheld from the fixer instead, and still recorded in a `jev_triage`
+  trace event. The verdict is never touched, and a round is never left
+  with nothing to fix: when every unmet finding is demoted, `findings` and
+  `blocking` pass through unchanged and only the notes change. The
+  fallback is `real`, which is today's behavior. `fixLoop` suite output is
+  not triaged. The ticket's `jev.triage.drop` is spelled
+  `jev.decisions.finding_triage.drop`, like every kind's settings. Invalid
+  `jev.decisions.<kind>` settings now fail `startRun`, before any phase,
+  and `PhaseHandle` exposes `phase_id` for decisions made inside a phase.
 - **`loop_control`** (#105): after each failed, non-final round of
   `fixLoop`/`reviseLoop`, Jev chooses `continue | escalate_tier |
   stop_blocked` (fallback `continue`, today's loop). The configured `max`

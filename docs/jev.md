@@ -153,7 +153,7 @@ const decision = await run.jev.decide({
   state: issueBody,            // context; only its sha256 is recorded
   fallback: heuristicAnswer,   // what the code would have done anyway
   permitted: [...],            // optional run-time narrowing (monotone authority)
-  phase_id: ph.phase.phase_id, // optional
+  phase_id: ph.phase_id,       // optional; PhaseHandle exposes the open phase's id
 });
 act(decision.choice);          // ALWAYS act on .choice, never .jev_choice
 ```
@@ -206,7 +206,7 @@ act(decision.choice);          // ALWAYS act on .choice, never .jev_choice
 5. **`extras` and `parseDecisionExtras` are optional.** A kind with no
    feature settings omits `extras` and never calls `parseDecisionExtras`.
 6. **Where to decide.** Inside a phase, pass that phase's
-   `ph.phase.phase_id` as `phase_id`. For run-scoped decisions (such as
+   `ph.phase_id` as `phase_id`. For run-scoped decisions (such as
    `startRun`), leave it `""`. The watch lane has no `Run`: build a `Jev`
    with `createJev({ config: cfg.jev, recorder: traceDecisionRecorder(tracer, adwId) })`
    once the lane has a tracer and an `adwId`. Before then, use
@@ -229,6 +229,118 @@ what acting on it can and cannot do, and any `jev.decisions.<kind>`
 settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
+
+### `finding_triage`
+
+Ticket #106. Before a rejected review's findings reach the fixing agent,
+Jev classifies each **unmet** finding (`met: false` in the reviewer's
+`ReviewOutput`) so the fixer spends its round on what matters.
+
+- **Question:** `choice`, one per unmet finding, all asked in ONE
+  `decideBatch` call per round. The state is the request plus the review
+  (summary, up to 25 `blocking` entries, and the unmet findings, each with
+  an `id` = its fingerprint). Each question is a short pointer ("classify
+  the finding whose id is ...") and never restates the finding. The state
+  is clipped by progressively tighter limits until it fits a fixed
+  character budget, so the whole request stays inside Jev's ~32k-token
+  budget even at the cap (`TRIAGE_REQUEST_CHAR_BUDGET` in
+  `chains/finding_triage.ts`; a test pins the worst case). At most 50
+  distinct findings are asked about per round; any beyond that keep the
+  fallback.
+- **Options:** `real | noise | style` (`FINDING_TRIAGE_CLASSES` in
+  `core/jev_kinds.ts`; the call site builds its options from that tuple).
+  `real` = a genuine unmet requirement or defect; `noise` = a false
+  positive, already satisfied, out of scope, or unactionable; `style` = a
+  cosmetic preference that does not decide whether the request is met.
+- **Fallback:** `real` for every finding, which is today's behavior: the
+  fixer is asked to close all of them.
+- **Key:** `revise_<round>:<fingerprint>`, where the fingerprint is the
+  first 16 hex chars of sha256 of the finding's normalized requirement text
+  (case, whitespace, and evidence do not change it). Findings with the same
+  requirement share one question.
+- **Where:** inside the revise phase of `reviseLoop` (`chains/steps.ts`) and
+  of the built-in `simple_sdlc` chain's review loop, so each decision's
+  `phase_id` is that `revise_<round>` phase (`ph.phase_id`). The call site is live only; it
+  does not pass `replay` yet, but the keys are stable, so a replay caller
+  can look decisions up with `findRecordedDecision(db, adwId,
+  "finding_triage", key)`.
+- **What acting on it does (act mode, confident answer):** a `noise` or
+  `style` finding is removed from the handoff's `findings`. Any `blocking`
+  entry whose text is the same requirement (after case and whitespace
+  normalization) goes with it. A blocker worded differently stays, because
+  spf never guesses which free-text blocker a finding means. This only
+  happens while at least one unmet finding is still `real` (see "never
+  empties the ask" below). With the
+  default `drop: none`, each demoted finding is listed again under a
+  `## Deprioritized by jev` section appended to the envelope's
+  `notes_for_next_agent`, so the fixer still sees it, ranked after the real
+  work. When anything was demoted, one `log`/`jev_triage` event on the
+  revise phase records what was kept, deprioritized, and dropped.
+- **What it can never do:**
+  - It never changes `approved`. The loop's verdict, `state.review`, and
+    `state.accepted` all come from the reviewer's original envelope, and
+    the reviewer rules on every requirement again next round. Triage shapes
+    what the fixer is asked to fix. It cannot turn a rejection into an
+    approval.
+  - It never empties the ask. If every unmet finding comes back demoted,
+    the handoff's `findings` and `blocking` are passed through unchanged,
+    whatever `drop` says; the demotions only add the
+    `## Deprioritized by jev` note. The `jev_triage` event records
+    `all_demoted: true` (and `drop_suspended: true` when `drop` would have
+    withheld some). So a rejected review always reaches the fixer with a
+    non-empty structured to-do list, and every handoff still passes
+    `gates.verdictConsistent` just as the reviewer's own envelope did.
+  - The next review round is handed the builder's envelope, never the
+    triaged handoff.
+  - A failure writing the `jev_triage` event is warned about once on
+    stderr and never fails the revise phase, the same as `jev_decision`
+    rows.
+  - It never triages `met: true` findings or an approving review.
+- **Shadow mode:** Jev is called and every decision is recorded, but the
+  fallback (`real`) acts, so the fixer receives the reviewer's envelope
+  unchanged.
+- **Not triaged:** `fixLoop`'s suite output. A `QualityResult` holds one
+  verbatim output blob per check (whatever the linter or test runner
+  printed), not a list of findings, and splitting arbitrary tool output per
+  finding would mean parsing formats spf does not own. To get triage for an
+  external reviewer, have a reviewer agent consult it and use `reviseLoop`
+  (see `cookbooks/ocr_reviewer.md`).
+- **Extras** (`jev.decisions.finding_triage`):
+
+  ```yaml
+  jev:
+    enabled: true
+    decisions:
+      finding_triage:
+        mode: act
+        timeout_ms: 10000   # recommended: one call carries up to 50 questions
+        drop: none          # none | noise | noise_and_style
+  ```
+
+  The ticket's `jev.triage.drop` is spelled
+  `jev.decisions.finding_triage.drop` here, following the
+  `jev.decisions.<kind>` convention every kind uses. A top-level
+  `jev.triage:` key is not a setting: the config schema ignores unknown
+  `jev:` keys without a warning, so a setting placed there silently does
+  nothing.
+
+  **Timeout.** The global default `timeout_ms: 2000` is sized for one
+  question. A triage batch asks up to 50 in one call, so give this kind its
+  own `timeout_ms` (10000 is a reasonable start). A timeout is safe, since
+  every finding falls back to `real`, but it turns triage off for that
+  round.
+
+  `drop` picks which demoted findings are withheld from the fixer entirely
+  rather than deprioritized. `none` (default): every finding still reaches
+  the fixer. `noise`: `noise` findings are withheld and `style` findings are
+  deprioritized. `noise_and_style`: both are withheld. A withheld finding
+  is never silent: its `jev_decision` row and the `jev_triage` event both
+  record it. An invalid value fails the run in `startRun` with
+  `jev.decisions.finding_triage: ...`, before the first phase and so
+  before any agent spend (`startRun` parses the settings of every
+  registered kind that is not `off`; `risk_tier` keeps its own narrower
+  rule and is parsed only while tiering is on too). `spf doctor` reports
+  it too.
 
 ### `loop_control`
 

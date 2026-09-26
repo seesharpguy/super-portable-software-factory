@@ -263,6 +263,13 @@ export const EXAMPLE_REVIEW_FIX_CHAIN_YAML = `# .spf/chains/review-fix.yaml — 
 # so a failing review loop followed by a passing lint loop would be reported
 # as accepted, and both loops would name their repair phases fix_1, fix_2, ...
 #
+# Jev finding triage (jev.decisions.finding_triage, off by default) does NOT
+# apply here: fixLoop hands the suite's output to the fix agent verbatim.
+# Triage classifies structured review findings (real|noise|style) in
+# reviseLoop's review -> revise handoff, so to get it, have a reviewer agent
+# consult the tool and use reviseLoop instead (cookbooks/ocr_reviewer.md).
+# Triage only reshapes what the fixer is asked to fix, never the verdict.
+#
 # name: build-review-fix
 # describe: plan, build, then an ocr + lint gate with a bounded auto-fix loop
 # steps:
