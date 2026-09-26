@@ -8,6 +8,39 @@ record independent of the commit log.
 
 ## Unreleased
 
+### Added — Jev rails (off by default) — #103
+
+- **`core/jev.ts`** (new): a typed client for TypeSafe's Jev
+  ("System One") decision model built on global `fetch`, with no new
+  dependency. It also adds one `Jev.decide()`/`decideBatch()` policy shared
+  by every future decision kind. Jev only chooses from a closed option set
+  that code builds. Every decision has a deterministic fallback, which is
+  used when Jev is disabled, in shadow mode, or on a missing key, timeout,
+  error, invalid answer, or low confidence. `mode: shadow` (the default)
+  records Jev's answer while the fallback acts.
+- **`jev:` config block**: `enabled` (default `false`), `mode`, `model`,
+  `threshold`, `timeout_ms`, `api_key_env` (default `TYPESAFE_API_KEY`),
+  `base_url`, and per-kind `decisions.<kind>` overrides that can also carry
+  a feature's own settings. Kinds are registered in `core/jev_kinds.ts`.
+  `spf doctor` validates the block and warns when it is enabled without a
+  key.
+- **Trace**: each decision made while Jev is enabled is recorded as one
+  `log`/`jev_decision` event. `findRecordedDecision()` lets a replay or
+  estimate reuse it without calling Jev again. `run.jev` is wired to the
+  run's trace.
+- With no `jev:` block, runs behave exactly as before: no call and no trace
+  event. See `docs/jev.md`.
+- **Replay and edges**: a replayed decision reuses the recorded answer and
+  judges it again under today's policy and `permitted`, so a replay cannot
+  act on a choice the caller no longer permits. `enabled: false` or a kind
+  set to `off` wins over any replay. `isValidOptionSet()`/`optionSetProblem()`
+  let a feature check a run-time option set before calling `decide()`. An
+  empty `jev.decisions:` in YAML now means `{}`.
+
+### Added — Jev decision kinds
+
+<!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
+
 ### Changed — OpenTelemetry: real SDK encoder, process-scoped metrics, outbound propagation
 
 - **`core/otel.ts`**: the hand-rolled OTLP/HTTP-JSON span encoder is

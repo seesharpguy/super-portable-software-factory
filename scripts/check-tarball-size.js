@@ -72,12 +72,22 @@
  * code grew the tarball to 816.2kB packed / 2328.6kB unpacked, 207 files
  * (re-measured on #80 rebased onto #83's merge): ≤865 KB packed, ≤2.47 MB
  * unpacked — ~5% headroom, same rationale.
+ *
+ * Raised again for the Jev decision epic (#102): the rails in this change
+ * (#103: core/jev.ts, jev_kinds.ts, docs/jev.md + the brainstorm doc) take
+ * main's 891.1kB/2549.0kB to 918.8kB packed / 2636.9kB unpacked, and the
+ * stacked feature PRs on top of it (#104-#109: risk_tier, loop_control,
+ * finding_triage, chain_router, watch intake, chain_edge graphs) grow it to
+ * 991.5kB packed / 2859.6kB unpacked, 225 files, measured at the top of the
+ * stack. Budgeted once here for the whole stack, so each feature PR does
+ * not re-edit this line: ≤1040 KB packed, ≤3.0 MB unpacked — ~5% headroom
+ * over the stack top, same rationale as every prior raise.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
-const PACKED_BUDGET = 900_000;
-const UNPACKED_BUDGET = 2_600_000;
+const PACKED_BUDGET = 1_040_000;
+const UNPACKED_BUDGET = 3_000_000;
 
 const root = path.resolve(import.meta.dirname, "..");
 // --ignore-scripts: this check runs AFTER `npm run build` in CI, so the
