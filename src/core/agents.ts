@@ -296,6 +296,9 @@ function mergeRawConfig(base: Record<string, any>, override: Record<string, any>
     // model/threshold/timeout. `decisions` is a whole-OBJECT replace, like
     // `tiering.roles`: a repo declaring its own per-kind policy replaces the
     // base's map wholesale rather than half-merging two operators' intent.
+    // `cloudflare` is whole-object too, sandbox.cloudflare's rule: a
+    // half-merged account_id_env/api_token_env/gateway triple would bill one
+    // account through another's gateway.
     // See data_types.ts's JevConfigSchema and core/jev.ts.
     jev: { ...(base.jev || {}), ...(override.jev || {}) },
     agents: mergeAgentLists(base.agents || [], override.agents || []),

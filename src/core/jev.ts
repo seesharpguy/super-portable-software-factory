@@ -186,10 +186,77 @@ export class HttpJevClient implements JevClient {
     } catch {
       throw new Error(`jev: response is not JSON (${text.slice(0, 120)})`);
     }
-    if (!parsed || typeof parsed !== "object" || !("answers" in parsed) || typeof (parsed as { answers: unknown }).answers !== "object") {
-      throw new Error("jev: response has no `answers` object");
+    return requireAnswers(parsed);
+  }
+}
+
+function requireAnswers(parsed: unknown): SystemOneResponse {
+  if (!parsed || typeof parsed !== "object" || !("answers" in parsed) || !(parsed as { answers: unknown }).answers || typeof (parsed as { answers: unknown }).answers !== "object") {
+    throw new Error("jev: response has no `answers` object");
+  }
+  return parsed as SystemOneResponse;
+}
+
+/** Cloudflare's catalog id for Jev — what Workers AI takes in place of TypeSafe's `jev-latest`. */
+export const JEV_CLOUDFLARE_MODEL = "typesafe/jev";
+
+/**
+ * Workers AI's REST endpoint for a model, or the AI Gateway endpoint in
+ * front of it when `gateway` is set. Account id and gateway id are
+ * URL-encoded path segments; the model id's own `/` is kept (it IS a path).
+ */
+export function jevCloudflareEndpoint(accountId: string, gateway: string, model: string = JEV_CLOUDFLARE_MODEL): string {
+  const account = encodeURIComponent(accountId.trim());
+  const modelPath = model.trim().split("/").map(encodeURIComponent).join("/");
+  const gw = gateway.trim();
+  return gw
+    ? `https://gateway.ai.cloudflare.com/v1/${account}/${encodeURIComponent(gw)}/workers-ai/${modelPath}`
+    : `https://api.cloudflare.com/client/v4/accounts/${account}/ai/run/${modelPath}`;
+}
+
+/**
+ * Jev through Cloudflare Workers AI (optionally via AI Gateway). Same wire
+ * body as TypeSafe's API minus `model` (Workers AI takes the model in the
+ * URL and rejects unknown input keys), and the same `{model, answers,
+ * usage}` answer — but wrapped in Cloudflare's REST envelope
+ * `{result, success, errors, messages}`, which is unwrapped here so
+ * `decide()` never sees a difference. A 200 with `success: false` is an
+ * API error, not an empty answer. Like `HttpJevClient`, the token never
+ * appears in an error.
+ */
+export class CloudflareJevClient implements JevClient {
+  private readonly apiToken: string;
+  private readonly url: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: { apiToken: string; accountId: string; gateway?: string; model?: string; fetchImpl?: typeof fetch }) {
+    this.apiToken = options.apiToken;
+    this.url = jevCloudflareEndpoint(options.accountId, options.gateway ?? "", options.model);
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  async systemOne(request: SystemOneRequest, options: { signal: AbortSignal }): Promise<SystemOneResponse> {
+    const { model: _model, ...body } = request;
+    const response = await this.fetchImpl(this.url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.apiToken}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new JevApiError(response.status, text);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(`jev: response is not JSON (${text.slice(0, 120)})`);
     }
-    return parsed as SystemOneResponse;
+    if (parsed && typeof parsed === "object" && "success" in parsed) {
+      const envelope = parsed as { success: unknown; result?: unknown; errors?: unknown };
+      if (envelope.success !== true) throw new JevApiError(response.status, JSON.stringify(envelope.errors ?? []));
+      return requireAnswers(envelope.result);
+    }
+    return requireAnswers(parsed);
   }
 }
 
@@ -210,10 +277,40 @@ export function setJevClientFactory(factory: JevClientFactory | null): void {
   clientFactoryOverride = factory;
 }
 
-/** Explicit client > test override > `HttpJevClient` when the key env var is set > `null` (every decision then falls back with `no_api_key`). */
+/** The env var names a provider needs, in the order an operator would set them. */
+export function jevCredentialEnvs(config: JevConfig): string[] {
+  return config.provider === "cloudflare" ? [config.cloudflare.api_token_env, config.cloudflare.account_id_env] : [config.api_key_env];
+}
+
+/** Which of `jevCredentialEnvs` are unset/blank — empty means a real client can be built. */
+export function missingJevCredentials(config: JevConfig, env: NodeJS.ProcessEnv): string[] {
+  return jevCredentialEnvs(config).filter((name) => !env[name]?.trim());
+}
+
+function notSet(names: string[]): string {
+  return names.length > 1 ? `${names.join(", ")} are not set` : `${names[0] ?? "credentials"} is not set`;
+}
+
+/** The URL a real call would hit — for doctor and diagnostics only (the clients build their own). */
+export function jevResolvedEndpoint(config: JevConfig, env: NodeJS.ProcessEnv): string {
+  if (config.provider !== "cloudflare") return jevEndpoint(config.base_url);
+  const cf = config.cloudflare;
+  const accountId = env[cf.account_id_env]?.trim();
+  // An unset account renders as a readable `<ENV_NAME>` hole, not its URL-encoded `%3C...%3E`.
+  return accountId ? jevCloudflareEndpoint(accountId, cf.gateway, cf.model) : jevCloudflareEndpoint("ACCOUNT", cf.gateway, cf.model).replace("ACCOUNT", `<${cf.account_id_env}>`);
+}
+
+/** Explicit client > test override > the provider's real client when its credential env vars are set > `null` (every decision then falls back with `no_api_key`). */
 function resolveClient(config: JevConfig, env: NodeJS.ProcessEnv, explicit: JevClient | null | undefined): JevClient | null {
   if (explicit) return explicit;
   if (clientFactoryOverride) return clientFactoryOverride(config, env);
+  if (config.provider === "cloudflare") {
+    const cf = config.cloudflare;
+    const apiToken = env[cf.api_token_env]?.trim();
+    const accountId = env[cf.account_id_env]?.trim();
+    if (!apiToken || !accountId) return null;
+    return new CloudflareJevClient({ apiToken, accountId, gateway: cf.gateway, model: cf.model });
+  }
   const apiKey = env[config.api_key_env]?.trim();
   if (!apiKey) return null;
   return new HttpJevClient({ apiKey, baseUrl: config.base_url });
@@ -751,7 +848,7 @@ export class Jev {
       const client = this.client;
       if (!client) {
         for (const i of live) {
-          results[i] = withFallback(baseDecision(items[i]!, policies[i]!, digest(i)), "no_api_key", `${this.config.api_key_env} is not set`);
+          results[i] = withFallback(baseDecision(items[i]!, policies[i]!, digest(i)), "no_api_key", notSet(missingJevCredentials(this.config, this.env)));
         }
       } else {
         await this.callLive(client, state, items, live, policies, digest, results);
@@ -986,27 +1083,33 @@ export function jevDoctorChecks(
   const cfg = normalizeJevConfig(config);
   if (!cfg.enabled) return [];
   const checks: JevDoctorCheck[] = [];
-  const endpoint = jevEndpoint(cfg.base_url);
+  const endpoint = jevResolvedEndpoint(cfg, env);
+  const model = cfg.provider === "cloudflare" ? cfg.cloudflare.model : cfg.model;
   checks.push({
     name: "jev",
     ok: true,
-    detail: `mode=${cfg.mode} model=${cfg.model} threshold=${cfg.threshold} timeout=${cfg.timeout_ms}ms endpoint=${endpoint}`,
+    detail: `provider=${cfg.provider} mode=${cfg.mode} model=${model} threshold=${cfg.threshold} timeout=${cfg.timeout_ms}ms endpoint=${endpoint}`,
     severity: "info",
   });
-  let urlOk = true;
-  try {
-    const url = new URL(endpoint);
-    urlOk = url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    urlOk = false;
+  if (cfg.provider === "typesafe") {
+    let urlOk = true;
+    try {
+      const url = new URL(endpoint);
+      urlOk = url.protocol === "https:" || url.protocol === "http:";
+    } catch {
+      urlOk = false;
+    }
+    if (!urlOk) checks.push({ name: "jev base_url", ok: false, detail: `${JSON.stringify(cfg.base_url)} is not an http(s) URL` });
+  } else if (cfg.base_url.trim()) {
+    checks.push({ name: "jev base_url", ok: true, detail: "ignored with provider: cloudflare — use jev.cloudflare.gateway to route through AI Gateway", severity: "warn" });
   }
-  if (!urlOk) checks.push({ name: "jev base_url", ok: false, detail: `${JSON.stringify(cfg.base_url)} is not an http(s) URL` });
-  const keySet = Boolean(env[cfg.api_key_env]?.trim());
+  const names = jevCredentialEnvs(cfg);
+  const missing = missingJevCredentials(cfg, env);
   checks.push({
     name: "jev api key",
     ok: true, // a missing key degrades every decision to its fallback (reason no_api_key) — never a hard failure
-    detail: keySet ? `${cfg.api_key_env} is set` : `${cfg.api_key_env} is not set — every Jev decision will fall back (reason: no_api_key)`,
-    severity: keySet ? "info" : "warn",
+    detail: missing.length === 0 ? `${names.join(", ")} set` : `${notSet(missing)} — every Jev decision will fall back (reason: no_api_key)`,
+    severity: missing.length === 0 ? "info" : "warn",
   });
   for (const kind of Object.keys(cfg.decisions).sort()) {
     const policy = resolveDecisionPolicy(cfg, kind);

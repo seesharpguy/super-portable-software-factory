@@ -20,6 +20,7 @@ import { JevConfigSchema, SFConfigSchema, type JevConfig } from "../core/data_ty
 import { loadConfig } from "../core/agents.js";
 import { Tracer } from "../core/tracer.js";
 import {
+  CloudflareJevClient,
   FALLBACK_REASONS,
   HttpJevClient,
   JEV_DECISION_EVENT,
@@ -30,8 +31,11 @@ import {
   findRecordedDecision,
   isValidOptionSet,
   jevDoctorChecks,
+  jevCloudflareEndpoint,
   jevEndpoint,
   listRecordedDecisions,
+  missingJevCredentials,
+  normalizeJevConfig,
   optionSetProblem,
   parseDecisionExtras,
   parseRecordedDecision,
@@ -440,12 +444,73 @@ test("jev: HttpJevClient POSTs {model,state,questions} to <base>/systemone with 
   assert.doesNotMatch(failed.detail, /sk-test/);
 });
 
+// ── CloudflareJevClient (fake fetch — never the real network) ───────────────
+
+test("jev: CloudflareJevClient POSTs {state,questions} (no model) to Workers AI /ai/run/typesafe/jev and unwraps {result}", async () => {
+  assert.equal(jevCloudflareEndpoint("acct1", ""), "https://api.cloudflare.com/client/v4/accounts/acct1/ai/run/typesafe/jev");
+  assert.equal(jevCloudflareEndpoint("acct1", "my-gw"), "https://gateway.ai.cloudflare.com/v1/acct1/my-gw/workers-ai/typesafe/jev");
+  const seen: Array<{ url: string; init: RequestInit }> = [];
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    seen.push({ url, init });
+    const result = { model: "jev-1.13.0", answers: { q0: { type: "choice", choice: "high", confidence: 0.95 } }, usage: { input_tokens: 10, output_tokens: 2 } };
+    return new Response(JSON.stringify({ result, success: true, errors: [], messages: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const client = new CloudflareJevClient({ apiToken: "cf-test", accountId: "acct1", gateway: "my-gw", fetchImpl });
+  const d = await createJev({ config: enabled({ mode: "act", provider: "cloudflare" }), client }).decide(riskRequest());
+  assert.equal(d.choice, "high");
+  assert.equal(d.model, "jev-1.13.0");
+  assert.equal(seen[0]!.url, "https://gateway.ai.cloudflare.com/v1/acct1/my-gw/workers-ai/typesafe/jev");
+  assert.equal((seen[0]!.init.headers as Record<string, string>).authorization, "Bearer cf-test");
+  assert.deepEqual(Object.keys(JSON.parse(seen[0]!.init.body as string)), ["state", "questions"]);
+});
+
+test("jev: CloudflareJevClient — success:false, non-2xx, and a bare (unenveloped) answer", async () => {
+  const respond = (body: unknown, status = 200) =>
+    new CloudflareJevClient({ apiToken: "cf-secret", accountId: "a", fetchImpl: (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch });
+  const act = (client: CloudflareJevClient) => createJev({ config: enabled({ mode: "act", provider: "cloudflare" }), client }).decide(riskRequest());
+
+  const refused = await act(respond({ result: null, success: false, errors: [{ code: 5007, message: "No such model" }] }));
+  assert.equal(refused.reason, "error");
+  assert.match(refused.detail, /No such model/);
+
+  const denied = await act(respond({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }, 403));
+  assert.equal(denied.reason, "error");
+  assert.match(denied.detail, /HTTP 403/);
+  assert.doesNotMatch(denied.detail, /cf-secret/);
+
+  const bare = await act(respond({ model: "jev-1.13.0", answers: { q0: { type: "choice", choice: "low", confidence: 0.9 } } }));
+  assert.equal(bare.choice, "low");
+});
+
+test("jev: provider cloudflare with credentials unset => no_api_key naming BOTH env vars; doctor reports provider + endpoint", async () => {
+  const d = await createJev({ config: enabled({ mode: "act", provider: "cloudflare" }), env: {} }).decide(riskRequest());
+  assert.equal(d.reason, "no_api_key");
+  assert.match(d.detail, /CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID are not set/);
+
+  const checks = jevDoctorChecks(enabled({ provider: "cloudflare", cloudflare: { gateway: "gw" } as JevConfig["cloudflare"] }), { CLOUDFLARE_API_TOKEN: "t", CLOUDFLARE_ACCOUNT_ID: "acct9" });
+  const head = checks.find((c) => c.name === "jev")!;
+  assert.match(head.detail, /provider=cloudflare/);
+  assert.match(head.detail, /model=typesafe\/jev/);
+  assert.match(head.detail, /gateway\.ai\.cloudflare\.com\/v1\/acct9\/gw\/workers-ai\/typesafe\/jev/);
+  assert.equal(checks.find((c) => c.name === "jev api key")!.severity, "info");
+  assert.deepEqual(missingJevCredentials(normalizeJevConfig(enabled({ provider: "cloudflare" })), { CLOUDFLARE_API_TOKEN: "t" }), ["CLOUDFLARE_ACCOUNT_ID"]);
+});
+
+test("jev config: provider defaults to typesafe; cloudflare block defaults to spf's existing Cloudflare env var names", () => {
+  const cfg = normalizeJevConfig({});
+  assert.equal(cfg.provider, "typesafe");
+  assert.deepEqual(cfg.cloudflare, { account_id_env: "CLOUDFLARE_ACCOUNT_ID", api_token_env: "CLOUDFLARE_API_TOKEN", gateway: "", model: "typesafe/jev" });
+  assert.throws(() => v.parse(JevConfigSchema, { provider: "openai" }));
+});
+
 // ── config ─────────────────────────────────────────────────────────────────
 
 test("jev config: defaults — off, shadow, jev-latest, 0.7, 2000ms, TYPESAFE_API_KEY, official endpoint", () => {
   const cfg = v.parse(SFConfigSchema, {});
   assert.deepEqual(cfg.jev, {
     enabled: false,
+    provider: "typesafe",
+    cloudflare: { account_id_env: "CLOUDFLARE_ACCOUNT_ID", api_token_env: "CLOUDFLARE_API_TOKEN", gateway: "", model: "typesafe/jev" },
     mode: "shadow",
     model: "jev-latest",
     threshold: 0.7,
