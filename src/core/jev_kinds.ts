@@ -122,6 +122,34 @@ export const FINDING_TRIAGE_KIND = defineJevKind({
 });
 
 /**
+ * `spf watch`'s build-lane revision loop (#108): what the new PR comments
+ * behind a `<prefix>:feedback` label actually ask for. Only `revise` runs
+ * the chain again — the heuristic (and today's behavior) for every claim.
+ * Resolved in `core/watch.ts`'s `runIssueSingle`; see docs/jev.md.
+ */
+export const INTAKE_FEEDBACK_OPTIONS = ["revise", "question", "approve", "out_of_scope"] as const;
+export const INTAKE_FEEDBACK_KIND = defineJevKind({
+  kind: "intake_feedback",
+  summary: "classify spf:feedback PR comments (revise|question|approve|out_of_scope); only revise reruns the chain",
+  question: "choice",
+  options: INTAKE_FEEDBACK_OPTIONS,
+});
+
+/**
+ * `spf watch`'s pre-claim readiness router (#108): build a `<prefix>:ready`
+ * issue as-is (the heuristic, and today's behavior), hand it to the refine
+ * lane (`spec-ready`, only while `watch.refine.enabled`), or block it for a
+ * human. Resolved in `core/watch.ts`'s `claimNewWork`; see docs/jev.md.
+ */
+export const INTAKE_READINESS_OPTIONS = ["build", "refine", "needs_human"] as const;
+export const INTAKE_READINESS_KIND = defineJevKind({
+  kind: "intake_readiness",
+  summary: "route a ready issue before claiming it (build|refine|needs_human); refine only while watch.refine.enabled",
+  question: "choice",
+  options: INTAKE_READINESS_OPTIONS,
+});
+
+/**
  * `loop_control` (ticket #105): after a FAILED round of `fixLoop`/
  * `reviseLoop` (`chains/steps.ts`), and only when another repair round would
  * otherwise run, what should the loop do next? The fallback is `continue`
@@ -178,14 +206,16 @@ export const RISK_TIER_KIND = defineJevKind({
 });
 
 /**
- * EMPTY in the core commit on purpose. Each feature PR inserts exactly ONE
- * line — its spec constant plus a trailing comma — keeping the list
- * alphabetical by kind.
+ * EMPTY in the core commit on purpose. Each feature PR inserts ONE line per
+ * kind it adds — its spec constant plus a trailing comma — keeping the list
+ * alphabetical by kind (#108 registers two kinds, so two lines).
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
   CHAIN_ROUTER_KIND,
   FINDING_TRIAGE_KIND,
+  INTAKE_FEEDBACK_KIND,
+  INTAKE_READINESS_KIND,
   LOOP_CONTROL_KIND,
   RISK_TIER_KIND,
 ];

@@ -257,6 +257,29 @@ export interface WatchMarker {
   split?: { specs: SpecSplit[]; proposed_at: string; rounds: number };
   revision?: { rounds: number; since: string };
   chain?: string;
+  /**
+   * Set only by the Jev intake readiness router (`watch.ts`'s
+   * `routeReadiness`, #108) when it moved a `ready` issue AWAY from the
+   * build lane (`refine` -> `spec-ready`, `needs_human` -> `blocked`). Its
+   * mere presence — like any marker at all — makes the router stand down on
+   * that issue for good: a human who relabels it `ready` has overruled the
+   * router, and the next claim builds it as-is. Overwritten (dropped) by the
+   * build lane's own claim-time marker write, like every other lane field.
+   */
+  intake?: { routed: "refine" | "needs_human"; at: string };
+  /**
+   * Set only by the Jev intake feedback classifier (`watch.ts`'s
+   * `classifyFeedback`, #108) when an act-mode answer other than `revise`
+   * declined to rerun the chain: the decision `key` it answered
+   * (`pr<n>:r<round>:<last comment id>`) and that answer. A later
+   * `<prefix>:feedback` claim whose key is the SAME — the human re-added the
+   * label without writing a new PR comment — is the human overruling the
+   * classifier, so it revises with no Jev call (the readiness router's own
+   * "speaks once" rule). Written over the prior marker with every other
+   * field kept; dropped by the revision run's own marker write, whose new
+   * round changes the key anyway.
+   */
+  intake_feedback?: { key: string; intent: "question" | "approve" | "out_of_scope"; at: string };
 }
 
 /** What `ensureLabels()` actually did, per label — for `spf watch init`'s report. */

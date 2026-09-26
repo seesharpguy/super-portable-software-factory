@@ -21,15 +21,15 @@ import type { CodeHostProvider, IssueProvider } from "../../core/issues/provider
 import * as refineLib from "../../core/refine.ts";
 import { createWatchState, tick, type ChainRunResult, type RefineRunResult, type WatchDeps, type WatchFanoutDeps } from "../../core/watch.ts";
 import { chainRouteReplay, routeChain, type RoutableChain } from "../../core/chain_router.ts";
-import { createJev, findRecordedDecision, parseDecisionExtras, traceDecisionRecorder, type Decision, type JevClient } from "../../core/jev.ts";
-import { CHAIN_ROUTER_KIND } from "../../core/jev_kinds.ts";
+import { createJev, findRecordedDecision, parseDecisionExtras, traceDecisionRecorder, type Decision, type Jev, type JevClient } from "../../core/jev.ts";
+import { CHAIN_ROUTER_KIND, INTAKE_FEEDBACK_KIND, INTAKE_READINESS_KIND } from "../../core/jev_kinds.ts";
 import { Tracer } from "../../core/tracer.ts";
 import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
 import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
 import type { AttemptDispatch, AttemptMetrics } from "../../core/fanout.ts";
-import { ReviewOutput, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
+import { ReviewOutput, type JevConfig, type ReviewOutputT, type SFConfig } from "../../core/data_types.ts";
 import type { DataPaths } from "../../core/paths.ts";
 import { SfDb } from "../../ui/server/db.ts";
 import { acquirePidLock, parseCli, releasePidLock } from "../../core/utils.ts";
@@ -525,6 +525,35 @@ export function makeWatchChainRouter(
   };
 }
 
+/**
+ * `WatchDeps.intakeJev` for the running daemon (Jev watch intake, #108), or
+ * `undefined` — and then NOTHING is opened, built or called — whenever
+ * `jev.enabled` is false (the default) or both intake kinds resolve to
+ * `off`. The watch lane has no `Run` (and so no `run.jev`/`run.tracer`)
+ * before an issue is claimed, so this opens ONE daemon-lifetime `Tracer` on
+ * the same trace db every chain run uses, and hands each issue a `Jev`
+ * recording under that issue's own adw_id (`issue-<id>`, the id its chain
+ * run will reuse): `spf ui`, `findRecordedDecision` and
+ * `listRecordedDecisions` see an intake decision beside the run it led to.
+ * The JSONL twin of those rows goes to `<data_dir>/watch/jev_events.jsonl`
+ * — a Tracer has one JSONL path, and no session directory exists yet for
+ * an issue routed away before it ever runs. `close()` releases the db
+ * handle; `watchCommand` calls it on exit. Exported for its test.
+ */
+export async function openWatchIntakeJev(
+  jevConfig: JevConfig,
+  dataPaths: Pick<DataPaths, "db" | "data_dir">,
+): Promise<{ intakeJev: (adwId: string) => Jev; close: () => Promise<void> } | undefined> {
+  const base = createJev({ config: jevConfig, recorder: null });
+  if (!base.enabled) return undefined;
+  if ([INTAKE_FEEDBACK_KIND, INTAKE_READINESS_KIND].every((k) => base.policy(k.kind).mode === "off")) return undefined;
+  const tracer = await Tracer.open(dataPaths.db, path.join(dataPaths.data_dir, "watch", "jev_events.jsonl"));
+  return {
+    intakeJev: (adwId) => base.withRecorder(traceDecisionRecorder(tracer, adwId)),
+    close: () => tracer.close(),
+  };
+}
+
 export async function watchCommand(argv: string[]): Promise<number> {
   const { options, flags } = parseCli(argv, ["cwd", "config"], ["dry-run", "once"]);
   const anchor = paths.resolveAnchor(options["cwd"]);
@@ -687,6 +716,17 @@ export async function watchCommand(argv: string[]): Promise<number> {
     acquireLock(lockPath);
   } catch (error) {
     console.error((error as Error).message);
+    return 1;
+  }
+
+  // Jev watch intake (#108) — `undefined` (nothing opened) unless `jev.enabled`
+  // and at least one intake kind isn't `off`; see `openWatchIntakeJev`.
+  let intake: Awaited<ReturnType<typeof openWatchIntakeJev>>;
+  try {
+    intake = await openWatchIntakeJev(cfg.jev, dataPaths);
+  } catch (error) {
+    releaseLock(lockPath);
+    console.error(`watch: could not open the trace db for Jev intake decisions: ${(error as Error).message}`);
     return 1;
   }
 
@@ -962,6 +1002,7 @@ export async function watchCommand(argv: string[]): Promise<number> {
             ...makeWatchFanoutDispatch(cfg, configPaths, dataPaths, findChain(cfg.watch.chain)!), // checked at startup
           }
         : undefined,
+    intakeJev: intake?.intakeJev,
   };
 
   const state = createWatchState();
@@ -1053,5 +1094,6 @@ export async function watchCommand(argv: string[]): Promise<number> {
     process.off("SIGTERM", stop);
     releaseLock(lockPath);
     await dashboard?.close();
+    await intake?.close().catch(() => undefined);
   }
 }
