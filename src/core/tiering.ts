@@ -15,8 +15,11 @@
  * ── The mechanism, in one paragraph ─────────────────────────────────────
  * A run's `risk` (`low`/`standard`/`high`) is a single run-global scalar,
  * classified once from the chain's name and the prompt's word count
- * (`classifyRisk`). Separately, `tiering.roles` names a baseline tier per
- * ROLE (an agent name) on `tiering.tiers`, a ladder ordered weakest first.
+ * (`classifyRisk`) — or, when `startRun` passes in a Jev `risk_tier`
+ * decision (`TierInput.riskDecision`, #104), that decision's effective
+ * choice, with `classifyRisk` as its fallback. Separately,
+ * `tiering.roles` names a baseline tier per ROLE (an agent name) on
+ * `tiering.tiers`, a ladder ordered weakest first.
  * `resolveTiering` shifts every routed role's baseline by the SAME step in
  * the SAME direction (down for `low`, up for `high`), walking down to the
  * nearest rung that is both available (§ probe) and backend-compatible
@@ -27,6 +30,9 @@
  */
 
 import type { AgentConfig, SFConfig, Tier } from "./data_types.ts";
+// TYPE-ONLY (erased at runtime): `resolveTiering` takes a Jev `Decision` as
+// DATA and never calls Jev itself — see `TierInput.riskDecision`.
+import type { Decision } from "./jev.ts";
 import { ollamaApiKey, ollamaBaseUrl } from "./ollama_provider.ts";
 
 // ── the classifier (design doc §2) ──────────────────────────────────────────
@@ -111,6 +117,16 @@ export function classifyRisk(chainName: string, prompt: string): { risk: Risk; s
 
 // ── resolution (design doc §4) ───────────────────────────────────────────────
 
+/**
+ * The fields of a Jev `risk_tier` decision (#104) that tiering reads and
+ * reports — a structural subset of `Decision<Risk>`, so the caller passes
+ * the whole `Decision` and this module keeps only what it needs.
+ */
+export type RiskDecision = Pick<
+  Decision<Risk>,
+  "kind" | "key" | "choice" | "jev_choice" | "confidence" | "fallback" | "used_fallback" | "reason" | "mode" | "would_act" | "replayed"
+>;
+
 /** PURE input — no `Run`, no `ChainContext`. `required` scopes everything: an agent no phase in this run will dispatch is neither routed nor reported. */
 export interface TierInput {
   cfg: SFConfig;
@@ -119,6 +135,18 @@ export interface TierInput {
   /** `null` == "not probed / probe failed" == fail open, drop nothing. */
   servedOllamaTags: Set<string> | null;
   required: string[];
+  /**
+   * A Jev `risk_tier` decision resolved OUTSIDE this module (once, in
+   * `startRun` — or replayed from the trace by `spf estimate`), passed in as
+   * data so this function stays pure. Its EFFECTIVE `choice` replaces
+   * `classifyRisk`'s answer as `risk`; `signals` stay the heuristic's (they
+   * are what the fallback was computed from). Omitted / `null` — Jev off
+   * for this kind, tiering off, or no replay — means the heuristic alone,
+   * and a resolution byte-identical to the pre-Jev one (no `jev` key).
+   * A `choice` outside the three risks is ignored (heuristic acts): data
+   * from a trace row is never trusted to index `RISK_STEP`.
+   */
+  riskDecision?: RiskDecision | null;
 }
 
 export interface TierRoute {
@@ -142,6 +170,13 @@ export interface TierResolution {
   routing: Record<string, TierRoute>;
   /** One line per degradation or non-routable role. Empty when tiering is disabled or has nothing to say. */
   notes: string[];
+  /**
+   * The Jev `risk_tier` decision `risk` came from — present ONLY when the
+   * input carried a usable `riskDecision` (see `TierInput.riskDecision`).
+   * `jev.used_fallback` true means the heuristic still acted (shadow mode,
+   * low confidence, timeout, ...): `risk === jev.fallback` then.
+   */
+  jev?: RiskDecision;
 }
 
 const RISK_STEP: Record<Risk, number> = { low: -1, standard: 0, high: 1 };
@@ -169,12 +204,18 @@ function usable(tier: Tier, agent: AgentConfig, servedOllamaTags: Set<string> | 
  * severity, this owns detection.
  */
 export function resolveTiering(input: TierInput): TierResolution {
-  const { cfg, chainName, prompt, servedOllamaTags, required } = input;
-  const { risk, signals } = classifyRisk(chainName, prompt);
+  const { cfg, chainName, prompt, servedOllamaTags, required, riskDecision } = input;
+  const heuristic = classifyRisk(chainName, prompt);
+  const signals = heuristic.signals;
+  const jev = riskDecision && Object.hasOwn(RISK_STEP, riskDecision.choice) ? pickRiskDecision(riskDecision) : undefined;
+  const risk: Risk = jev ? jev.choice : heuristic.risk;
   const routing: Record<string, TierRoute> = {};
   const notes: string[] = [];
+  // Conditional insertion, never `jev: undefined` — a resolution with no
+  // decision must deep-equal the pre-Jev shape exactly (invariant 1).
+  const withJev = (res: TierResolution): TierResolution => (jev ? { ...res, jev } : res);
 
-  if (!cfg.tiering.enabled) return { risk, signals, routing, notes };
+  if (!cfg.tiering.enabled) return withJev({ risk, signals, routing, notes });
 
   const step = RISK_STEP[risk];
   for (const agentName of required) {
@@ -208,7 +249,24 @@ export function resolveTiering(input: TierInput): TierResolution {
     routing[agentName] = { tier: tier.name, configured: agent.model, effective: tier.model };
   }
 
-  return { risk, signals, routing, notes };
+  return withJev({ risk, signals, routing, notes });
+}
+
+/** Copy only `RiskDecision`'s own fields — a full `Decision` carries probabilities, usage, a digest, ... that the tiering event and `spf estimate` do not need to repeat (the `jev_decision` row has them). */
+function pickRiskDecision(d: RiskDecision): RiskDecision {
+  return {
+    kind: d.kind,
+    key: d.key,
+    choice: d.choice,
+    jev_choice: d.jev_choice,
+    confidence: d.confidence,
+    fallback: d.fallback,
+    used_fallback: d.used_fallback,
+    reason: d.reason,
+    mode: d.mode,
+    would_act: d.would_act,
+    replayed: d.replayed,
+  };
 }
 
 /**

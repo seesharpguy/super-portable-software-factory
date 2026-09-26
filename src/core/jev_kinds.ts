@@ -80,8 +80,37 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 }
 
 // ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
-//
-// (none yet: the rails ship before any feature depends on them)
+
+/**
+ * `risk_tier` (#104) — the run's tiering risk (`core/tiering.ts`'s `Risk`),
+ * decided once in `startRun` (`core/risk_tier.ts`) over this closed set, in
+ * `tiering.ts`'s own ladder order (weakest first). Fallback: the
+ * `classifyRisk` heuristic (chain weight + prompt word count).
+ *
+ * `extras`:
+ *  - `max_risk` — the highest risk Jev's answer may ACT on (the
+ *    `permitted` ceiling). The heuristic's own answer is always permitted,
+ *    so this caps Jev-driven escalation only, never the heuristic's.
+ *  - `max_prompt_chars` — how much of the prompt goes into Jev's `state`
+ *    (the head of it; the rest is dropped and flagged). `0` sends none.
+ */
+/**
+ * The risk VALUES (strings) — not to be confused with `core/risk_tier.ts`'s
+ * `RISK_TIER_OPTIONS` (the `JevOption[]` built from these). `risk_tier.ts`
+ * asserts at compile time that this tuple and `tiering.ts`'s `Risk` name
+ * exactly the same set, in both directions.
+ */
+export const RISK_TIER_VALUES = ["low", "standard", "high"] as const;
+export const RISK_TIER_KIND = defineJevKind({
+  kind: "risk_tier",
+  summary: "classify a run's risk (low|standard|high) for tiering; fallback = chain-weight + prompt-length heuristic",
+  question: "choice",
+  options: RISK_TIER_VALUES,
+  extras: v.object({
+    max_risk: v.optional(v.picklist(RISK_TIER_VALUES), "high"),
+    max_prompt_chars: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(200_000)), 4_000),
+  }),
+});
 
 /**
  * EMPTY in the core commit on purpose. Each feature PR inserts exactly ONE
@@ -90,6 +119,7 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  RISK_TIER_KIND,
 ];
 
 /** Index specs by kind; a kind registered twice throws (at module load, for `REGISTERED`). Exported for its test. */

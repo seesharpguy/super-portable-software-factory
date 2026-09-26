@@ -41,6 +41,19 @@ record independent of the commit log.
 
 <!-- One bullet per kind (feature ticket under epic #102), alphabetical by kind. -->
 
+- **`risk_tier`** (#104): Jev can classify a run's tiering risk
+  (`low | standard | high`) once in `startRun`. The fallback is the existing
+  chain-weight + prompt-length heuristic. It is only asked when tiering is
+  enabled. The pure `resolveTiering` takes the decision as data. The
+  `tiering` trace event carries a `jev` summary. `jev.decisions.risk_tier`
+  adds `max_risk` (a ceiling on escalation driven by Jev) and
+  `max_prompt_chars`. `spf estimate` says where its risk came from, and
+  `--replay-risk <adw_id>` reuses a recorded decision without calling Jev.
+  A run resumed under the same `adw_id` and chain replays its own decision
+  instead of asking again. When the kind is live, the head of the prompt
+  (up to `max_prompt_chars`) is sent to Jev; `max_prompt_chars: 0` sends
+  only the chain name and the heuristic's signals.
+
 ### Changed — OpenTelemetry: real SDK encoder, process-scoped metrics, outbound propagation
 
 - **`core/otel.ts`**: the hand-rolled OTLP/HTTP-JSON span encoder is

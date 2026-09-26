@@ -1,8 +1,9 @@
 # Jev in spf
 
-**Status:** rails only. The config, client, policy, trace event, and doctor
-checks ship first, and no decision kind uses them yet. Each feature ticket
-under epic #102 adds one kind and a subsection under [Decisions](#decisions).
+**Status:** the rails (config, client, policy, trace event, doctor checks)
+plus the decision kinds listed under [Decisions](#decisions); `risk_tier`
+(#104) is the first live kind. Each feature ticket under epic #102 adds one
+kind and a subsection there.
 Core ticket: #103. Background: [`brainstorms/jev-in-the-factory.md`](brainstorms/jev-in-the-factory.md).
 
 ## What Jev is
@@ -71,7 +72,7 @@ jev:
       mode: act             # off | shadow | act
       threshold: 0.8
       timeout_ms: 500
-      include_diffstat: true   # a feature-specific key, validated by that feature
+      max_risk: standard    # a feature-specific key, validated by that feature
 ```
 
 - **Merge across config layers.** Top-level keys merge key by key, so an
@@ -228,6 +229,96 @@ what acting on it can and cannot do, and any `jev.decisions.<kind>`
 settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
+
+### `risk_tier`
+
+Classifies a run's risk for tiering (#104). Code: `src/core/risk_tier.ts`.
+
+- **Kind:** `risk_tier`, a `choice` question.
+- **Options:** `low | standard | high`, in ladder order, weakest first. The
+  set is closed and built from `RISK_TIER_KIND.options`.
+- **Fallback:** the existing `classifyRisk` heuristic in
+  `src/core/tiering.ts`, which adds chain weight and prompt word count. It is
+  computed on every call, act mode included.
+- **Where it is resolved:** once per `startRun` call in
+  `src/chains/steps.ts`, before any phase opens.
+  - `phase_id` is `""` (run-scoped).
+  - `key` is the chain name, so a joined session's second `startRun` under
+    a different chain has its own key.
+  - The `Decision` goes into the pure `resolveTiering` as data
+    (`TierInput.riskDecision`). `resolveTiering` never calls Jev.
+  - The Jev call runs concurrently with the ollama tag probe, so it adds at
+    most `max(probe, timeout_ms)` to run start, not their sum.
+  - **Resume:** a run that re-enters `startRun` under the same `adw_id` and
+    chain (the watch lane's continue-refinement resume, the build lane's
+    `spf:feedback` loop) replays that run's own latest `risk_tier` decision
+    instead of asking Jev again, so both halves of one run route from the
+    same answer. The replay is judged again under today's policy and
+    `max_risk`, and is recorded as another row with `replayed: true`. It is
+    used only when the question is the same (same options and same
+    heuristic fallback). A resumed prompt that lands in a different
+    word-count bucket is a new question, so it is asked live and recorded.
+- **When it is asked at all:** only when `jev.enabled` is true, the kind's
+  mode is not `off`, and `tiering.enabled` is true. Risk changes nothing but
+  tiering's routing, so with tiering off no call is spent. If any of the
+  three is false, no call is made, no `jev_decision` row is written, the
+  extras are not parsed, and the `tiering` event is unchanged.
+- **Trace:** the full decision is its own `jev_decision` row. The existing
+  `tiering` log event also carries a compact `jev` summary: `choice`,
+  `jev_choice`, `confidence`, `fallback`, `used_fallback`, `reason`,
+  `mode`, `would_act`, `replayed`, `kind` and `key`. `risk` in that event is
+  the effective risk, and `signals` are still the heuristic's. A console
+  note is printed only when Jev's answer moved the risk off the heuristic's.
+- **`spf estimate`** never calls Jev. By default it uses the heuristic. With
+  `--replay-risk <adw_id>`, it replays the decision that run recorded for
+  this chain, judged again under today's policy, with no call and no row
+  written. When `risk_tier` is live for the config, or a replay is asked
+  for, the report says which source it used: `risk_source` in `--json`, and
+  a `risk from` line in text. A replay only matches when today's heuristic
+  gives the same fallback (same chain, and a prompt in the same word-count
+  bucket). Otherwise the reason is `replay_missing` and the heuristic acts.
+  A recording above today's `max_risk` replays as `not_permitted`. Invalid
+  `risk_tier` extras with `--replay-risk` exit 1 with the
+  `jev.decisions.risk_tier: ...` config error. With no trace db under
+  `--cwd`, the detail says there is nothing to replay.
+- **What acting on it can do:** pick which rung of the operator's own
+  `tiering.tiers` ladder each routed role starts from. This is the same
+  one-step shift the heuristic makes.
+- **What it cannot do:**
+  - name a model, add a rung, or route a role that `tiering.roles` does not
+    name
+  - walk up past an unusable rung (the walk only goes down)
+  - raise `max_run_tokens` or `max_run_cost`, which are enforced as before
+  - act above `max_risk` (see below)
+- **Shadow mode:** Jev is asked and the answer is recorded, but the
+  heuristic's risk routes the run.
+- **What leaves the machine:** when the kind is live, Jev's `state` carries
+  the chain name, the heuristic's signals, and the head of the operator's
+  prompt (up to `max_prompt_chars`, default 4000). Prompts often embed issue
+  bodies and comment threads (the watch resume folds the whole thread in).
+  Set `max_prompt_chars: 0` to send only the chain name and the signals.
+- **Config validation:** `startRun` validates the extras only when the kind
+  is live, which includes `tiering.enabled`. With tiering off the extras are
+  never read, so an invalid `max_risk` does not fail a run (a feature that
+  is off is a no-op). `spf doctor` validates them regardless, so it catches
+  a latent typo before tiering is turned on.
+
+Extras, under `jev.decisions.risk_tier`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_risk` | `high` | The highest risk Jev's answer may act on (the `permitted` ceiling). The heuristic's own answer is always permitted, so this caps escalation driven by Jev and never lowers what the run would get without Jev. |
+| `max_prompt_chars` | `4000` | How much of the prompt, from the start, goes into Jev's `state`. The rest is dropped and flagged `prompt_truncated`. `0` sends no prompt text. Integer, 0 to 200000. |
+
+```yaml
+jev:
+  enabled: true
+  decisions:
+    risk_tier: { mode: act, threshold: 0.8, max_risk: standard }
+tiering:
+  enabled: true
+  # tiers / roles as usual
+```
 
 ## Wire format and caveats
 
