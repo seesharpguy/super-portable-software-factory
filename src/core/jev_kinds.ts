@@ -82,6 +82,19 @@ export function defineJevKind<Extras = unknown>(spec: JevDecisionKindSpec<Extras
 // ── kind specs — one `defineJevKind` block per kind, ALPHABETICAL by kind ──
 
 /**
+ * `chain_edge` (#109): at a step of a repo graph chain that declares more
+ * than one `next:` edge, pick which declared edge to take. No static
+ * `options`: the closed set is that step's own declared edges, built by
+ * `chains/graph.ts` from the yaml. Fallback: the step's `default` edge. See
+ * docs/jev.md.
+ */
+export const CHAIN_EDGE_KIND = defineJevKind({
+  kind: "chain_edge",
+  summary: "pick the next step at a repo chain's branch point, among its declared next: edges only",
+  question: "choice",
+});
+
+/**
  * `spf watch`'s chain router (#107) — which operator-allowlisted chain
  * (`watch.chains`, plus the default `watch.chain`) builds a claimed issue.
  * No static `options`: the menu is built by CODE from `watch.chains` at
@@ -212,6 +225,7 @@ export const RISK_TIER_KIND = defineJevKind({
  */
 const REGISTERED: readonly JevDecisionKindSpec<any>[] = [
   // keep alphabetical by kind, one per line: MY_KIND,
+  CHAIN_EDGE_KIND,
   CHAIN_ROUTER_KIND,
   FINDING_TRIAGE_KIND,
   INTAKE_FEEDBACK_KIND,

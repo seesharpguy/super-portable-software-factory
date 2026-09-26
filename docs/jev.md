@@ -230,6 +230,73 @@ settings it adds.
 
 <!-- One "### `kind`" subsection per kind, ALPHABETICAL by kind. Insert yours in order; do not edit neighbors. -->
 
+### `chain_edge`
+
+Picks the next step at a branch point of a repo graph chain: a
+`.spf/chains/*.yaml` step that declares more than one `next:` edge. Ticket
+#109. Code: `src/chains/graph.ts`. How to author a graph chain:
+[`authoring_chains.md`](../assets/skill/cookbooks/authoring_chains.md#declared-transitions-next).
+
+- **Question and options.** A `choice` over that step's declared `next:`
+  step ids, in the order the yaml lists them. The set is built from the
+  yaml, so the kind declares no static `options`. Jev cannot name a step
+  the author did not list as an edge of that step.
+- **Fallback.** The step's `default:` edge. If `default:` is omitted, the
+  fallback is the linear next step, which the loader requires to be one of
+  the edges. If the fallback's target has used up its `max_visits`, the
+  first declared edge whose target has not becomes the fallback. This is
+  exactly the path the chain takes with no `jev:` block.
+- **Where it is resolved.** In `walkGraph` (called by `steps.runSteps`)
+  after the branch step finishes and before the next one starts, through
+  `run.jev`. `phase_id` is `""` because the decision sits between phases.
+  `key` is `<step id>#<visit>`, for example `triage#2` for the second time
+  `triage` ran. It is stable across runs and never a list index. The state
+  Jev sees is the chain name, the request (clipped), the path so far,
+  `accepted`/`reason`, the last envelope's status and summary, and the
+  last quality or review result in brief.
+- **`permitted`.** Only the edges whose target still has `max_visits` left.
+  When only one edge is open, Jev is not asked. When none is open, the walk
+  stops and the run is not accepted.
+- **What acting on it can do.** Jev can take a different declared edge.
+  That can run an extra check or review, loop back to a step for another
+  bounded attempt, or end the chain early at a `next: []` step.
+- **What it cannot do.** The loader rejects any graph in which that could
+  weaken the chain (invariant 6):
+  - every cycle must pass through a `max_visits` step, and `max_steps`
+    caps total step executions;
+  - no path may reach a `commit` without every gating step
+    (`qualityCheck`, `fixLoop`, `reviseLoop`: a `Step` with `gate: true`)
+    that the default path runs before it. A commit that only a Jev-picked
+    edge reaches is held to the gates the default path runs before its
+    first commit, or before its end if it never commits;
+  - a commit that only a Jev-picked edge reaches must be `onlyIfAccepted`;
+  - an `onlyIfAccepted` commit needs at least one gating step on every
+    path to it.
+
+  `spf fanout`, `watch.fanout` and `spf doctor` decide whether a graph
+  chain commits from its default path (`chainHasCommitStep`). A commit
+  that only Jev can reach does not make a chain eligible for fan-out.
+
+  At run time, `accepted` on a graph chain is the AND of each gating
+  step's latest result. A passing check Jev routes to therefore cannot
+  overwrite an earlier failure.
+- **Replay.** Every transition is a `chain_edge` log event, with
+  `from`/`to`/`via`/`visit` and, at a branch point, `key`, `options`,
+  `permitted` and `fallback`. Every walk also writes one `chain_path`
+  event holding the whole path. That includes a walk that ends because a
+  step threw, in which case `stopped` reads `threw: <message>`. To retrace
+  a run without calling Jev, pass
+  `walkGraph(run, state, graph, { replay: (key) => findRecordedDecision(db, adwId, "chain_edge", key) })`.
+  Replay is currently an API for tooling and tests only. `steps.runSteps`
+  does not pass a replay, and no CLI command (`spf trace`, `spf estimate`,
+  `spf watch`) re-drives a run from its recorded edges yet. Wiring a
+  `--replay <adw_id>` through `runSteps` is follow-up work. If the yaml
+  has changed since the recording so that a branch point's options differ,
+  the recorded decision does not match and replays as `replay_missing`.
+  The fallback edge then acts.
+- **Extras.** None. Tune it with `jev.decisions.chain_edge.{mode,threshold,timeout_ms}` only.
+
+
 ### `chain_router`
 
 Picks which chain builds an issue that `spf watch` claims. Ticket #107.

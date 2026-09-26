@@ -36,7 +36,7 @@ import {
   type AttemptMetrics,
   type FanoutAttempt,
 } from "../../core/fanout.ts";
-import { findChain, hasCommitStep, runChain as runChainDef } from "../../chains/index.ts";
+import { chainHasCommitStep, findChain, runChain as runChainDef } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
 import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
@@ -247,14 +247,15 @@ export async function fanoutCommand(argv: string[]): Promise<number> {
     console.error(`unknown chain: ${chainName} — run \`spf list\` to see every chain`);
     return 1;
   }
-  if (!hasCommitStep(chain.phases)) {
+  if (!chainHasCommitStep(chain)) {
     // A winner with no commit step leaves its payload ONLY as uncommitted
     // edits in the kept worktree — the branch this command hands back would
     // carry zero commits, so `git merge`/`git cherry-pick` would be a no-op,
     // and the printed `git worktree remove` cleanup line would DESTROY the
     // only copy of the work. Refuse up front rather than print a lie.
     console.error(
-      `spf fanout: "${chain.name}" has no commit phase (${chain.phases}) — its winner's branch would carry zero ` +
+      `spf fanout: "${chain.name}" has no commit phase${chain.graph ? " on its default path (what runs with Jev off or on any fallback)" : ""} ` +
+        `(${chain.phases}) — its winner's branch would carry zero ` +
         `commits, and the work would exist only as uncommitted edits in a worktree that "git worktree remove" ` +
         `would then destroy. Use a chain that commits (e.g. plan-build, plan-build-test, ` +
         `plan-build-test-quality, simple-sdlc), or a repo-local chain (.spf/chains/*.yaml) with a commit step.`,

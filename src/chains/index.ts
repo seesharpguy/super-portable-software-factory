@@ -32,6 +32,7 @@
  */
 import type { ChainContext } from "./context.ts";
 import * as steps from "./steps.ts";
+import { defaultPath, graphPhases, type ChainGraph } from "./graph.ts";
 import * as simpleSdlc from "./simple_sdlc.ts";
 import * as otel from "../core/otel.ts";
 import * as session from "../core/session.ts";
@@ -58,11 +59,36 @@ export interface ChainDefinition {
    * came from the repo.
    */
   source?: string;
+  /**
+   * Set only for a repo chain whose yaml declares `next:` edges (see
+   * `./graph.ts`): the same `steps`, walked along their declared edges. A
+   * chain without one runs its `steps` in order, exactly as before.
+   */
+  graph?: ChainGraph;
 }
 
 /** Chains eligible to fan out: their derived phase string must show at least one commit step. */
 export function hasCommitStep(phases: string): boolean {
   return phases.includes("git(commit");
+}
+
+/**
+ * Whether a chain commits on the path that is TRUSTED to run — the guard
+ * `spf fanout`, `watch.fanout` and `spf doctor` use to refuse a chain whose
+ * winner would carry zero commits.
+ *
+ * For a linear chain (every built-in, every repo chain without `next:`)
+ * that is exactly `hasCommitStep(chain.phases)`. A graph chain's `phases`
+ * lists EVERY step, including a commit that only a Jev-picked edge reaches,
+ * so it answers from the graph's DEFAULT path instead — what runs with Jev
+ * off, in shadow, and on every fallback. A commit Jev alone could route to
+ * is not a commit the guard may count on (invariant 3).
+ */
+export function chainHasCommitStep(chain: Pick<ChainDefinition, "phases" | "graph">): boolean {
+  if (!chain.graph) return hasCommitStep(chain.phases);
+  const graph = chain.graph;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return defaultPath(graph).path.some((id) => byId.get(id)?.commit != null);
 }
 
 /**
@@ -76,8 +102,8 @@ export function hasCommitStep(phases: string): boolean {
  * same `steps` array, same `runSteps` driver, one run path — or the
  * guarantees the built-ins are tested for stop applying to it.
  */
-export function stepChain(name: string, describe: string, list: steps.Step[]): ChainDefinition {
-  return {
+export function stepChain(name: string, describe: string, list: steps.Step[], graph?: ChainGraph): ChainDefinition {
+  const chain: ChainDefinition = {
     name,
     describe,
     phases: steps.derivePhases(list),
@@ -85,6 +111,14 @@ export function stepChain(name: string, describe: string, list: steps.Step[]): C
     requiredSuites: steps.deriveRequiredSuites(list),
     steps: list,
   };
+  // A graph chain's agents/suites are still derived over the whole list —
+  // the loader rejects a step no path reaches, so "every step" IS "every
+  // reachable step" — while its display string shows the declared edges.
+  if (graph) {
+    chain.phases = graphPhases(graph);
+    chain.graph = graph;
+  }
+  return chain;
 }
 
 export const CHAINS: ChainDefinition[] = [
@@ -266,7 +300,7 @@ export function resolveRequiredSuites(chain: ChainDefinition, options: Record<st
 export async function runChain(chain: ChainDefinition, ctx: ChainContext, options: Record<string, string> = {}): Promise<number> {
   try {
     if (chain.run) return await chain.run(ctx, options);
-    return await steps.runSteps(ctx, resolveRequiredAgents(chain, options), resolveRequiredSuites(chain, options), chain.steps!, options);
+    return await steps.runSteps(ctx, resolveRequiredAgents(chain, options), resolveRequiredSuites(chain, options), chain.steps!, options, chain.graph ?? null);
   } finally {
     // Both are no-ops for a one-shot `spf <chain>` invocation with no
     // explicit `--adw-id` (ctx.adw_id is null; the id session.ensure()

@@ -82,6 +82,7 @@ import { parseDecisionExtras, resolveDecisionPolicy } from "../core/jev.ts";
 import { JEV_DECISION_KINDS, RISK_TIER_KIND } from "../core/jev_kinds.ts";
 import type { CommitterIdentity } from "../core/git_helper.ts";
 import { capList, clipTail, createLoopControl } from "./loop_control.ts";
+import { walkGraph, type ChainGraph } from "./graph.ts";
 
 // ── shared state ─────────────────────────────────────────────────────────
 
@@ -126,16 +127,26 @@ export interface Step {
   requiredSuites?: string[] | ((options: Record<string, string>) => string[]);
   /** Display fragment for derivePhases() — e.g. "planner", "git(commit)". */
   label?: string;
+  /**
+   * True for a GATING step: one that writes `state.accepted`/`reason` (today
+   * qualityCheck, fixLoop, reviseLoop). Declared here, beside the step's
+   * other metadata, so the graph loader (`./repo_chains.ts` -> `./graph.ts`)
+   * derives which steps gate a commit from the step itself rather than from
+   * a hand-kept list of factory names a new writer could forget to join.
+   * `steps.test.ts` pins that every factory writing `state.accepted` sets it.
+   */
+  gate?: boolean;
 }
 
 function makeStep(
   fn: (run: Run, state: ChainState) => Promise<void>,
-  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: Step["requiredSuites"]; label?: string } = {},
+  meta: { requiredAgents?: Step["requiredAgents"]; requiredSuites?: Step["requiredSuites"]; label?: string; gate?: boolean } = {},
 ): Step {
   const step = fn as Step;
   step.requiredAgents = meta.requiredAgents;
   step.requiredSuites = meta.requiredSuites;
   step.label = meta.label;
+  if (meta.gate) step.gate = true;
   return step;
 }
 
@@ -657,6 +668,7 @@ export function qualityCheck(opts: { suite: string; description?: string } = { s
   return makeStep(fn, {
     requiredSuites: (options) => [options["suite"] ?? opts.suite],
     label: `code(${staticName})`,
+    gate: true,
   });
 }
 
@@ -781,6 +793,7 @@ export function fixLoop(
     requiredAgents: [owner],
     requiredSuites: (options) => [options["suite"] ?? opts.suite],
     label: `code(${staticStepName}) [-> ${owner}(fix) -> code(${staticStepName}) ...] bounded`,
+    gate: true,
   });
 }
 
@@ -915,6 +928,7 @@ export function reviseLoop(
   return makeStep(fn, {
     requiredAgents: [reviewer, builder],
     label: `${reviewer} [-> ${builder}(revise) -> ${reviewer} ...] bounded`,
+    gate: true,
   });
 }
 
@@ -1192,18 +1206,32 @@ export function derivePhases(steps: Step[]): string {
 
 // ── the driver ────────────────────────────────────────────────────────────
 
-/** Run a chain's step list start to finish: prologue, every step in order, then run.finish(). */
+/**
+ * Run a chain's step list start to finish: prologue, every step in order,
+ * then run.finish().
+ *
+ * `graph` is set only for a repo chain that declares `next:` edges (see
+ * `./graph.ts`): the steps are then walked along their declared edges, with
+ * Jev picking among a branch point's declared edges only, instead of in list
+ * order. Every chain without one — every built-in, and every repo chain with
+ * no `next:` — takes the unchanged loop below.
+ */
 export async function runSteps(
   ctx: ChainContext,
   requiredAgents: string[],
   requiredSuites: string[],
   steps: Step[],
   options: Record<string, string> = {},
+  graph: ChainGraph | null = null,
 ): Promise<number> {
   const run = await startRun(ctx, requiredAgents, requiredSuites);
   const state = makeState(ctx.prompt, options, ctx.issue_id ?? null);
-  for (const step of steps) {
-    await step(run, state);
+  if (graph) {
+    await walkGraph(run, state, graph);
+  } else {
+    for (const step of steps) {
+      await step(run, state);
+    }
   }
   return await run.finish(state.accepted, state.reason);
 }

@@ -24,7 +24,7 @@ import { chainRouteReplay, routeChain, type RoutableChain } from "../../core/cha
 import { createJev, findRecordedDecision, parseDecisionExtras, traceDecisionRecorder, type Decision, type Jev, type JevClient } from "../../core/jev.ts";
 import { CHAIN_ROUTER_KIND, INTAKE_FEEDBACK_KIND, INTAKE_READINESS_KIND } from "../../core/jev_kinds.ts";
 import { Tracer } from "../../core/tracer.ts";
-import { findChain, hasCommitStep, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
+import { chainHasCommitStep, findChain, resolveRequiredAgents, runChain as runChainDef, type ChainDefinition } from "../../chains/index.ts";
 import type { ChainContext } from "../../chains/context.ts";
 import { withRunScope } from "../../core/sandbox.ts";
 import { excludeSpfDataFromGit } from "../../core/worktree_data.ts";
@@ -312,7 +312,7 @@ export function makeWatchFanoutDispatch(
    * `chain` is set only when the Jev chain router routed this issue away
    * from `watch.chain` (`core/watch.ts`'s `resolveRoute`). The router's
    * menu is already filtered to commit chains for this lane; the
-   * `hasCommitStep` re-check here is defense in depth — a routed chain that
+   * `chainHasCommitStep` re-check here is defense in depth — a routed chain that
    * could not survive best-of-N is refused with a throw (the issue blocks
    * with the message) rather than run N times and discarded.
    */
@@ -320,7 +320,7 @@ export function makeWatchFanoutDispatch(
     if (!chain || chain === chainDef.name) return chainDef;
     const routed = findChain(chain);
     if (!routed) throw new Error(`chain router picked ${JSON.stringify(chain)}, which is not a registered chain`);
-    if (!hasCommitStep(routed.phases)) throw new Error(`chain router picked ${JSON.stringify(chain)}, which has no commit phase — not eligible for watch.fanout`);
+    if (!chainHasCommitStep(routed)) throw new Error(`chain router picked ${JSON.stringify(chain)}, which has no commit phase — not eligible for watch.fanout`);
     return routed;
   };
   const runAttempt = async (dispatch: AttemptDispatch, chain?: string): Promise<number> => {
@@ -405,7 +405,7 @@ export function makeWatchFanoutDispatch(
 
 /** A resolved chain as `core/chain_router.ts` sees it — plain data, with `commits` computed here, where the chain registry lives. */
 function routableChain(def: ChainDefinition): RoutableChain {
-  return { name: def.name, describe: def.describe, phases: def.phases, commits: hasCommitStep(def.phases) };
+  return { name: def.name, describe: def.describe, phases: def.phases, commits: chainHasCommitStep(def) };
 }
 
 /**
@@ -688,9 +688,10 @@ export async function watchCommand(argv: string[]): Promise<number> {
     // candidates outright and then block the issue anyway once the winner's
     // own empty diff is discovered.
     const watchChain = findChain(cfg.watch.chain)!; // already checked above
-    if (!hasCommitStep(watchChain.phases)) {
+    if (!chainHasCommitStep(watchChain)) {
       console.error(
-        `watch.fanout.n is ${cfg.watch.fanout.n} but watch.chain ${JSON.stringify(cfg.watch.chain)} has no commit phase ` +
+        `watch.fanout.n is ${cfg.watch.fanout.n} but watch.chain ${JSON.stringify(cfg.watch.chain)} has no commit phase` +
+          `${watchChain.graph ? " on its default path (what runs with Jev off or on any fallback)" : ""} ` +
           `(${watchChain.phases}) — best-of-N discards every losing attempt's worktree (uncommitted work included), ` +
           `so a chain that leaves its payload uncommitted would destroy N-1 candidates and then block the issue for ` +
           `an empty diff. Use a chain that commits (plan-build, plan-build-test, plan-build-test-quality, simple-sdlc, ` +
